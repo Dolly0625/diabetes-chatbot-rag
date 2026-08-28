@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>醫護唯讀入口｜糖尿病照護 Demo</title>
+  <style>:root{font-family:system-ui,-apple-system,sans-serif;color:#18212f;background:#f4f6fa}body{margin:0}.wrap{max-width:760px;margin:auto;padding:24px}.card{background:#fff;border:1px solid #dce2eb;border-radius:16px;padding:20px;margin:14px 0}h1{font-size:1.55rem}label{display:block;margin-top:12px;font-weight:650}input,button{box-sizing:border-box;width:100%;font:inherit;border-radius:10px;padding:12px;margin-top:6px}input{border:1px solid #aab4c3}button{border:0;background:#2457a6;color:white;font-weight:700;cursor:pointer}pre{white-space:pre-wrap;word-break:break-word;background:#eef1f6;padding:12px;border-radius:10px}.muted{color:#667085;font-size:.9rem}</style>
+</head>
+<body><main class="wrap"><h1>醫護唯讀入口</h1><p class="muted">僅能讀取病患主動提供、尚未過期且未被使用或撤銷的一次性授權。Demo 醫護名單由伺服器環境設定。</p>
+  <section class="card"><label for="cid">Demo 醫護 ID</label><input id="cid" autocomplete="username"><label for="token">病患分享碼</label><input id="token" autocomplete="off"><p><button id="redeem">讀取一次性摘要</button></p><pre id="result" aria-live="polite">尚未讀取</pre></section>
+  <section class="card" id="audit"><h2>存取紀錄</h2><p><button id="load-audit">載入我的存取紀錄</button></p><pre id="audit-result" aria-live="polite">尚未載入</pre></section>
+  <section class="card" id="policy"><h2>使用與安全界線</h2><p>摘要只供看診前快速閱讀，資料來源可能是病患自述或家屬觀察；內容不取代病史詢問、診斷、處方與醫護專業判斷。此入口沒有修改病患資料或列舉全部病患的 API。</p></section>
+</main><script>
+const out=document.querySelector('#result'),cid=()=>document.querySelector('#cid').value;document.querySelector('#redeem').onclick=async()=>{out.textContent='驗證中…';const r=await fetch('/api/clinician/share/redeem',{method:'POST',headers:{'content-type':'application/json','X-Demo-Clinician-Id':cid()},body:JSON.stringify({token:document.querySelector('#token').value})});out.textContent=JSON.stringify(await r.json(),null,2)};
+document.querySelector('#load-audit').onclick=async()=>{const out=document.querySelector('#audit-result');out.textContent='載入中…';const r=await fetch('/api/clinician/audit',{headers:{'X-Demo-Clinician-Id':cid()}});out.textContent=JSON.stringify(await r.json(),null,2)};
+</script></body></html>

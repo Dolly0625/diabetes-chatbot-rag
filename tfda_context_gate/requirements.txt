@@ -1,0 +1,21 @@
+# Phase 1 uses only the Python standard library.
+# LINE Bot / API runtime
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+line-bot-sdk>=3.14,<4
+python-dotenv>=1.0,<2
+pydantic>=2.8,<3
+
+# Phase 2/3 local retrieval and reranking dependencies:
+langchain-core
+langchain>=1.0
+langgraph
+langchain-community
+langchain-classic
+langchain-huggingface
+langchain-openrouter==0.1.0
+langchain-ollama
+sentence-transformers
+# A v0.1 prompt-injection guard; Qwen3Guard requires transformers>=4.51.0.
+transformers>=4.51.0
+torch

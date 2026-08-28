@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RetrievedChunkIntegrated",
+  "type": "object",
+  "description": "Multi-RAG 與 Contract Gate 對接之統一介面契約 Schema。校對版（2026/08/23，Preprocessing B 成員 Erich）：僅修正與 Graph schema v3 對不上的事實面內容——entities 物件化、補回 condition / confidence / negation_checked / additional_sources、修正 object_type enum 遺漏 Symptom 與 Intervention、retriever==graph 時條件必填。欄位命名、必填清單、score 歸一化等原有設計皆未更動。",
+  "properties": {
+    "chunk_id": {
+      "type": "string",
+      "description": "唯一識別碼，格式為 {retriever}_{source_code}_{id}。[TBD-需與 Preprocessing A/B 對齊] Preprocessing A 目前實際產出為 'tfda-risk-035_sec4_04'（無 retriever 前綴），兩邊需擇一統一，且 source_code 的取值規則需定義。"
+    },
+    "source": {
+      "type": "string",
+      "description": "資料來源權威機構或文獻名稱。跨法規機關引用時須標明機關別（例：'openFDA Metformin 仿單（美國 FDA，交叉引用）'），對應 Boundary A 的 Source Boundary。"
+    },
+    "version": {
+      "type": "string",
+      "description": "資料版本號"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "description": "資料發布/更新日期 (YYYY-MM-DD)。[TBD] 兩條 Preprocessing 管道目前皆輸出 '2016/7/14' 格式，需在管道端正規化後才能通過本項驗證。"
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "歸一化檢索分數。注意：歸一化僅為型別統一，不代表不同 score_type 之間可直接比較——依 LLM 組與 Boundary B 的共同原則，不同計分方式不可混成單一 Confidence Score，門檻須依 score_type 分別設定。"
+    },
+    "score_type": {
+      "type": "string",
+      "enum": ["similarity", "rerank", "graph_traversal"],
+      "description": "檢索分數計算類型"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "revoked", "superseded"],
+      "description": "資料狀態"
+    },
+    "content": {
+      "type": "string",
+      "description": "實際文字內容"
+    },
+    "retriever": {
+      "type": "string",
+      "enum": ["vector", "graph"],
+      "description": "產生此 Chunk 的檢索器類別"
+    },
+    "entities": {
+      "type": "array",
+      "description": "Graph 專屬：抽取出的醫療實體清單。【校對修正】原為字串陣列，改為物件陣列——字串形式無處承載 code（RxNorm / LOINC / SNOMED），Boundary C 失敗模式表「實體抽取錯誤」的詞彙 anchor 控制會因此在下游無法執行；且 relations 需以 id 互指，否則複方展開時同名實體會被重新合併（見 Preprocessing B 第 12 節 A1）。",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "本 chunk 內唯一的實體識別碼，供 relations 的 subject / object 引用，例如 'ent_1'"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["Substance", "Condition", "Symptom", "LabParameter", "Trigger", "Intervention"],
+            "description": "schema v3 定案的 6 種節點型別"
+          },
+          "label": {
+            "type": "string",
+            "description": "實體名稱，例如 'Metformin'、'eGFR'、'乳酸中毒'。Substance 一律為單一活性成分，不使用品牌名或複方名。"
+          },
+          "code": {
+            "type": ["string", "null"],
+            "description": "外部詞彙代碼，例如 'RxNorm:6809'、'LOINC:48642-3'。尚未接上詞彙表者填 null，不得憑印象填寫。"
+          }
+        },
+        "required": ["id", "type", "label"]
+      }
+    },
+    "relations": {
+      "type": "array",
+      "description": "Graph 專屬：醫療實體關係三元組",
+      "items": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "三元組主體，引用 entities[].id"
+          },
+          "subject_type": {
+            "type": "string",
+            "enum": ["Substance", "Condition", "Trigger"],
+            "description": "主體之醫療實體類別。【校對修正】移除 LabParameter——schema v3 中 LabParameter 從不作為主詞。"
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "CONTRAINDICATED_FOR",
+              "CAUTION_FOR",
+              "INDUCES",
+              "CAUSES_SIDE_EFFECT",
+              "REQUIRES_MONITORING",
+              "TREATS",
+              "INTERACTS_WITH",
+              "RISK_FACTOR_FOR",
+              "TRIGGERS",
+              "IS_A"
+            ],
+            "description": "實體間 10 種精細化醫療關係類型"
+          },
+          "object": {
+            "type": "string",
+            "description": "三元組客體，引用 entities[].id"
+          },
+          "object_type": {
+            "type": "string",
+            "enum": ["Substance", "Condition", "Symptom", "LabParameter", "Intervention"],
+            "description": "客體之醫療實體類別。【校對修正】補回 Symptom 與 Intervention——原 enum 缺 Symptom，而 CAUSES_SIDE_EFFECT 的 range 正是 Symptom，導致任何副作用三元組都無法通過驗證。"
+          },
+          "condition": {
+            "type": ["string", "null"],
+            "description": "【校對新增｜對旗艦查詢最關鍵】條件或數值門檻，例如 'eGFR < 30 mL/min/1.73m²'、'eGFR 30–45，需減量'。原契約無此欄位，導致門檻被塞進 object 字串（如 object: 'eGFR < 30'），造成三個後果：(1) eGFR 不再是單一實體，'eGFR < 30' 與 'eGFR 30–45' 變成兩個字串節點，LOINC code 無處可掛；(2) object_type 標為 LabParameter 但內容其實是條件敘述，名實不符；(3) CONTRAINDICATED_FOR 與 CAUTION_FOR 的分級須靠字串解析才能還原，等同放棄 schema v3 Gap 1 的設計目的。無條件限制者填 null。"
+          },
+          "effect": {
+            "type": ["string", "null"],
+            "description": "【校對新增】INTERACTS_WITH 專用的結果註記，例如「增加乳酸中毒風險」。schema v3 第 4 節已定義此欄位。其他關係型別填 null。"
+          },
+          "confidence": {
+            "type": ["number", "null"],
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "【校對新增】抽取信心，由 Preprocessing B 在抽取階段產出。與 score 是兩種不同的分數（score 衡量路徑與 Query 的關聯，confidence 衡量事實抽取的可靠度），不可混用。Boundary B 第 1.1 節的信心門檻與 Boundary C 失敗模式表「抽取信心未分級」皆以此欄位為執行依據，契約不帶則下游無法執行。"
+          },
+          "negation_checked": {
+            "type": ["boolean", "null"],
+            "description": "【校對新增】該事實是否已通過否定詞／強度檢查。高風險邊（CONTRAINDICATED_FOR / CAUTION_FOR / INDUCES）未通過者不應放行。"
+          },
+          "additional_sources": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": [],
+            "description": "【校對新增】去重時保留的其他來源（見 Preprocessing B 第 12 節 A5）。相同 subject/relation/object/condition 的事實去重後只保留最高 confidence 一條，其餘來源收於此欄位，避免 provenance 在合併階段被截斷。"
+          }
+        },
+        "required": ["subject", "relation", "object"]
+      }
+    }
+  },
+  "required": [
+    "chunk_id",
+    "source",
+    "version",
+    "date",
+    "score",
+    "score_type",
+    "status",
+    "content",
+    "retriever"
+  ],
+  "if": {
+    "properties": { "retriever": { "const": "graph" } },
+    "required": ["retriever"]
+  },
+  "then": {
+    "required": ["entities", "relations"]
+  }
+}

@@ -1,0 +1,14 @@
+# Phase 1 uses only the Python standard library.
+# Phase 2/3 local retrieval and reranking dependencies:
+langchain-core
+langchain>=1.0
+langgraph
+langchain-community
+langchain-classic
+langchain-huggingface
+langchain-openrouter==0.1.0
+langchain-ollama
+sentence-transformers
+# A v0.1 prompt-injection guard; Qwen3Guard requires transformers>=4.51.0.
+transformers>=4.51.0
+torch

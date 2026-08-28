@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env & secrets
+.env
+!.env.example
+
+# Tool cache
+.omo/
+.openrouter_rate_limit_state.json
+.mypy_cache/
+.ruff_cache/
+
+# Data & runs (large, reproducible)
+tfda_context_gate/runs/
+tfda_context_gate/results/
+tfda_context_gate/data/raw/*.zip
+tfda_context_gate/data/processed/.vector_cache/
+deliverables/staging/
+*.zip
+!deliverables/releases/*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

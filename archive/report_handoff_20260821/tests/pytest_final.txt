@@ -1,0 +1,9 @@
+Command:
+/Users/dolly/miniforge3/envs/langchain1.2_Learning/bin/python -m pytest -q tfda_context_gate/tests
+
+Output:
+.......................sss..................................sssssss..... [ 85%]
+............                                                             [100%]
+74 passed, 10 skipped in 0.66s
+
+Exit code: 0

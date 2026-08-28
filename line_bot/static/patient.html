@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>看診前資料｜糖尿病照護 Demo</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,sans-serif;color:#17352f;background:#f4f8f6}body{margin:0}.wrap{max-width:720px;margin:auto;padding:24px}.card{background:#fff;border:1px solid #d9e6e1;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 6px 20px #17352f0b}h1{font-size:1.55rem}h2{font-size:1.05rem}button,input{font:inherit;border-radius:10px;padding:12px}input{box-sizing:border-box;width:100%;border:1px solid #a9beb7}button{border:0;background:#087f67;color:#fff;font-weight:700;cursor:pointer}.muted{color:#5f746d;font-size:.9rem}.warning{border-left:5px solid #d97706}pre{white-space:pre-wrap;word-break:break-word;background:#eef5f2;padding:12px;border-radius:10px}</style>
+</head>
+<body><main class="wrap">
+  <h1>看診前資料</h1>
+  <p class="muted">這是 Demo 入口。正式 LIFF 版須以 LINE Login 驗證身分；頁面不提供診斷或急診服務。</p>
+  <section class="card warning"><strong>緊急狀況</strong><p>若有意識不清、呼吸困難等危急症狀，請立即聯絡當地緊急醫療服務。</p></section>
+  <section class="card"><h2>1. 在 LINE 完成資料整理</h2><p>回到聊天輸入「我要準備看診」，選擇為自己或代家人整理，依序填寫用藥病史、症狀及想問醫師的問題，最後確認。</p></section>
+  <section class="card"><h2>2. 查詢與分享</h2><div id="demo"><label for="uid">本機測試用 LINE user ID</label><input id="uid" autocomplete="off" placeholder="例如 U-demo"></div><p><button id="load">載入看診資料</button></p><label for="clinician">指定 Demo 醫護 ID（可留空）</label><input id="clinician" autocomplete="off"><p><button id="share">建立 10 分鐘一次性分享碼</button></p><p><button id="revoke">撤銷剛建立的分享碼</button></p><pre id="result" aria-live="polite">尚未載入</pre></section>
+</main>
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script><script>
+const out=document.querySelector('#result'),uid=document.querySelector('#uid');let config={},idToken='',sessionId='',grantId='';
+const headers=()=>idToken?{'Authorization':'Bearer '+idToken}:{'X-Line-User-Id':uid.value};
+(async()=>{config=await fetch('/api/line/client-config').then(r=>r.json());document.querySelector('#demo').hidden=!config.demo_identity_headers;if(config.liff_id){await liff.init({liffId:config.liff_id});if(!liff.isLoggedIn()){liff.login();return}idToken=liff.getIDToken()||''}})().catch(e=>out.textContent='LINE 登入初始化失敗：'+e.message);
+document.querySelector('#load').onclick=async()=>{out.textContent='載入中…';const r=await fetch('/api/patient/session',{headers:headers()});const data=await r.json();sessionId=data.session_id||'';out.textContent=JSON.stringify(data,null,2)};
+document.querySelector('#share').onclick=async()=>{if(!sessionId){out.textContent='請先載入已確認的資料';return}const r=await fetch(`/api/patient/sessions/${sessionId}/share`,{method:'POST',headers:{...headers(),'content-type':'application/json'},body:JSON.stringify({allowed_clinician_id:document.querySelector('#clinician').value||null})});const data=await r.json();grantId=data.grant_id||'';out.textContent=JSON.stringify(data,null,2)};
+document.querySelector('#revoke').onclick=async()=>{if(!grantId){out.textContent='目前沒有可撤銷的分享碼';return}const r=await fetch(`/api/patient/share/${grantId}/revoke`,{method:'POST',headers:headers()});out.textContent=JSON.stringify(await r.json(),null,2)};
+</script></body></html>
