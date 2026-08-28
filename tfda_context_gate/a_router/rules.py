@@ -77,6 +77,19 @@ class RuleBasedSignalExtractor:
         r"weather|stock price|write code|recipe for dinner",
         re.IGNORECASE,
     )  # 超範圍正則：天氣/股票/程式/政治等非醫療主題
+    # G2 chit-chat whitelist: benign short sentences → O_OUT_OF_SCOPE (not RISK_FLAG)
+    # 僅含無害閒聊，優先於 _out_of_scope 判斷；Keep Traditional Chinese
+    _chit_chat = re.compile(
+        r"想睡覺|想睡了|無聊|你好|哈囉|晚安|你好嗎|嗨|"
+        r"你可以跟我說什麼|你可以說什麼|你能做什麼|你能幫什麼|"
+        r"可以跟我說什麼|能做什麼|能幫我做什麼|功能介紹|我能問什麼|你會做什麼|系統能做什麼",
+        re.IGNORECASE,
+    )
+    # MENTAL_HEALTH_CRISIS 窄範圍：僅明確自傷/自殺字眼，絕不含「想睡覺」「想睡」「休息」等睡眠詞
+    _mental_health_crisis = re.compile(
+        r"想自殺|自殺|不想活|活不下去|想死|輕生|結束生命|自殘|割腕|自傷",
+        re.IGNORECASE,
+    )
     _emergency = re.compile(
         r"胸痛|胸悶|喘不過氣|呼吸困難|呼吸急促|意識不清|昏迷|昏厥|"
         r"冒冷汗.*胸|大量出血|持續嘔吐|高燒不退|"
@@ -120,6 +133,14 @@ class RuleBasedSignalExtractor:
             return False
         return RuleBasedSignalExtractor._is_pre_visit_intake(normalized)
 
+    @staticmethod
+    def is_chit_chat_text(text: str) -> bool:
+        try:
+            normalized = normalize_input(text)
+        except InputValidationError:
+            return False
+        return bool(RuleBasedSignalExtractor._chit_chat.search(normalized))
+
     def extract(self, text: str, language: LanguageCode | None = None) -> RouterSignals:
         """萃取訊號；輸入：原始文字與語系，輸出：RouterSignals（意圖+風險+語境）；流程：正規化→逐正則匹配→去重→組裝。"""
         text = normalize_input(text)  # 第 2 步：先正規化（NFKC+空白壓縮）
@@ -130,6 +151,10 @@ class RuleBasedSignalExtractor:
             risks.append(RiskFlag.PROMPT_INJECTION_SUSPECTED)
         if RiskSignalPolicy().classify(text).level == "RED_FLAG":
             risks.append(RiskFlag.POSSIBLE_EMERGENCY)
+        if self._mental_health_crisis.search(text):
+            risks.append(RiskFlag.MENTAL_HEALTH_CRISIS)
+        if self._chit_chat.search(text):
+            intents.append(IntentTag.NON_MEDICAL)
         is_intake = self._is_pre_visit_intake(text)
         if is_intake:
             intents.append(IntentTag.PRE_VISIT_INTAKE)

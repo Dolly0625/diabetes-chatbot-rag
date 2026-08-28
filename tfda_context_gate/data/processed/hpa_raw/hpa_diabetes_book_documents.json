@@ -13,7 +13,8 @@
       "chunk_index": 0,
       "total_chunks": 4,
       "source_url": "https://www.hpa.gov.tw/Pages/Detail.aspx?nodeid=614",
-      "filename": "hpa_diabetes_book.pdf"
+      "filename": "hpa_diabetes_book.pdf",
+      "topic": "cause"
     }
   },
   {
@@ -30,7 +31,8 @@
       "chunk_index": 1,
       "total_chunks": 4,
       "source_url": "https://www.hpa.gov.tw/Pages/Detail.aspx?nodeid=614",
-      "filename": "hpa_diabetes_book.pdf"
+      "filename": "hpa_diabetes_book.pdf",
+      "topic": "diet"
     }
   },
   {
@@ -47,7 +49,8 @@
       "chunk_index": 2,
       "total_chunks": 4,
       "source_url": "https://www.hpa.gov.tw/Pages/Detail.aspx?nodeid=614",
-      "filename": "hpa_diabetes_book.pdf"
+      "filename": "hpa_diabetes_book.pdf",
+      "topic": "exercise"
     }
   },
   {
@@ -64,7 +67,8 @@
       "chunk_index": 3,
       "total_chunks": 4,
       "source_url": "https://www.hpa.gov.tw/Pages/Detail.aspx?nodeid=614",
-      "filename": "hpa_diabetes_book.pdf"
+      "filename": "hpa_diabetes_book.pdf",
+      "topic": "diet"
     }
   }
 ]

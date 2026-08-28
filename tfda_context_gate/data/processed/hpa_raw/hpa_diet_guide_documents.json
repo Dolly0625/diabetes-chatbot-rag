@@ -13,7 +13,8 @@
       "chunk_index": 0,
       "total_chunks": 3,
       "source_url": "https://www.hpa.gov.tw/Pages/Detail.aspx?nodeid=614",
-      "filename": "hpa_diet_guide.pdf"
+      "filename": "hpa_diet_guide.pdf",
+      "topic": "diet"
     }
   },
   {
@@ -30,7 +31,8 @@
       "chunk_index": 1,
       "total_chunks": 3,
       "source_url": "https://www.hpa.gov.tw/Pages/Detail.aspx?nodeid=614",
-      "filename": "hpa_diet_guide.pdf"
+      "filename": "hpa_diet_guide.pdf",
+      "topic": "diet"
     }
   },
   {
@@ -47,7 +49,8 @@
       "chunk_index": 2,
       "total_chunks": 3,
       "source_url": "https://www.hpa.gov.tw/Pages/Detail.aspx?nodeid=614",
-      "filename": "hpa_diet_guide.pdf"
+      "filename": "hpa_diet_guide.pdf",
+      "topic": "sleep"
     }
   }
 ]

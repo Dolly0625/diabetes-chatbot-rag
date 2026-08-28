@@ -317,6 +317,21 @@ def route_request(
             request, blocked_signals, decision.status, list(decision.reason_codes)
         )
 
+    # G2 chit-chat whitelist 優先於極短句攔截：benign 短句直達 O_OUT_OF_SCOPE
+    try:
+        if RuleBasedSignalExtractor.is_chit_chat_text(normalized):
+            from .labels import IntentTag
+
+            signals = RouterSignals(
+                intent_tags=[IntentTag.NON_MEDICAL],
+                risk_flags=[],
+                context_modifiers=ContextModifiers(language=request.language),
+            )
+            decision = policy_gate(signals, policy_config)
+            return AResult.from_request_and_decision(request, signals, decision.status, list(decision.reason_codes))
+    except Exception:
+        pass
+
     # 硬規則短句攔截（極短模糊輸入直接 Q，不進 LLM，參考 Rasa/Lex 業界做法）
     if len(normalized) < 4 or normalized in ("怎麼辦", "怎辦", "怎麼半", "help", "？", "?", "…"):
         signals = RouterSignals(

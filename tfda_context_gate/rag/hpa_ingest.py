@@ -264,6 +264,90 @@ PLACEHOLDER_CONTENT = {
 }
 
 
+# ── FAQ supplement G5 (4 chunks, grounded from 衛教文件, not LLM free) ──
+FAQ_CHUNKS: list[dict[str, Any]] = [
+    {
+        "faq_id": "hpa_faq_cause_overview",
+        "source_id": "HPA_DIABETES_BOOK",
+        "topic": "成因總覽",
+        "faq_topic": "cause_overview",
+        "title": "糖尿病是怎麼來的？（成因總覽）",
+        "content": """糖尿病是怎麼來的？（成因總覽）— 依據國民健康署《糖尿病與我》與國民飲食指標手冊
+糖尿病是一種慢性代謝疾病，特徵為血糖升高，主要分為第一型、第二型、妊娠糖尿病及其他類型。
+第一型糖尿病：自體免疫破壞胰島細胞，導致胰島素絕對缺乏，好發於兒童青少年，需終身胰島素治療，症狀包括多吃、多喝、多尿、體重減輕。
+第二型糖尿病：占 90% 以上，因胰島素阻抗及胰島素分泌不足所致，與遺傳（家族史）、肥胖、缺乏運動、不健康飲食、年齡增長相關，初期多無症狀，逐漸出現口渴、頻尿、疲倦、傷口癒合慢。
+妊娠糖尿病：懷孕期間血糖升高，通常產後恢復，但未來罹患第二型糖尿病風險增加，需控制血糖預防併發症。以上為衛教資訊，若有個人狀況請諮詢醫護人員。""",
+    },
+    {
+        "faq_id": "hpa_faq_genetic",
+        "source_id": "HPA_DIABETES_BOOK",
+        "topic": "遺傳",
+        "faq_topic": "genetic",
+        "title": "糖尿病會遺傳嗎？",
+        "content": """糖尿病會遺傳嗎？— 依據國民健康署《糖尿病與我》衛教文件
+糖尿病與家族史有關，但非單一基因遺傳疾病。有家族史（父母或兄弟姊妹罹患糖尿病）者，罹患第二型糖尿病風險較高，但後天可預防因子影響更大，包括體重過重、缺乏運動、不健康飲食、睡眠不足與壓力。
+第一型糖尿病與自體免疫相關，家族聚集性較低但仍有遺傳傾向；第二型糖尿病為多因子疾病，具家族聚集現象。若有家族史，建議維持健康體重、均衡飲食、規律運動、定期監測血糖與糖化血色素，並諮詢醫護人員進行個別化評估。以上為衛教資訊，非個人化診斷。""",
+    },
+    {
+        "faq_id": "hpa_faq_sleep",
+        "source_id": "HPA_DIET_GUIDE",
+        "topic": "睡眠與血糖",
+        "faq_topic": "sleep",
+        "title": "睡眠與糖尿病有什麼關係？",
+        "content": """睡眠與血糖有什麼關係？— 依據國民健康署 國民飲食指標手冊與《糖尿病與我》
+充足睡眠每日 7-8 小時，睡眠不足會影響血糖及食慾調節，增加胰島素阻抗與體重上升風險。糖尿病患者需留意夜間與睡前血糖：睡前量測可及早發現夜間低血糖（血糖 <70 mg/dL，症狀包括冒冷汗、心悸、顫抖、飢餓、頭暈），若睡前血糖偏低或晚間運動量大，依醫囑考慮適量點心，避免空腹過久。
+建議定時定量、睡前避免含糖飲料與過量咖啡因，維持規律作息與壓力管理（深呼吸、伸展）。若常有睡不好、疲倦、夜間盜汗或晨起頭暈，請記錄睡眠與血糖並於回診時與醫師討論。以上為衛教資訊，若有不適請諮詢醫護人員。""",
+    },
+    {
+        "faq_id": "hpa_faq_capability",
+        "source_id": "HPA_DIET_GUIDE",
+        "topic": "本助手能做什麼",
+        "faq_topic": "capability",
+        "title": "糖尿病衛教小幫手可以幫什麼？",
+        "content": """糖尿病衛教小幫手可以幫什麼？— 依據 TFDA 與國健署衛教文件範圍
+本助手依據 TFDA 風險溝通文件與國健署衛教文件（TFDA_RISK / HPA_DIET_GUIDE / HPA_DIABETES_BOOK）提供 grounded 衛教資訊，不提供個人化診斷或用藥劑量建議：
+① 糖尿病常見問題：病因、症狀、併發症、血糖與糖化血色素、飲食與運動原則，例如「為什麼會有糖尿病」「糖化血色素是什麼」「糖尿病可以吃什麼」；
+② 用藥與藥袋怎麼看：可拍照上傳藥袋，協助辨識藥名與衛教重點（依 TFDA 仿單）；
+③ 看診前幫你整理資料、產生醫師摘要：協助整理症狀、用藥、過敏史與想問醫師的問題。
+試試輸入：「為什麼會有糖尿病」「糖尿病會遺傳嗎」「睡前血糖要注意什麼」「藥袋怎麼看」。超出範圍時會誠實說明並引導至合格醫療專業人員。""",
+    },
+]
+
+
+def create_faq_documents() -> list[dict[str, Any]]:
+    """Create 4 FAQ documents with allowlisted source_id and topic metadata."""
+    docs: list[dict[str, Any]] = []
+    for item in FAQ_CHUNKS:
+        sid = item["source_id"]
+        config = HPA_SOURCES[sid]
+        metadata = {
+            "document_id": item["faq_id"],
+            "source_dataset": config["source_dataset"],
+            "source_id": sid,
+            "source": config["source_dataset"],
+            "date": config["date"],
+            "發布日期": config["date"],
+            "version": config["version"],
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "source_url": config["url"],
+            "filename": config["filename"],
+            "topic": item["topic"],
+            "faq_topic": item["faq_topic"],
+            "is_faq": True,
+            "title": item["title"],
+            "chunk_type": "faq",
+        }
+        docs.append(
+            {
+                "id": item["faq_id"],
+                "page_content": item["content"],
+                "metadata": metadata,
+            }
+        )
+    return docs
+
+
 def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
     """Chunk text with 800 chars and 100 overlap."""
     if len(text) <= chunk_size:
@@ -403,6 +487,27 @@ def parse_pdf_to_text(pdf_path: Path) -> str:
     return text
 
 
+def _infer_topic_for_chunk(text: str, source_id: str) -> str:
+    t = text or ""
+    if any(k in t for k in ["成因", "為什麼", "為何", "怎麼來的", "遺傳", "家族史", "胰島素阻抗", "第一型", "第二型"]):
+        return "cause"
+    if any(k in t for k in ["睡眠不足影響血糖", "充足睡眠"]) or ("睡眠" in t and "飲食" not in t):
+        return "sleep"
+    if any(k in t for k in ["飲食", "營養", "碳水", "食物", "吃什麼", "怎麼吃", "膳食纖維"]) and not any(k in t for k in ["成因", "為什麼會有"]):
+        return "diet"
+    if "運動" in t:
+        return "exercise"
+    if any(k in t for k in ["藥品", "藥物", "用藥"]):
+        return "medication"
+    if source_id == "FOOD_NUTRITION":
+        return "diet"
+    if source_id == "HPA_DIET_GUIDE":
+        return "diet"
+    if source_id == "HPA_DIABETES_BOOK" and any(k in t for k in ["認識糖尿病", "第一型", "第二型"]):
+        return "cause"
+    return "general"
+
+
 def create_documents_for_source(
     source_id: str, raw_text: str, chunk_size: int = 800, overlap: int = 100
 ) -> list[dict[str, Any]]:
@@ -413,6 +518,7 @@ def create_documents_for_source(
     documents = []
     for idx, chunk in enumerate(chunks):
         doc_id = f"{source_id.lower()}-{idx:04d}"
+        topic = _infer_topic_for_chunk(chunk, source_id)
         metadata = {
             "document_id": doc_id,
             "source_dataset": config["source_dataset"],
@@ -425,6 +531,7 @@ def create_documents_for_source(
             "total_chunks": len(chunks),
             "source_url": config["url"],
             "filename": config["filename"],
+            "topic": topic,
         }
         documents.append(
             {
@@ -488,6 +595,14 @@ def ingest_all_sources(
         json_path = output_dir / f"{source_id.lower()}_documents.json"
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(docs, f, ensure_ascii=False, indent=2)
+
+    # Append FAQ supplement (G5) — 4 chunks, allowlisted source_id, topic-labeled
+    faq_docs = create_faq_documents()
+    for doc in faq_docs:
+        sid = doc["metadata"]["source_id"]
+        all_docs.setdefault(sid, []).append(doc)
+    if faq_docs:
+        print(f"  Added {len(faq_docs)} FAQ chunks (G5) to {list({d['metadata']['source_id'] for d in faq_docs})}")
 
     return all_docs
 

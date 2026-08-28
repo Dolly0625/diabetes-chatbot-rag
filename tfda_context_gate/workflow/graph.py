@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, TypedDict
 import re
+import unicodedata
 
 from tfda_context_gate.a_router.router import route_request
 from tfda_context_gate.a_router.schemas import AResult, RequestContext
@@ -38,6 +39,26 @@ STAGE_QUESTIONS: dict[str, str] = {
     "stage2": "請問症狀的相關資訊？（可一次說明，如「三個月前開始，早上血糖偏高約180，程度中等」包含時間、描述與嚴重度）",
     "stage3": "請問您想在看診時詢問醫師哪些問題？（可列多個問題）",
 }
+
+_CHIT_CHAT_RE = re.compile(r"想睡|睡覺|晚安|無聊|累了|好累|想休息|你好嗎|早安|午安", re.IGNORECASE)
+_CAPABILITY_RE = re.compile(r"可以跟我說什麼|可以說什麼|能做什麼|會做什麼|能幫什麼|我能幫什麼|介紹一下|你會什麼|功能有哪些", re.IGNORECASE)
+
+
+def _is_chit_chat(text: str) -> bool:
+    try:
+        n = unicodedata.normalize("NFKC", text).strip()
+    except Exception:
+        n = text or ""
+    return bool(_CHIT_CHAT_RE.search(n))
+
+
+def _is_capability_query(text: str) -> bool:
+    try:
+        n = unicodedata.normalize("NFKC", text).strip()
+    except Exception:
+        n = text or ""
+    return bool(_CAPABILITY_RE.search(n))
+
 
 def get_welcome_message() -> dict[str, Any]:
     return {"message": WELCOME_MESSAGE, "quick_replies": WELCOME_QUICK_REPLIES, "task_type": None}
@@ -243,15 +264,37 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
                 reason = "A_EMERGENCY"
             elif result.router_status.value == "U_URGENT_HUMAN":
                 reason = "A_URGENT_HUMAN"
+            elif result.router_status.value == "F_ROUTER_DEPENDENCY":
+                reason = "A_DEPENDENCY"
+            elif result.router_status.value == "O_OUT_OF_SCOPE":
+                reason = "CHIT_CHAT_OUT_OF_SCOPE" if _is_chit_chat(raw) else "O_GENERIC"
+            elif result.router_status.value == "Q_CLARIFICATION":
+                if _is_chit_chat(raw):
+                    reason = "CHIT_CHAT_OUT_OF_SCOPE"
+                elif _is_capability_query(raw):
+                    reason = "O_GENERIC"
+                else:
+                    reason = "Q_NEED_MORE"
+            elif result.router_status.value == "R_POLICY_BOUNDARY":
+                rc_vals = [r.value if hasattr(r, "value") else str(r) for r in result.reason_codes]
+                if "REASON_PROMPT_INJECTION_SUSPECTED" in rc_vals:
+                    reason = "R_GUARDRAIL_BLOCKED"
+                elif "REASON_DIAGNOSIS_OR_TREATMENT_REQUEST" in rc_vals:
+                    reason = "R_DIAGNOSIS_BOUNDARY"
+                else:
+                    reason = "O_GENERIC"
+            elif result.router_status.value == "M_MEDICATION_REFERRAL":
+                reason = "A_BLOCKED"
             else:
-                reason = "A_DEPENDENCY" if result.router_status.value == "F_ROUTER_DEPENDENCY" else "A_BLOCKED"
+                reason = "O_GENERIC"
             is_dependency = reason == "A_DEPENDENCY"
+            is_emergency = reason in {"A_EMERGENCY", "A_URGENT_HUMAN"}
             return {
                 "a_result": result,
-                "status": "FALLBACK" if is_dependency or reason in {"A_EMERGENCY", "A_URGENT_HUMAN"} else "BLOCKED",
+                "status": "FALLBACK" if is_dependency or is_emergency else "BLOCKED",
                 "final_response": fallback_response(reason),
                 "fallback_reason": reason,
-                "termination_reason": "A_DEPENDENCY" if is_dependency else ("RED_FLAG_DETERMINISTIC_ABORT" if reason in {"A_EMERGENCY", "A_URGENT_HUMAN"} else "A_POLICY_BOUNDARY"),
+                "termination_reason": "A_DEPENDENCY" if is_dependency else ("RED_FLAG_DETERMINISTIC_ABORT" if is_emergency else reason),
             }
         return {"a_result": result}
 

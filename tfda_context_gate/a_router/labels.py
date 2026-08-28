@@ -68,7 +68,7 @@ class RiskFlag(_CodeEnum):
     """風險旗標：觸發政策閘門的高風險訊號。"""
 
     POSSIBLE_EMERGENCY = "POSSIBLE_EMERGENCY"  # 疑似急症（需緊急處理）
-    MENTAL_HEALTH_CRISIS = "MENTAL_HEALTH_CRISIS"  # 心理危機／自傷風險
+    MENTAL_HEALTH_CRISIS = "MENTAL_HEALTH_CRISIS"  # 心理危機／自傷風險：僅明確字眼如想自殺/自殺/不想活/活不下去/想死/輕生/結束生命/自殘/割腕/自傷，不含想睡覺/想睡/休息等睡眠詞
     PERSONALIZED_MEDICATION = "PERSONALIZED_MEDICATION"  # 個人化用藥請求
     HIGH_RISK_NOT_EXCLUDED = "HIGH_RISK_NOT_EXCLUDED"  # 高風險無法排除
     PROMPT_INJECTION_SUSPECTED = "PROMPT_INJECTION_SUSPECTED"  # 疑似提示注入攻擊（安全否決）

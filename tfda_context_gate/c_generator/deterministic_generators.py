@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
+import re
+
 from .c_workflow_input import CWorkflowInput
 from .schemas import (
     ClinicianEvidenceDraft,
@@ -22,6 +24,82 @@ from .schemas import (
 
 
 CLINICIAN_DISCLAIMER = "本草稿僅供醫護人員參考，需經專業人員確認後使用，不得直接作為處方或診斷依據；最終臨床判斷由醫護人員負責。"
+
+GROUNDED_PREFIX_TEMPLATES: list[str] = [
+    "幫你整理了衛教重點（依 TFDA／國健署）：",
+    "關於糖尿病成因，衛教文件提到幾個面向：",
+]
+GROUNDED_SUFFIX = "以上為衛教資訊，若有個人狀況請諮詢醫護人員。"
+_SENT_SPLIT_RE = re.compile(r"[。；\n]+")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", re.UNICODE)
+
+
+def _tokenize_for_overlap(text: str) -> set[str]:
+    return set(_TOKEN_RE.findall(text.lower()))
+
+
+def _select_sentences(content: str, query: str, max_sentences: int = 2) -> str:
+    if not content or not content.strip():
+        return ""
+    parts = _SENT_SPLIT_RE.split(content)
+    sentences = [s.strip() for s in parts if s.strip()]
+    if not sentences:
+        return content.strip()
+    if len(sentences) <= max_sentences:
+        if len(sentences) == 1:
+            s = sentences[0]
+            return s if s.endswith("。") else s + "。"
+        query_tokens = _tokenize_for_overlap(query)
+        if not query_tokens:
+            result = "。".join(sentences)
+            return result if result.endswith("。") else result + "。"
+        scored: list[tuple[int, int, str]] = []
+        for idx, sent in enumerate(sentences):
+            overlap = len(_tokenize_for_overlap(sent) & query_tokens)
+            scored.append((overlap, -idx, sent))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        if scored[0][0] == 0:
+            result = "。".join(sentences)
+            return result if result.endswith("。") else result + "。"
+        top = [s for _, _, s in scored[:max_sentences]]
+        order = {s: i for i, s in enumerate(sentences)}
+        top.sort(key=lambda s: order.get(s, 999))
+        result = "。".join(top)
+        return result if result.endswith("。") else result + "。"
+    query_tokens = _tokenize_for_overlap(query)
+    if not query_tokens:
+        selected = sentences[:max_sentences]
+        result = "。".join(selected)
+        return result if result.endswith("。") else result + "。"
+    scored = []
+    for idx, sent in enumerate(sentences):
+        overlap = len(_tokenize_for_overlap(sent) & query_tokens)
+        scored.append((overlap, -idx, sent))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    if scored[0][0] == 0:
+        selected = sentences[:1]
+        result = "。".join(selected)
+        return result if result.endswith("。") else result + "。"
+    top = [s for _, _, s in scored[:max_sentences]]
+    if len(top) == 2:
+        second_overlap = len(_tokenize_for_overlap(top[1]) & query_tokens)
+        if second_overlap == 0 and len(_tokenize_for_overlap(top[0]) & query_tokens) > 0:
+            top = top[:1]
+    order = {s: i for i, s in enumerate(sentences)}
+    top.sort(key=lambda s: order.get(s, 999))
+    result = "。".join(top)
+    return result if result.endswith("。") else result + "。"
+
+
+def _pick_grounded_prefix(request_id: str, query: str) -> str:
+    cause_keys = ["成因", "為什麼", "為何", "怎麼來的", "原因", "遺傳"]
+    diet_keys = ["吃什麼", "飲食", "食物", "營養", "可以吃", "怎麼吃"]
+    if any(k in query for k in cause_keys):
+        return GROUNDED_PREFIX_TEMPLATES[1]
+    if any(k in query for k in diet_keys):
+        return GROUNDED_PREFIX_TEMPLATES[0]
+    idx = (sum(ord(c) for c in request_id) + len(query)) % len(GROUNDED_PREFIX_TEMPLATES)
+    return GROUNDED_PREFIX_TEMPLATES[idx % len(GROUNDED_PREFIX_TEMPLATES)]
 
 
 class DeterministicFixtureCGenerator:
@@ -56,12 +134,12 @@ class DeterministicFixtureCGenerator:
             usable = usable[: self.max_evidence]
         if not usable:  # 無可用證據 → 回 INSUFFICIENT
             return EvidenceAwareV2Answer(
-                decision="INSUFFICIENT",  # 核心無支持
-                answer="目前提供的資料不足以可靠回答這個問題。",
-                supported_claims=[],  # 無支持主張
+                decision="INSUFFICIENT",
+                answer="這題我手上的衛教資料不夠，建議看診時問醫師。",
+                supported_claims=[],
                 unsupported_requests=[
                     V2UnsupportedRequest(
-                        request=request.original_query,  # 整個原始提問皆無支持
+                        request=request.original_query,
                         reason="沒有可用的 B-approved evidence",
                     )
                 ],
@@ -70,17 +148,32 @@ class DeterministicFixtureCGenerator:
 
         claims = [
             V2SupportedClaim(
-                claim_id=f"c{index}",  # 依序編號 c1, c2...
-                claim=item.content,  # 直接以 evidence 內容作為 claim（夾具簡化）
-                evidence_ids=[item.evidence_id],  # 每個 claim 對應單一 B-approved evidence_id
+                claim_id=f"c{index}",
+                claim=_select_sentences(item.content, request.original_query),
+                evidence_ids=[item.evidence_id],
             )
-            for index, item in enumerate(usable, 1)  # 從 1 開始編號
+            for index, item in enumerate(usable, 1)
         ]
+        claims = [c for c in claims if c.claim.strip()]
+        if not claims:
+            claims = [
+                V2SupportedClaim(
+                    claim_id="c1",
+                    claim=_select_sentences(usable[0].content, request.original_query) or usable[0].content[:80],
+                    evidence_ids=[usable[0].evidence_id],
+                )
+            ]
+        prefix = _pick_grounded_prefix(request.request_id, request.original_query)
+        body = "".join(c.claim for c in claims)
+        source_mark = "〔來源：" + "、".join(c.evidence_ids[0] for c in claims[:3]) + "〕" if claims else ""
+        answer_text = f"{prefix}{body}\n\n{GROUNDED_SUFFIX}"
+        if source_mark:
+            answer_text = f"{answer_text}{source_mark}"
         return EvidenceAwareV2Answer(
-            decision="ANSWER",  # 有可用證據 → 夾具一律 ANSWER
-            answer="根據提供的資料：" + "".join(item.claim for item in claims),  # 串接所有 claim 內容
+            decision="ANSWER",
+            answer=answer_text,
             supported_claims=claims,
-            unsupported_requests=[],  # 夾具簡化：有證據時不產生缺口
+            unsupported_requests=[],
             limitations=[],
         )
 

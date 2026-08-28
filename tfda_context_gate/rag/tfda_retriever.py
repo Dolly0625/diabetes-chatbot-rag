@@ -19,6 +19,118 @@ USER_DOCUMENTS_PATH = Path("/mnt/data/langchain_documents.json")  # 使用者自
 DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"  # 預設多語嵌入模型
 CACHE_DIR = PACKAGE_ROOT / "data" / "processed" / ".vector_cache"  # 向量快取目錄（持久化）
 
+# G4 retrieval precision: similarity threshold α (tunable) and topic consistency
+RETRIEVAL_THRESHOLD = float(os.getenv("RETRIEVAL_THRESHOLD", os.getenv("RETRIEVAL_ALPHA", "0.75")))
+CACHE_VERSION = "g5-faq-v1"
+
+_FAQ_CAUSE_KEYWORDS = ["為什麼", "成因", "為什麼會", "怎麼來的", "怎麼會", "為何"]
+_FAQ_GENETIC_KEYWORDS = ["遺傳", "家族", "會不會遺傳"]
+_FAQ_SLEEP_KEYWORDS = ["睡覺", "睡不好", "睡前", "疲倦", "想睡", "睡眠"]
+_FAQ_CAPABILITY_KEYWORDS = ["可以做什麼", "能幫", "怎麼用", "功能", "你可以", "你能做什麼", "能做什麼", "幫什麼", "可以跟我說什麼"]
+_FAQ_KEYWORD_MAP: dict[str, list[str]] = {
+    "cause_overview": _FAQ_CAUSE_KEYWORDS,
+    "genetic": _FAQ_GENETIC_KEYWORDS,
+    "sleep": _FAQ_SLEEP_KEYWORDS,
+    "capability": _FAQ_CAPABILITY_KEYWORDS,
+}
+_FAQ_TOPIC_NORMALIZE: dict[str, str] = {
+    "成因總覽": "cause_overview",
+    "遺傳": "genetic",
+    "睡眠與血糖": "sleep",
+    "本助手能做什麼": "capability",
+    "cause_overview": "cause_overview",
+    "genetic": "genetic",
+    "sleep": "sleep",
+    "capability": "capability",
+}
+
+
+def _faq_bonus(metadata: dict[str, Any], query_text: str) -> float:
+    if not metadata.get("is_faq"):
+        return 0.0
+    raw_topic = str(metadata.get("faq_topic") or metadata.get("topic") or "")
+    norm = _FAQ_TOPIC_NORMALIZE.get(raw_topic, raw_topic)
+    keywords = _FAQ_KEYWORD_MAP.get(norm)
+    if not keywords:
+        return 0.0
+    q = query_text or ""
+    for kw in keywords:
+        if kw in q:
+            return 0.05
+    return 0.0
+
+# Topic keywords for inference (cause vs diet vs others)
+_CAUSE_KEYWORDS = ["為什麼", "為何", "成因", "怎麼來的", "原因", "病因", "遺傳", "家族", "胰島素阻抗", "胰島素", "第一型", "第二型", "發病", "危險因子"]
+_DIET_KEYWORDS = ["飲食", "吃什麼", "食物", "營養", "碳水", "熱量", "代換", "怎麼吃", "可以吃", "膳食纖維", "低升糖"]
+_SLEEP_KEYWORDS = ["睡眠", "睡覺", "失眠", "睡不好", "睡前", "疲倦"]
+_EXERCISE_KEYWORDS = ["運動", "快走", "游泳", "騎車"]
+_MEDICATION_KEYWORDS = ["藥品", "藥物", "用藥", "劑量", "metformin", "胰島素治療"]
+
+_TOPIC_ALLOWLIST: dict[str, set[str]] = {
+    "cause": {"cause", "general", "etiology", "genetics"},
+    "diet": {"diet", "general", "nutrition"},
+    "sleep": {"sleep", "general"},
+    "exercise": {"exercise", "general"},
+    "medication": {"medication", "general", "drug"},
+    "general": {"general", "cause", "diet", "sleep", "exercise", "medication", "drug"},
+}
+
+
+def _infer_topic(text: str, metadata: dict[str, Any] | None = None) -> str:
+    """Infer chunk topic from text + source_dataset."""
+    t = text or ""
+    if any(k in t for k in _CAUSE_KEYWORDS[:8]):  # at least cause triggers
+        # need more specific: if diet keywords also present, prefer cause when cause keywords exist
+        if any(k in t for k in ["成因", "為什麼", "為何", "怎麼來的", "遺傳", "家族史", "胰島素阻抗"]):
+            return "cause"
+    if any(k in t for k in _SLEEP_KEYWORDS):
+        # disambiguate: diet docs may mention sleep briefly, but cause not about sleep
+        if "睡眠不足影響血糖" in t or "充足睡眠" in t:
+            return "sleep"
+        if any(k in t for k in ["睡覺", "失眠", "睡眠"]):
+            # if primarily sleep FAQ
+            return "sleep"
+    if any(k in t for k in _DIET_KEYWORDS):
+        # diet dominates if no cause signal
+        if not any(k in t for k in ["成因", "為什麼會有", "遺傳"]):
+            return "diet"
+    if any(k in t for k in _EXERCISE_KEYWORDS):
+        return "exercise"
+    if any(k in t for k in _MEDICATION_KEYWORDS):
+        return "medication"
+    # fallback via source_dataset
+    src = ""
+    if metadata:
+        src = str(metadata.get("source_dataset") or metadata.get("source_id") or metadata.get("source") or "")
+    if "食品營養" in src:
+        return "diet"
+    if "國民飲食" in src:
+        return "diet"
+    if "糖尿病與我" in src:
+        # diabetes book contains both cause and general
+        if any(k in t for k in ["第一型", "第二型", "認識糖尿病"]):
+            return "cause"
+        return "general"
+    if "TFDA" in src or "風險溝通" in src:
+        return "medication"
+    return "general"
+
+
+def _infer_query_topic(query: str) -> str:
+    """Infer expected topic from query intent."""
+    q = query or ""
+    if any(k in q for k in ["為什麼", "為何", "成因", "怎麼來的", "原因", "病因", "遺傳", "家族"]):
+        return "cause"
+    if any(k in q for k in ["吃什麼", "怎麼吃", "飲食", "食物", "營養", "可以吃", "菜單"]):
+        return "diet"
+    if any(k in q for k in ["睡覺", "睡眠", "睡不好", "失眠", "睡前"]):
+        return "sleep"
+    if any(k in q for k in ["運動"]):
+        return "exercise"
+    if any(k in q for k in ["藥", "劑量"]):
+        return "medication"
+    return "general"
+
 
 class TFDADatasetError(ValueError):
     """當處理後的 TFDA 語料無法滿足 RAG 契約時拋出。"""
@@ -136,7 +248,7 @@ class TFDADrugSafetyRetriever:
         import hashlib
 
         stat = self.documents_path.stat() if self.documents_path.exists() else None
-        raw = f"{self.documents_path}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}:{self.embedding_model}"
+        raw = f"{self.documents_path}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}:{self.embedding_model}:{CACHE_VERSION}:{RETRIEVAL_THRESHOLD}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _cache_path(self) -> Path:
@@ -194,6 +306,8 @@ class TFDADrugSafetyRetriever:
             evidence_id = str(row.get("id") or metadata["document_id"])
             metadata.setdefault("document_id", evidence_id)
             original = row["page_content"]
+            if "topic" not in metadata:
+                metadata["topic"] = _infer_topic(original, metadata)
             truncated = original[:max_embed_chars] if max_embed_chars and len(original) > max_embed_chars else original
             if max_embed_chars and truncated != original:
                 metadata["original_content"] = original
@@ -322,11 +436,82 @@ class TFDADrugSafetyRetriever:
                 except Exception:
                     continue
 
+        if ranked:
+            boosted: dict[str, tuple[Any, float]] = {}
+            for eid, (doc, sc) in ranked.items():
+                bonus = _faq_bonus(dict(doc.metadata), request.original_query)
+                if bonus:
+                    for rq in request.retrieval_queries:
+                        if rq != request.original_query:
+                            b2 = _faq_bonus(dict(doc.metadata), rq)
+                            if b2 > bonus:
+                                bonus = b2
+                boosted[eid] = (doc, sc + bonus if bonus else sc)
+            ranked = boosted
+
+        # G4: threshold + topic consistency check -> knowledge gap if fails
+        if ranked:
+            max_score = max(score for _, score in ranked.values())
+            if max_score < RETRIEVAL_THRESHOLD:
+                return RAGResult(
+                    request_id=request.request_id,
+                    original_query=request.original_query,
+                    retrieval_queries=request.retrieval_queries,
+                    evidence=[],
+                    retrieval_latency_ms=(time.perf_counter() - started) * 1000,
+                )
+            expected_topic = _infer_query_topic(request.original_query)
+            if expected_topic != "general":
+                allowed = _TOPIC_ALLOWLIST.get(expected_topic, set())
+                # ensure metadata topic is present (infer if missing)
+                has_allowed = False
+                for doc, sc in ranked.values():
+                    if sc < RETRIEVAL_THRESHOLD:
+                        continue
+                    t = doc.metadata.get("topic") or _infer_topic(str(doc.metadata.get("original_content") or doc.page_content), doc.metadata)
+                    if t in allowed:
+                        has_allowed = True
+                        break
+                if not has_allowed:
+                    return RAGResult(
+                        request_id=request.request_id,
+                        original_query=request.original_query,
+                        retrieval_queries=request.retrieval_queries,
+                        evidence=[],
+                        retrieval_latency_ms=(time.perf_counter() - started) * 1000,
+                    )
+                # filter ranked to only allowed topics above threshold
+                filtered = {eid: (doc, sc) for eid, (doc, sc) in ranked.items() if sc >= RETRIEVAL_THRESHOLD and ((doc.metadata.get("topic") or _infer_topic(str(doc.metadata.get("original_content") or doc.page_content), doc.metadata)) in allowed)}
+                if filtered:
+                    ranked = filtered
+                else:
+                    return RAGResult(
+                        request_id=request.request_id,
+                        original_query=request.original_query,
+                        retrieval_queries=request.retrieval_queries,
+                        evidence=[],
+                        retrieval_latency_ms=(time.perf_counter() - started) * 1000,
+                    )
+            else:
+                # general query: still enforce threshold
+                filtered = {eid: (doc, sc) for eid, (doc, sc) in ranked.items() if sc >= RETRIEVAL_THRESHOLD}
+                if not filtered:
+                    return RAGResult(
+                        request_id=request.request_id,
+                        original_query=request.original_query,
+                        retrieval_queries=request.retrieval_queries,
+                        evidence=[],
+                        retrieval_latency_ms=(time.perf_counter() - started) * 1000,
+                    )
+                ranked = filtered
+
         # 依分數降冪排序，取前 top_k
         results = sorted(ranked.values(), key=lambda item: item[1], reverse=True)[: self.top_k]
         evidence = []
         for document, score in results:
             metadata = dict(document.metadata)
+            if "topic" not in metadata:
+                metadata["topic"] = _infer_topic(str(metadata.get("original_content") or document.page_content), metadata)
             content = str(metadata.get("original_content") or document.page_content)
             # Populate all 15 CanonicalEvidence fields
             evidence.append(

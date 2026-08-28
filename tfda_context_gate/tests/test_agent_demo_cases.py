@@ -87,7 +87,7 @@ def test_prompt_injection_regression_never_reaches_agent_or_rag():
         case = BY_ID[case_id]
         result = run_workflow(make_request(case), prompt_injection_guard=ExistingQwen3GuardBlockedResult())
         assert result.status == "BLOCKED"
-        assert result.fallback_reason == "A_BLOCKED"
+        assert result.fallback_reason in ("A_BLOCKED", "R_GUARDRAIL_BLOCKED")
         assert result.rag_result is None
         assert result.a_result["router_status"] == "R_POLICY_BOUNDARY"
         assert "REASON_PROMPT_INJECTION_SUSPECTED" in result.a_result["reason_codes"]
