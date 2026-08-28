@@ -30,9 +30,9 @@ tfda_context_gate.c_generator.schemas — C 層結構化輸出契約（v1 / v2�
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class EvidenceClaim(BaseModel):
@@ -96,6 +96,16 @@ class EvidenceAwareV2Answer(BaseModel):
     supported_claims: list[V2SupportedClaim] = Field(default_factory=list)  # 有 B-approved 證據支持的主張
     unsupported_requests: list[V2UnsupportedRequest] = Field(default_factory=list)  # 無證據支持的要求與原因
     limitations: list[str] = Field(default_factory=list)  # 補充限制（日期、衝突、範圍等）
+
+    @field_validator("limitations", mode="before")
+    @classmethod
+    def _coerce_limitations(cls, v: Any) -> list[str]:
+        """自動矯正 limitations 型別：str→[str], None→[]（修 P4 C ValidationError 主因）。"""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v] if v else []
+        return v  # type: ignore[return-value]
 
 
 class AuxiliaryEvaluation(BaseModel):

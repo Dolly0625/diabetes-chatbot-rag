@@ -16,7 +16,7 @@ from .schemas import RAGResult
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DOCUMENTS_PATH = PACKAGE_ROOT / "data" / "processed" / "langchain_documents.json"  # 預設 129 筆 TFDA 語料
 USER_DOCUMENTS_PATH = Path("/mnt/data/langchain_documents.json")  # 使用者自訂路徑（優先）
-DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"  # 預設多語嵌入模型
+DEFAULT_EMBEDDING_MODEL = "ollama/bge-m3:latest"  # 預設多語嵌入模型（固化 bge-m3，消除分叉）
 CACHE_DIR = PACKAGE_ROOT / "data" / "processed" / ".vector_cache"  # 向量快取目錄（持久化）
 
 # G4 retrieval precision: similarity threshold α (tunable) and topic consistency
@@ -240,7 +240,13 @@ class TFDADrugSafetyRetriever:
             raise ValueError("top_k must be >= 1")
         self.documents_path = resolve_documents_path(documents_path)
         self.top_k = top_k
-        self.embedding_model = embedding_model or os.getenv("EMBED_MODEL", DEFAULT_EMBEDDING_MODEL)
+        raw_model = embedding_model or os.getenv("EMBED_MODEL", DEFAULT_EMBEDDING_MODEL)
+        if raw_model not in ("ollama/bge-m3:latest", "ollama/bge-m3", "bge-m3:latest", "bge-m3"):
+            if raw_model == "intfloat/multilingual-e5-small":
+                raw_model = "ollama/bge-m3:latest"
+        if raw_model in ("bge-m3", "bge-m3:latest"):
+            raw_model = "ollama/bge-m3:latest"
+        self.embedding_model = raw_model
         self._store: Any | None = None  # 向量庫實例，lazy 初始化前為 None
         self._rows_by_id: dict[str, dict[str, Any]] = {}  # evidence_id → 原始列的對照表
 
@@ -248,7 +254,8 @@ class TFDADrugSafetyRetriever:
         import hashlib
 
         stat = self.documents_path.stat() if self.documents_path.exists() else None
-        raw = f"{self.documents_path}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}:{self.embedding_model}:{CACHE_VERSION}:{RETRIEVAL_THRESHOLD}"
+        mtime_sec = stat.st_mtime_ns // 1_000_000_000 if stat else 0
+        raw = f"{self.documents_path}:{mtime_sec}:{stat.st_size if stat else 0}:{self.embedding_model}:{CACHE_VERSION}:{RETRIEVAL_THRESHOLD}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _cache_path(self) -> Path:
@@ -274,11 +281,35 @@ class TFDADrugSafetyRetriever:
 
                 with cache_path.open("rb") as f:
                     payload = pickle.load(f)
+                    if "store_dict" in payload:
+                        from langchain_core.vectorstores import InMemoryVectorStore
+
+                        ollama_model = os.getenv("OLLAMA_EMBED_MODEL", "bge-m3:latest")
+                        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+                        try:
+                            from langchain_ollama import OllamaEmbeddings
+
+                            model_name = self.embedding_model.split("/", 1)[-1] if "/" in self.embedding_model else ollama_model
+                            embeddings = OllamaEmbeddings(model=model_name, base_url=ollama_base)
+                        except Exception:
+                            embeddings = None
+                        if embeddings is None:
+                            from langchain_huggingface import HuggingFaceEmbeddings
+
+                            embeddings = HuggingFaceEmbeddings(model_name=self.embedding_model)
+                        new_store = InMemoryVectorStore(embedding=embeddings)
+                        new_store.store = payload["store_dict"]
+                        self._store = new_store
+                        self._rows_by_id = payload.get("rows_by_id", {})
+                        return self._store
                     self._store = payload["store"]
                     self._rows_by_id = payload.get("rows_by_id", {})
                     return self._store
             except Exception:
-                pass
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
         rows = load_tfda_rows(self.documents_path)
         try:
             from langchain_core.documents import Document
@@ -343,12 +374,32 @@ class TFDADrugSafetyRetriever:
         self._store = store
         try:
             import pickle
+            import tempfile
 
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            with cache_path.open("wb") as f:
-                pickle.dump({"store": store, "rows_by_id": self._rows_by_id}, f)
+            payload_dict = {"store_dict": store.store, "rows_by_id": self._rows_by_id, "embedding_model": self.embedding_model}
+            fd, tmp_path = tempfile.mkstemp(dir=str(CACHE_DIR), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as tmp:
+                    pickle.dump(payload_dict, tmp)
+                os.replace(tmp_path, cache_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+                raise
         except Exception:
-            pass
+            try:
+                with cache_path.open("wb") as f:
+                    try:
+                        pickle.dump({"store": store, "rows_by_id": self._rows_by_id}, f)
+                    except Exception:
+                        f.seek(0)
+                        f.truncate()
+                        pickle.dump({"store_dict": store.store, "rows_by_id": self._rows_by_id, "embedding_model": self.embedding_model}, f)
+            except Exception:
+                pass
         return store
 
     def _is_hpa_enabled(self) -> bool:

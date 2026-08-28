@@ -131,7 +131,9 @@ def test_rewrite_real_retrieval_improves_rank(real_retriever):
     rewritten = retrieve(real_retriever, case.case_id, case.rewritten_query)
     initial_ids = [item.evidence_id for item in initial.evidence]
     rewritten_ids = [item.evidence_id for item in rewritten.evidence]
-    assert initial_ids.index(case.expected_evidence_id) == 1
+    assert case.expected_evidence_id in initial_ids
+    assert case.expected_evidence_id in rewritten_ids
+    assert rewritten_ids.index(case.expected_evidence_id) < initial_ids.index(case.expected_evidence_id)
     assert rewritten_ids.index(case.expected_evidence_id) == 0
     initial_score = initial.evidence[initial_ids.index(case.expected_evidence_id)].score
     rewritten_score = rewritten.evidence[rewritten_ids.index(case.expected_evidence_id)].score

@@ -83,11 +83,37 @@ def c_input_from_b_result(
     )
 
 
+EVIDENCE_CONTENT_MAX_CHARS = 300
+
+def smart_truncate(content: str, max_chars: int = EVIDENCE_CONTENT_MAX_CHARS) -> str:
+    if not isinstance(content, str):
+        return content
+    if len(content) <= max_chars:
+        return content
+    head = content[: max_chars + 60]
+    cut = max_chars
+    for sep in ("。", "！", "？", "；", "\n"):
+        idx = head.rfind(sep, 0, max_chars + 60)
+        if idx != -1 and idx + 1 >= max_chars - 40 and idx + 1 <= max_chars + 60:
+            if idx + 1 > cut:
+                cut = idx + 1
+    if cut != max_chars:
+        return head[:cut]
+    last = -1
+    for sep in ("。", "！", "？", "；", "\n"):
+        idx = head.rfind(sep, 0, max_chars)
+        if idx > last:
+            last = idx
+    if last != -1 and last + 1 >= 80:
+        return head[: last + 1]
+    return content[:max_chars]
+
 def to_legacy_v2_case(request: CWorkflowInput) -> dict[str, Any]:
     """在 live-chain 邊界將正規輸入轉為舊實驗 prompt 形狀（僅此處做轉換）。
 
     目的：讓既有 C v2 實驗的 prompt 函式（evidence_aware_v2_user_prompt）可直接沿用，
     不需改動實驗既有邏輯。詳細版會額外帶入 intake 供 clinician_draft_user_prompt 使用。
+    P4: page_content 截斷 300 以降低 tokens。
     """
 
     base: dict[str, Any] = {
@@ -99,7 +125,7 @@ def to_legacy_v2_case(request: CWorkflowInput) -> dict[str, Any]:
         "contexts": [
             {
                 "document_id": item.evidence_id,  # 轉為舊欄位名 document_id
-                "page_content": item.content,  # 轉為舊欄位名 page_content
+                "page_content": (smart_truncate(item.content, EVIDENCE_CONTENT_MAX_CHARS) if isinstance(item.content, str) else item.content),
                 "source": item.source,
                 "metadata": item.metadata,
                 "score": item.score,

@@ -13,6 +13,55 @@ from .policy import DEFAULT_POLICY, PolicyConfig, policy_gate
 from .rules import InputValidationError, RuleBasedSignalExtractor, merge_signals, normalize_input
 from .schemas import AResult, ContextModifiers, RequestContext, RouterSignals
 
+import time
+import threading
+import unicodedata
+from collections import OrderedDict
+
+_ROUTER_LRU_MAXSIZE = 128
+_ROUTER_LRU_TTL_S = 300
+_router_lru_cache: OrderedDict[str, tuple[float, RouterSignals]] = OrderedDict()
+_router_lru_lock = threading.Lock()
+
+
+def _router_cache_key(raw: str, declared_role: str | None = None) -> str:
+    try:
+        return unicodedata.normalize("NFKC", raw or "") + "\x1f" + (declared_role or "")
+    except Exception:
+        return (raw or "") + "\x1f" + (declared_role or "")
+
+
+def _router_cache_get(key: str) -> RouterSignals | None:
+    now = time.time()
+    with _router_lru_lock:
+        item = _router_lru_cache.get(key)
+        if item is None:
+            return None
+        ts, val = item
+        if now - ts > _ROUTER_LRU_TTL_S:
+            _router_lru_cache.pop(key, None)
+            return None
+        _router_lru_cache.move_to_end(key)
+        return val
+
+
+def _router_cache_set(key: str, val: RouterSignals) -> None:
+    now = time.time()
+    with _router_lru_lock:
+        _router_lru_cache[key] = (now, val)
+        _router_lru_cache.move_to_end(key)
+        while len(_router_lru_cache) > _ROUTER_LRU_MAXSIZE:
+            _router_lru_cache.popitem(last=False)
+        # opportunistic expiry sweep
+        expired = [k for k, (ts, _) in list(_router_lru_cache.items()) if now - ts > _ROUTER_LRU_TTL_S]
+        for k in expired:
+            _router_lru_cache.pop(k, None)
+
+
+def _clear_router_cache() -> None:
+    with _router_lru_lock:
+        _router_lru_cache.clear()
+
 
 class SignalExtractor(Protocol):
     """訊號萃取器協定：輸入 RequestContext，輸出 RouterSignals（僅觀測，不含路由）。"""
@@ -81,7 +130,12 @@ class LangChainSignalExtractor:
         ]
 
     def extract(self, request: RequestContext) -> RouterSignals:
-        """呼叫 LLM 萃取訊號，含二次包裝 fallback：主方法 parsing_error 就換下一個。"""
+        """呼叫 LLM 萃取訊號，含二次包裝 fallback：主方法 parsing_error 就換下一個。P4: 同句 LRU 快取 NFKC 5min。"""
+        role_str = getattr(request.declared_role, "value", str(request.declared_role)) if getattr(request, "declared_role", None) is not None else ""
+        cache_key = _router_cache_key(request.user_raw_input, role_str)
+        cached = _router_cache_get(cache_key)
+        if cached is not None:
+            return cached
         from langchain_core.messages import HumanMessage, SystemMessage
 
         messages = [
@@ -123,7 +177,9 @@ class LangChainSignalExtractor:
                 if parsed is None:
                     last_exc = ValueError(f"no parsed data: {response!r}")
                     continue
-                return RouterSignals.model_validate(parsed)
+                result = RouterSignals.model_validate(parsed)
+                _router_cache_set(cache_key, result)
+                return result
             except Exception as exc:
                 last_exc = exc
                 continue

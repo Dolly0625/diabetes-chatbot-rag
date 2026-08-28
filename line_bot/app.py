@@ -39,6 +39,7 @@ from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 HONEST_FALLBACK_PUSH_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
 ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你 📋"
 ASYNC_FORMAL_TIMEOUT_S = float(os.getenv("ASYNC_FORMAL_TIMEOUT_S", "120"))
 _pushed_events: set[str] = set()
@@ -117,6 +118,23 @@ LINE_CHANNEL_ACCESS_TOKEN = (
 # ── FastAPI app ─────────────────────────────────────────────────────────────
 app = FastAPI(title="TFDA Diabetes LINE Bot", version="0.1.0")
 _conversation_orchestrator: Any | None = None
+
+
+@app.on_event("startup")
+def _preheat_vector_store() -> None:
+    def _warm() -> None:
+        try:
+            from tfda_context_gate.rag.tfda_retriever import TFDADrugSafetyRetriever
+
+            retriever = TFDADrugSafetyRetriever(embedding_model="ollama/bge-m3:latest")
+            retriever._ensure_store()
+        except Exception:
+            pass
+
+    try:
+        threading.Thread(target=_warm, daemon=True).start()
+    except Exception:
+        pass
 
 
 def _get_conversation_orchestrator() -> Any | None:
@@ -551,83 +569,111 @@ def _schedule_formal_push(
         if norm:
             _text_dedup[key] = now
 
-    def _bg() -> None:
-        with _FORMAL_SEMAPHORE:
-            try:
-                if _is_duplicate_push(event_id):
-                    return
-                wf = None
-                last_exc: Exception | None = None
-                for attempt in range(2):
-                    try:
-                        if orchestrator is not None:
-                            session = orchestrator.session_for_user(line_user_id)
-                            declared_role = "PATIENT"
-                            if session is not None:
-                                try:
-                                    from tfda_context_gate.line_orchestration.orchestrator import ConversationOrchestrator as _CO
+    def _execute_formal_and_push() -> None:
+        try:
+            wf = None
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                try:
+                    if orchestrator is not None:
+                        session = orchestrator.session_for_user(line_user_id)
+                        declared_role = "PATIENT"
+                        if session is not None:
+                            try:
+                                from tfda_context_gate.line_orchestration.orchestrator import ConversationOrchestrator as _CO
 
-                                    declared_role = _CO._declared_role(session.actor_role)  # type: ignore[attr-defined]
-                                except Exception:
-                                    declared_role = "PATIENT"
-                            if False and hasattr(orchestrator, "_run_formal_with_timeout"):
-                                wf = orchestrator._run_formal_with_timeout(text, session if session is not None else orchestrator._load_or_create(line_user_id), ASYNC_FORMAL_TIMEOUT_S)  # type: ignore[attr-defined]
-                            else:
-                                from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
-                                def _call() -> Any:
-                                    return orchestrator._call_workflow(
-                                        {"request_id": f"line-push-{event_id[:8]}", "schema_version": "a.v0.1", "user_raw_input": text, "declared_role": declared_role, "language": "zh-TW"},
-                                        use_formal=True,
-                                    )
-
-                                with ThreadPoolExecutor(max_workers=1) as ex:
-                                    fut = ex.submit(_call)
-                                    wf = fut.result(timeout=ASYNC_FORMAL_TIMEOUT_S)
+                                declared_role = _CO._declared_role(session.actor_role)  # type: ignore[attr-defined]
+                            except Exception:
+                                declared_role = "PATIENT"
+                        if False and hasattr(orchestrator, "_run_formal_with_timeout"):
+                            wf = orchestrator._run_formal_with_timeout(text, session if session is not None else orchestrator._load_or_create(line_user_id), ASYNC_FORMAL_TIMEOUT_S)  # type: ignore[attr-defined]
                         else:
                             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-                            def _compat_call() -> Any:
-                                return handle_text_message(text, request_id=f"compat-{event_id[:8]}", use_formal=True)
+                            def _call() -> Any:
+                                return orchestrator._call_workflow(
+                                    {"request_id": f"line-push-{event_id[:8]}", "schema_version": "a.v0.1", "user_raw_input": text, "declared_role": declared_role, "language": "zh-TW"},
+                                    use_formal=True,
+                                )
 
                             with ThreadPoolExecutor(max_workers=1) as ex:
-                                fut = ex.submit(_compat_call)
+                                fut = ex.submit(_call)
                                 wf = fut.result(timeout=ASYNC_FORMAL_TIMEOUT_S)
-                        break
-                    except Exception as exc:  # noqa: BLE001
-                        last_exc = exc
-                        is_timeout = "TimeoutError" in type(exc).__name__ or "FuturesTimeoutError" in type(exc).__name__
-                        logger.warning("formal workflow %s attempt %s for %s: %s", "timeout" if is_timeout else "error", attempt + 1, event_id[:8], exc)
-                        if attempt == 0:
-                            continue
-                        from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
+                    else:
+                        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-                        reason = "FORMAL_TIMEOUT" if is_timeout else "SYSTEM_DEPENDENCY"
-                        wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason=reason, a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason=reason, intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
-                if wf is None:
+                        def _compat_call() -> Any:
+                            return handle_text_message(text, request_id=f"compat-{event_id[:8]}", use_formal=True)
+
+                        with ThreadPoolExecutor(max_workers=1) as ex:
+                            fut = ex.submit(_compat_call)
+                            wf = fut.result(timeout=ASYNC_FORMAL_TIMEOUT_S)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    is_timeout = "TimeoutError" in type(exc).__name__ or "FuturesTimeoutError" in type(exc).__name__
+                    logger.warning("formal workflow %s attempt %s for %s: %s", "timeout" if is_timeout else "error", attempt + 1, event_id[:8], exc)
+                    if attempt == 0:
+                        continue
                     from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
 
-                    wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason="SYSTEM_DEPENDENCY", a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason="SYSTEM_DEPENDENCY", intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
-                push_text = _format_formal_push_text(wf, text)
-                ok = False
-                for attempt in range(2):
-                    try:
-                        ok = _push_text(line_user_id, push_text, event_id=event_id)
-                        if ok:
-                            break
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("push retry failed %s: %s", event_id, exc)
-                        if attempt == 0:
-                            continue
-                if ok and push_text == HONEST_FALLBACK_PUSH_TEXT and orchestrator is not None:
-                    _maybe_record_question_for_doctor(orchestrator, line_user_id, text, wf)
-                if not ok and not _is_duplicate_push(event_id):
-                    try:
-                        _push_text(line_user_id, HONEST_FALLBACK_PUSH_TEXT, event_id=event_id)
-                    except Exception:
-                        pass
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("schedule formal push crashed %s: %s", event_id, exc)
+                    reason = "FORMAL_TIMEOUT" if is_timeout else "SYSTEM_DEPENDENCY"
+                    wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason=reason, a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason=reason, intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
+            if wf is None:
+                from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
+
+                wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason="SYSTEM_DEPENDENCY", a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason="SYSTEM_DEPENDENCY", intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
+            push_text = _format_formal_push_text(wf, text)
+            ok = False
+            for attempt in range(2):
+                try:
+                    ok = _push_text(line_user_id, push_text, event_id=event_id)
+                    if ok:
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("push retry failed %s: %s", event_id, exc)
+                    if attempt == 0:
+                        continue
+            if ok and push_text == HONEST_FALLBACK_PUSH_TEXT and orchestrator is not None:
+                _maybe_record_question_for_doctor(orchestrator, line_user_id, text, wf)
+            if not ok and not _is_duplicate_push(event_id):
+                try:
+                    _push_text(line_user_id, HONEST_FALLBACK_PUSH_TEXT, event_id=event_id)
+                except Exception:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("schedule formal push crashed %s: %s", event_id, exc)
+
+    def _bg() -> None:
+        acquired = _FORMAL_SEMAPHORE.acquire(blocking=False)
+        if not acquired:
+            if _is_duplicate_push(event_id):
+                return
+            try:
+                _push_text(line_user_id, QUEUED_FALLBACK_TEXT, event_id=None)
+            except Exception:
+                pass
+
+            def _delayed() -> None:
+                with _FORMAL_SEMAPHORE:
+                    if _is_duplicate_push(event_id):
+                        return
+                    _execute_formal_and_push()
+
+            try:
+                threading.Thread(target=_delayed, daemon=True).start()
+            except Exception:
+                pass
+            return
+        try:
+            if _is_duplicate_push(event_id):
+                return
+            _execute_formal_and_push()
+        finally:
+            try:
+                _FORMAL_SEMAPHORE.release()
+            except Exception:
+                pass
 
     threading.Thread(target=_bg, daemon=True).start()
 

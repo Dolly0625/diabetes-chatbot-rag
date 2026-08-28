@@ -291,7 +291,7 @@ class ClinicianDraftGenerator:
         # Source table as formatted text (5 columns) — concise, D will also append but keep answer concise
         table_header = "【來源對照表】"
         table_rows = []
-        for row in source_table[:5]:
+        for row in source_table[:2]:
             score_str = f"{row.score:.2f}" if row.score is not None else ""
             table_rows.append(f"{row.evidence_id} | {row.source or ''} | {row.date or ''} | {row.version or ''} | {score_str}")
         table_text = table_header + "\n" + "\n".join(table_rows) if table_rows else table_header + "\n（無）"
@@ -359,7 +359,7 @@ class ClinicianDraftGenerator:
             )
             for index, item in enumerate(usable[:3], 1)
         ]
-        # Source table: up to 5 rows, preserve order
+        # Source table: up to 2 rows, preserve order (P4 slimming)
         source_table = [
             ClinicianSourceRow(
                 evidence_id=item.evidence_id,
@@ -368,7 +368,7 @@ class ClinicianDraftGenerator:
                 version=item.version,
                 score=item.score,
             )
-            for item in usable[:5]
+            for item in usable[:2]
         ]
         conflicts: list[str] = []
         if len(usable) > 1:

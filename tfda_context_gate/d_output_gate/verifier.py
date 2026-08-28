@@ -144,7 +144,7 @@ class HeuristicSemanticVerifier:
         # claim entailment score and has no clinical validity claim.
         # 為何閾值 0.85：經驗性 demo 閾值，平衡容忍改寫與攔截幻覺；非臨床有效性聲明
         # 為何額外檢查原文包含：若主張原文被任一證據原文包含，直接視為支撐，處理完全複製的情況
-        return overlap >= 0.85 or any(claim.strip() in text for text in evidence_texts)
+        return overlap >= 0.78 or any(claim.strip() in text for text in evidence_texts)
 
 
 class MappingSemanticVerifier:

@@ -79,18 +79,20 @@ decision 只能是：
    但不能把相關但不同主題的文件當成證據。即使 decision 是 INSUFFICIENT，
    只要 context 有直接支持的同主題前提事實，也要列在 supported_claims；只有完全沒有
    任何相關直接事實時，supported_claims 才可以是空陣列。
-8. answer 要簡潔、繁體中文；limitations 可補充日期、衝突或資料範圍限制。
-   比較兩個文件時，若一份說「沒有本地通報」、另一份基於國外證據或預防原則提出限制，
+ 8. answer 要簡潔、繁體中文；limitations 可補充日期、衝突或資料範圍限制。
+    【重要】limitations 欄位必須是字串陣列（list of strings），每項一句話，不得為單一字串；只有一條也必須寫成 ["..."]，沒有則寫 []。
+    比較兩個文件時，若一份說「沒有本地通報」、另一份基於國外證據或預防原則提出限制，
    可以明確說明「沒有通報不等於沒有風險」，這兩件事不必然矛盾；不要因文件沒有逐字寫出
    「不矛盾」就整題拒答。若問題直接問是否矛盾，應直接回答「不必然矛盾」，並說明一份
    是本地通報觀察、另一份是根據外部證據與預防原則的風險管理。
-9. 只輸出 schema 中的 decision、answer、supported_claims、unsupported_requests、limitations。
+ 9. 只輸出 schema 中的 decision、answer、supported_claims、unsupported_requests、limitations；其中 limitations 必須是 list[str]（例如 ["資料來自2023年"]），絕不可輸出單一字串。
 10. 為避免輸出被截斷，supported_claims 最多 3 項、unsupported_requests 最多 3 項、
     limitations 最多 2 項；每個 claim、request 和 reason 都只寫一句短句。
-格式最小示例（只示範欄位位置，不是本題答案）：
+ 格式最小示例（只示範欄位位置，不是本題答案）：
 {"decision":"PARTIAL","answer":"先回答有證據的部分，並說明缺口",
 "supported_claims":[{"claim_id":"c1","claim":"文件直接支持的事實","evidence_ids":["tfda-risk-0001"]}],
-"unsupported_requests":[{"request":"文件沒有提供的要求","reason":"缺少直接資料"}],"limitations":[]}
+"unsupported_requests":[{"request":"文件沒有提供的要求","reason":"缺少直接資料"}],"limitations":["文件來自2023年，需由醫護人員評估"]}
+ 限制：limitations 示例 ["文件來自2023年..."] 為字串陣列，非 "文件來自2023年" 單一字串；空則 []。
 """
 
 
@@ -146,8 +148,8 @@ answer 必須為繁中格式化文本，含以下 4 段結構（每段有標題�
   - 缺口說明：limitations/conflicts 中未解問題
 
 【來源對照表】
-  - answer 末尾以表格形式呈現 source_table（5 列：evidence_id | source | date | version | score），每列對應一筆 B-approved evidence
-  - 若 evidence 不足 5 筆，則列出所有可用證據；若超過 5 筆，取前 5 筆
+  - answer 末尾以表格形式呈現 source_table（2 列：evidence_id | source | date | version | score），每列對應一筆 B-approved evidence
+  - 若 evidence 不足 2 筆，則列出所有可用證據；若超過 2 筆，取前 2 筆
   - 表格為格式化文本，非 JSON only，但同時需在 source_table 欄位提供結構化數據
 
 請嚴格遵守：
@@ -156,10 +158,10 @@ answer 必須為繁中格式化文本，含以下 4 段結構（每段有標題�
 3. 證據間衝突必須保留於 conflicts，不自行仲裁或選邊；若無衝突則 conflicts 為空陣列。
 4. 禁止個人化劑量指示、自動處方（例如「建議您每日服用 X mg」「處方為」）；僅能陳述文件中的一般性資訊。
 5. 草稿性質：必須包含 disclaimer，明確標示「本草稿僅供醫護人員參考，需經專業人員確認後使用，不得直接作為處方或診斷依據；最終臨床判斷由醫護人員負責」或等效表述，且 disclaimer 需含「確認」二字。
-6. 只輸出 ClinicianEvidenceDraft 的 8 欄：request_id / decision / answer / evidence_summary / conflicts / limitations / source_table / disclaimer；evidence_summary 最多 3 項、conflicts 最多 2 項、limitations 最多 2 項；answer 為上述 4 段格式化文本 + 表格，300-400 字。
-7. evidence_ids 必須來自 Approved evidence IDs，不可自創；claim_id 僅 c1/c2 短標籤。
-8. 若 decision 為 CLINICIAN_DRAFT，source_table 不可為空，且每列 evidence_id 必須來自 B-approved；disclaimer 不可為空且需含「確認」。
-9. answer 禁止僅輸出 JSON，必須為可讀的格式化文本 + 表格，專業但易懂，提供更多脈絡與說明。
+ 6. 只輸出 ClinicianEvidenceDraft 的 8 欄：request_id / decision / answer / evidence_summary / conflicts / limitations / source_table / disclaimer；evidence_summary 最多 3 項、conflicts 最多 2 項、limitations 最多 2 項、source_table 最多 2 列；answer 為上述 4 段格式化文本 + 表格，300-400 字。
+ 7. evidence_ids 必須來自 Approved evidence IDs，不可自創；claim_id 僅 c1/c2 短標籤。
+ 8. 若 decision 為 CLINICIAN_DRAFT，source_table 不可為空且最多 2 列，且每列 evidence_id 必須來自 B-approved；disclaimer 不可為空且需含「確認」。
+ 9. answer 禁止僅輸出 JSON，必須為可讀的格式化文本 + 表格，專業但易懂，提供更多脈絡與說明。
 """
 
 

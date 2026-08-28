@@ -5,6 +5,8 @@ from __future__ import annotations
 純搬運，不改邏輯，僅瘦身 runner.py。
 """
 
+from functools import lru_cache  # noqa: E402
+
 
 def _build_formal_extractor():
     from tfda_context_gate.a_router.router import LangChainSignalExtractor
@@ -12,6 +14,7 @@ def _build_formal_extractor():
     return LangChainSignalExtractor.from_env()
 
 
+@lru_cache(maxsize=1)
 def _build_formal_retriever():
     try:
         from tfda_context_gate.rag.tfda_retriever import TFDADrugSafetyRetriever
@@ -47,7 +50,13 @@ def _build_formal_generator():
     except ImportError as exc:
         raise RuntimeError("formal C requires langchain-openai") from exc
     llm = ChatOpenAI(**kwargs)
-    chain = llm.with_structured_output(EvidenceAwareV2Answer, method="function_calling", include_raw=True)
+    try:
+        chain = llm.with_structured_output(EvidenceAwareV2Answer, method="function_calling", include_raw=True, tool_choice="required")  # type: ignore[call-arg]
+    except TypeError:
+        try:
+            chain = llm.with_structured_output(EvidenceAwareV2Answer, method="function_calling", include_raw=True, strict=True)  # type: ignore[call-arg]
+        except TypeError:
+            chain = llm.with_structured_output(EvidenceAwareV2Answer, method="function_calling", include_raw=True)
     return LangChainCV2Generator(chain, llm=llm)
 
 

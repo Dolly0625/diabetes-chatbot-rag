@@ -10,20 +10,48 @@ tfda_context_gate.c_generator.user_prompts — C 層 user prompt 組裝
 from __future__ import annotations
 
 
+EVIDENCE_PAGE_CONTENT_MAX_CHARS = 300
+
+def smart_truncate(content: str, max_chars: int = EVIDENCE_PAGE_CONTENT_MAX_CHARS) -> str:
+    if not isinstance(content, str):
+        return content
+    if len(content) <= max_chars:
+        return content
+    head = content[: max_chars + 60]
+    cut = max_chars
+    for sep in ("。", "！", "？", "；", "\n"):
+        idx = head.rfind(sep, 0, max_chars + 60)
+        if idx != -1 and idx + 1 >= max_chars - 40 and idx + 1 <= max_chars + 60:
+            if idx + 1 > cut:
+                cut = idx + 1
+    if cut != max_chars:
+        return head[:cut]
+    last = -1
+    for sep in ("。", "！", "？", "；", "\n"):
+        idx = head.rfind(sep, 0, max_chars)
+        if idx > last:
+            last = idx
+    if last != -1 and last + 1 >= 80:
+        return head[: last + 1]
+    return content[:max_chars]
+
 def context_block(case: dict) -> str:
     """將 case['contexts'] 轉為提示詞中的文件區塊（v1/v2 共用）。
 
     每份文件含 document_id / 發布日期 / 藥品成分 / page_content，以分隔線串接。
+    P4: page_content 截斷至 300 字/evidence 以降低 C 輸入 tokens。
     """
     blocks = []
-    for item in case["contexts"]:  # 逐份文件組區塊
+    for item in case["contexts"]:
+        raw_content = str(item.get("page_content", "") or "")
+        truncated = smart_truncate(raw_content, EVIDENCE_PAGE_CONTENT_MAX_CHARS)
         blocks.append(
             "\n".join(
                 [
                     f"document_id: {item['document_id']}",
                     f"發布日期: {item.get('發布日期', '')}",
                     f"藥品成分: {item.get('藥品成分', '')}",
-                    f"page_content:\n{item['page_content']}",
+                    f"page_content:\n{truncated}",
                 ]
             )
         )
@@ -181,10 +209,10 @@ Context documents:
 {context_block(case)}
 
 請依醫護草稿詳細版規則產生 ClinicianEvidenceDraft：
-- answer 為格式化文本（非 JSON only），含 4 段：一、基本資料（用藥/過敏/慢性/家族）、二、時間軸（起始/描述/程度）、三、安全訊號與限制（不得宣稱已排除急症）、四、待確認（藥袋提醒與待確認項目），末尾附來源對照表（5 列：evidence_id | source | date | version | score）
+- answer 為格式化文本（非 JSON only），含 4 段：一、基本資料（用藥/過敏/慢性/家族）、二、時間軸（起始/描述/程度）、三、安全訊號與限制（不得宣稱已排除急症）、四、待確認（藥袋提醒與待確認項目），末尾附來源對照表（2 列：evidence_id | source | date | version | score）
 - 全文 300-400 字，專業但易懂，詳細但不超過 800 字，含免責聲明（需含「確認」）
 - 禁止幻覺診斷與個人化劑量指示，僅整理事實與證據
-- source_table 結構化欄位需與文本表格一致，且每列 evidence_id 來自 B-approved
+- source_table 結構化欄位需與文本表格一致，且每列 evidence_id 來自 B-approved，最多 2 列
 不要輸出 chain-of-thought。
 {no_evidence_hint}"""
 

@@ -22,6 +22,7 @@ LINE_USE_FORMAL_DEFAULT = os.getenv("LINE_USE_FORMAL", "true").lower() in ("1", 
 
 # ── Async formal push: honest fallback + idempotency ─────────────────────────
 HONEST_FALLBACK_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
 HONEST_FALLBACK_REASONS = {"B_INSUFFICIENT", "FORMAL_TIMEOUT", "C_FAILURE", "SYSTEM_DEPENDENCY", "B_UNSAFE"}
 
 # LINE educational narrow path (G) async: placeholder + background formal (120s + 1 retry)
@@ -576,133 +577,163 @@ class ConversationOrchestrator:
         if self._is_duplicate_push(event_id):
             return
 
-        def _background() -> None:
-            with _FORMAL_SEMAPHORE:
-                workflow: WorkflowResult | None = None
-                for attempt in range(2):
-                    try:
-                        sess = self.repository.get(session_id)
-                        target_session = sess if sess is not None else ProductSession.model_validate(
-                            {
-                                "session_id": session_id,
-                                "principal_id_hash": self._hash(line_user_id),
-                                "conversation_context": self.context_manager.create(session_id),
-                                "created_at": datetime.now(timezone.utc).isoformat(),
-                                "updated_at": datetime.now(timezone.utc).isoformat(),
-                                "expires_at": (datetime.now(timezone.utc) + self.session_ttl).isoformat(),
-                            }
-                        )
-                        wf = self._run_formal_with_timeout(text, target_session, self.async_formal_timeout_s)
-                        workflow = wf
-                        break
-                    except FuturesTimeoutError:
-                        logger.warning("async formal timeout attempt %s for %s", attempt + 1, event_id[:8])
-                        if attempt == 1:
-                            workflow = WorkflowResult(
-                                request_id=event_id,
-                                status="FALLBACK",
-                                final_response=HONEST_FALLBACK_TEXT,
-                                fallback_reason="FORMAL_TIMEOUT",
-                                a_result=None,
-                                query_expansion=None,
-                                rag_result=None,
-                                b_result=None,
-                                c_result=None,
-                                d_result=None,
-                                agent_action=None,
-                                agent_reason_code=None,
-                                question=None,
-                                current_query=text,
-                                execution_history=[],
-                                agent_steps=0,
-                                rewrite_count=0,
-                                clarification_count=0,
-                                termination_reason="FORMAL_TIMEOUT",
-                                intake_snapshot=None,
-                                intake_stage=None,
-                                previsit_summary=None,
-                                system_risk_classification=None,
-                                trace={"events": [], "evaluations": []},
-                            )
-                        else:
-                            continue
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("async formal error attempt %s for %s: %s", attempt + 1, event_id[:8], exc)
-                        if attempt == 1:
-                            workflow = WorkflowResult(
-                                request_id=event_id,
-                                status="FALLBACK",
-                                final_response=HONEST_FALLBACK_TEXT,
-                                fallback_reason="SYSTEM_DEPENDENCY",
-                                a_result=None,
-                                query_expansion=None,
-                                rag_result=None,
-                                b_result=None,
-                                c_result=None,
-                                d_result=None,
-                                agent_action=None,
-                                agent_reason_code=None,
-                                question=None,
-                                current_query=text,
-                                execution_history=[],
-                                agent_steps=0,
-                                rewrite_count=0,
-                                clarification_count=0,
-                                termination_reason="SYSTEM_DEPENDENCY",
-                                intake_snapshot=None,
-                                intake_stage=None,
-                                previsit_summary=None,
-                                system_risk_classification=None,
-                                trace={"events": [], "evaluations": []},
-                            )
-                        else:
-                            continue
-                if workflow is None:
-                    workflow = WorkflowResult(
-                        request_id=event_id,
-                        status="FALLBACK",
-                        final_response=HONEST_FALLBACK_TEXT,
-                        fallback_reason="SYSTEM_DEPENDENCY",
-                        a_result=None,
-                        query_expansion=None,
-                        rag_result=None,
-                        b_result=None,
-                        c_result=None,
-                        d_result=None,
-                        agent_action=None,
-                        agent_reason_code=None,
-                        question=None,
-                        current_query=text,
-                        execution_history=[],
-                        agent_steps=0,
-                        rewrite_count=0,
-                        clarification_count=0,
-                        termination_reason="SYSTEM_DEPENDENCY",
-                        intake_snapshot=None,
-                        intake_stage=None,
-                        previsit_summary=None,
-                        system_risk_classification=None,
-                        trace={"events": [], "evaluations": []},
+        def _execute_and_push() -> None:
+            workflow: WorkflowResult | None = None
+            for attempt in range(2):
+                try:
+                    sess = self.repository.get(session_id)
+                    target_session = sess if sess is not None else ProductSession.model_validate(
+                        {
+                            "session_id": session_id,
+                            "principal_id_hash": self._hash(line_user_id),
+                            "conversation_context": self.context_manager.create(session_id),
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "expires_at": (datetime.now(timezone.utc) + self.session_ttl).isoformat(),
+                        }
                     )
+                    wf = self._run_formal_with_timeout(text, target_session, self.async_formal_timeout_s)
+                    workflow = wf
+                    break
+                except FuturesTimeoutError:
+                    logger.warning("async formal timeout attempt %s for %s", attempt + 1, event_id[:8])
+                    if attempt == 1:
+                        workflow = WorkflowResult(
+                            request_id=event_id,
+                            status="FALLBACK",
+                            final_response=HONEST_FALLBACK_TEXT,
+                            fallback_reason="FORMAL_TIMEOUT",
+                            a_result=None,
+                            query_expansion=None,
+                            rag_result=None,
+                            b_result=None,
+                            c_result=None,
+                            d_result=None,
+                            agent_action=None,
+                            agent_reason_code=None,
+                            question=None,
+                            current_query=text,
+                            execution_history=[],
+                            agent_steps=0,
+                            rewrite_count=0,
+                            clarification_count=0,
+                            termination_reason="FORMAL_TIMEOUT",
+                            intake_snapshot=None,
+                            intake_stage=None,
+                            previsit_summary=None,
+                            system_risk_classification=None,
+                            trace={"events": [], "evaluations": []},
+                        )
+                    else:
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("async formal error attempt %s for %s: %s", attempt + 1, event_id[:8], exc)
+                    if attempt == 1:
+                        workflow = WorkflowResult(
+                            request_id=event_id,
+                            status="FALLBACK",
+                            final_response=HONEST_FALLBACK_TEXT,
+                            fallback_reason="SYSTEM_DEPENDENCY",
+                            a_result=None,
+                            query_expansion=None,
+                            rag_result=None,
+                            b_result=None,
+                            c_result=None,
+                            d_result=None,
+                            agent_action=None,
+                            agent_reason_code=None,
+                            question=None,
+                            current_query=text,
+                            execution_history=[],
+                            agent_steps=0,
+                            rewrite_count=0,
+                            clarification_count=0,
+                            termination_reason="SYSTEM_DEPENDENCY",
+                            intake_snapshot=None,
+                            intake_stage=None,
+                            previsit_summary=None,
+                            system_risk_classification=None,
+                            trace={"events": [], "evaluations": []},
+                        )
+                    else:
+                        continue
+            if workflow is None:
+                workflow = WorkflowResult(
+                    request_id=event_id,
+                    status="FALLBACK",
+                    final_response=HONEST_FALLBACK_TEXT,
+                    fallback_reason="SYSTEM_DEPENDENCY",
+                    a_result=None,
+                    query_expansion=None,
+                    rag_result=None,
+                    b_result=None,
+                    c_result=None,
+                    d_result=None,
+                    agent_action=None,
+                    agent_reason_code=None,
+                    question=None,
+                    current_query=text,
+                    execution_history=[],
+                    agent_steps=0,
+                    rewrite_count=0,
+                    clarification_count=0,
+                    termination_reason="SYSTEM_DEPENDENCY",
+                    intake_snapshot=None,
+                    intake_stage=None,
+                    previsit_summary=None,
+                    system_risk_classification=None,
+                    trace={"events": [], "evaluations": []},
+                )
+            if self._is_duplicate_push(event_id):
+                return
+            push_text = self.prepare_formal_push_text(workflow, text)
+            ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
+            if ok:
+                try:
+                    latest = self.repository.get(session_id)
+                    if latest is not None:
+                        ctx = self.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
+                        ctx, _ = self.context_manager.compact(ctx, stage_completed=False)
+                        updated = latest.model_copy(update={"conversation_context": ctx}, deep=True)
+                        try:
+                            self.repository.save(updated, expected_version=latest.version)
+                        except ProductSessionConflict:
+                            pass
+                except Exception:
+                    pass
+                if _should_push_honest_fallback(workflow):
+                    self._maybe_record_question_for_doctor(line_user_id, text, workflow)
+
+        def _background() -> None:
+            acquired = _FORMAL_SEMAPHORE.acquire(blocking=False)
+            if not acquired:
                 if self._is_duplicate_push(event_id):
                     return
-                push_text = self.prepare_formal_push_text(workflow, text)
-                ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
-                if ok:
-                    try:
-                        latest = self.repository.get(session_id)
-                        if latest is not None:
-                            ctx = self.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
-                            ctx, _ = self.context_manager.compact(ctx, stage_completed=False)
-                            updated = latest.model_copy(update={"conversation_context": ctx}, deep=True)
-                            try:
-                                self.repository.save(updated, expected_version=latest.version)
-                            except ProductSessionConflict:
-                                pass
-                    except Exception:
-                        pass
-                    if _should_push_honest_fallback(workflow):
-                        self._maybe_record_question_for_doctor(line_user_id, text, workflow)
+                try:
+                    self._push_with_retry(line_user_id, QUEUED_FALLBACK_TEXT, event_id=None, push_sender=push_sender)
+                except Exception:
+                    pass
+
+                def _delayed() -> None:
+                    with _FORMAL_SEMAPHORE:
+                        if self._is_duplicate_push(event_id):
+                            return
+                        _execute_and_push()
+
+                try:
+                    threading.Thread(target=_delayed, daemon=True).start()
+                except Exception:
+                    pass
+                return
+            try:
+                if self._is_duplicate_push(event_id):
+                    return
+                _execute_and_push()
+            finally:
+                try:
+                    _FORMAL_SEMAPHORE.release()
+                except Exception:
+                    pass
 
         threading.Thread(target=_background, daemon=True).start()
 
