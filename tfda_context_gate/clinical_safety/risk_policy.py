@@ -14,8 +14,10 @@ class RiskSignalPolicy:
     """可由醫療 reviewer 逐條核定的 deterministic 文字訊號表。"""
 
     SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-        ("CHEST_PAIN", re.compile(r"胸痛|胸悶|chest pain", re.IGNORECASE)),
-        ("BREATHING_DIFFICULTY", re.compile(r"喘不過氣|呼吸困難|呼吸急促|shortness of breath", re.IGNORECASE)),
+        # CHEST_PAIN: 保留既有「胸痛|胸悶」並補口語變體「胸口.*悶」「悶悶」 (F4-R1); _has_affirmed_match 透過 _NEGATION_PREFIX 互斥排除否定句
+        ("CHEST_PAIN", re.compile(r"胸痛|胸悶|胸口.*悶|悶悶|chest pain", re.IGNORECASE)),
+        # BREATHING_DIFFICULTY: 保留既有並補口語「走.*喘」「走幾步.*喘」; 限定以「走」為前綴避免單字「喘/喘氣」誤報
+        ("BREATHING_DIFFICULTY", re.compile(r"喘不過氣|呼吸困難|呼吸急促|走.*喘|走幾步.*喘|shortness of breath", re.IGNORECASE)),
         ("ALTERED_CONSCIOUSNESS", re.compile(r"意識不清|昏迷|昏厥|叫不醒|unconscious", re.IGNORECASE)),
         ("PERSISTENT_VOMITING", re.compile(r"持續嘔吐|一直吐|反覆嘔吐", re.IGNORECASE)),
         ("MAJOR_BLEEDING", re.compile(r"大量出血", re.IGNORECASE)),
@@ -56,10 +58,11 @@ class RiskSignalPolicy:
         for match in pattern.finditer(text):
             prefix = text[max(0, match.start() - 14):match.start()]
             # 對比轉折後視為新子句，避免「沒有胸痛，但現在呼吸困難」整句被否定。
-            contrast_end = max(
-                (prefix.rfind(marker) + len(marker) for marker in ("但", "可是", "不過", "然而", "，", "；", ",", ";")),
-                default=0,
-            )
+            contrast_end = 0
+            for marker in ("但", "可是", "不過", "然而", "，", "；", ",", ";"):
+                idx = prefix.rfind(marker)
+                if idx != -1:
+                    contrast_end = max(contrast_end, idx + len(marker))
             prefix = prefix[contrast_end:]
             if not _NEGATION_PREFIX.search(prefix):
                 return True

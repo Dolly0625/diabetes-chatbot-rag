@@ -307,9 +307,17 @@ class ConversationOrchestrator:
             if stage_completed and old_stage in {"stage1", "stage2"}:
                 checkpoint = self._stage_checkpoint(resulting_intake, old_stage)
             if intake_note and checkpoint:
-                reply = f"{intake_note}\n\n{checkpoint}\n\n{reply}"
+                if intake_note.strip() == reply.strip():
+                    reply = intake_note
+                else:
+                    reply = f"{intake_note}\n\n{checkpoint}\n\n{reply}"
             elif intake_note:
-                reply = f"{intake_note}\n\n{reply}"
+                if intake_note.strip() == reply.strip():
+                    reply = intake_note
+                elif intake_note.strip() in reply:
+                    reply = reply
+                else:
+                    reply = f"{intake_note}\n\n{reply}"
             elif checkpoint:
                 reply = f"{checkpoint}\n\n{reply}"
             session = self._sync_clinical_context(session)
@@ -334,10 +342,55 @@ class ConversationOrchestrator:
         saved = self.repository.save(session, expected_version=previous_version)
         return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status=status, intake_stage=intake_stage)
 
+    _PROXY_FUZZY_RE = re.compile(r"幫.{0,10}問|代.{0,10}整理|幫.{0,10}整理|替.{0,10}問", re.IGNORECASE)
+    _UNCERTAIN_RE = re.compile(r"不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚|不太知道", re.IGNORECASE)
+
+    @classmethod
+    def _is_proxy_intent(cls, text: str) -> bool:
+        if cls._PROXY_FUZZY_RE.search(text):
+            return True
+        if "幫" in text and "問" in text:
+            return True
+        if ("代" in text or "幫" in text) and "整理" in text:
+            return True
+        return False
+
     def _handle_product_command(self, session: ProductSession, text: str) -> tuple[ProductSession, str, str] | None:
         if (
             (session.authorization_status is AuthorizationStatus.UNVERIFIED or session.status == "CLOSED")
             and (text in self.START_INTAKE_COMMANDS or any(token in text for token in ("準備看診", "回診", "看醫生")))
+        ):
+            return session, "我是 AI 看診前整理助理，只協助衛教與資料整理，不做診斷，也不是緊急醫療服務。Demo session 最多保存 7 天；確認前不會分享給醫護。這份資料是為誰整理？請選擇「為自己整理」或「代家人整理」。", "NEEDS_ROLE_SELECTION"
+        if (
+            (session.authorization_status is AuthorizationStatus.UNVERIFIED or session.status == "CLOSED")
+            and self._is_proxy_intent(text)
+        ):
+            if self.risk_policy.classify(text).level == "RED_FLAG":
+                return None
+            subject_hash = self._hash(f"{session.session_id}:proxy-subject")
+            reset_subject = (
+                session.status == "SUBMITTED"
+                or session.actor_role is not ActorRole.RELATED_PERSON
+                or session.subject_id_hash not in {None, subject_hash}
+            )
+            reset = self._new_subject_state(session, text) if reset_subject else {}
+            session = session.model_copy(update={
+                **reset,
+                "actor_role": ActorRole.RELATED_PERSON,
+                "frontend_persona": FrontendPersona.PATIENT_FAMILY,
+                "authorization_status": AuthorizationStatus.UNVERIFIED,
+                "permission_scopes": [],
+                "subject_id_hash": subject_hash,
+                "information_source": InformationSource.PROXY_OBSERVED,
+                "pending_field": None,
+                "pending_question": "請先確認：是否已取得家人同意，由您代為整理這份看診資料？",
+            }, deep=True)
+            return session, session.pending_question or "請確認家人同意。", "NEEDS_AUTHORIZATION"
+        if (
+            (session.authorization_status is AuthorizationStatus.UNVERIFIED or session.status == "CLOSED")
+            and not self._is_intake_active(session)
+            and self._UNCERTAIN_RE.search(text)
+            and self.risk_policy.classify(text).level != "RED_FLAG"
         ):
             return session, "我是 AI 看診前整理助理，只協助衛教與資料整理，不做診斷，也不是緊急醫療服務。Demo session 最多保存 7 天；確認前不會分享給醫護。這份資料是為誰整理？請選擇「為自己整理」或「代家人整理」。", "NEEDS_ROLE_SELECTION"
         if text in self.SHARE_COMMANDS:
@@ -561,6 +614,130 @@ class ConversationOrchestrator:
         field = session.pending_field or cls._next_pending_field(session.intake_snapshot)
         if field is None:
             return session, None
+        try:
+            from tfda_context_gate.intake.tool import INJECTION_FIXED_REPLY, is_injection_attempt
+
+            if is_injection_attempt(text):
+                return session, INJECTION_FIXED_REPLY
+        except Exception:
+            pass
+        try:
+            from tfda_context_gate.intake.tool import is_plausible_intake_value
+
+            if not is_plausible_intake_value(text):
+                pending_q = session.pending_question or cls._question_for_field(field)
+                if pending_q:
+                    return session, pending_q
+                return session, "請再說明一次？"
+        except Exception:
+            pass
+        _was_truncated = False
+        _trunc_marker = "(已節錄)"
+        try:
+            from tfda_context_gate.intake.tool import INTAKE_MAX_LENGTH
+
+            limit = INTAKE_MAX_LENGTH
+        except Exception:
+            limit = 120
+        stripped_for_len = text.strip()
+        if len(stripped_for_len) > limit:
+            _was_truncated = True
+            text = stripped_for_len[:limit]
+
+        candidates: dict[str, Any] = {}
+        try:
+            from tfda_context_gate.intake.tool import PreVisitIntakeTool
+
+            tool = PreVisitIntakeTool()
+            candidates = tool.extract_fields_from_utterance(text, stage=None)
+            if "questions_for_doctor" in candidates:
+                has_q = bool(re.search(r"想問|想請問|想了解|問題是|疑問|？|\?|嗎|如何|怎麼|為何|為什麼", text))
+                if not has_q:
+                    candidates.pop("questions_for_doctor", None)
+            if "chronic_conditions" in candidates and "symptom_description" in candidates:
+                desc_val = str(candidates["symptom_description"])
+                distinct = any(kw in desc_val for kw in ["口渴", "頻尿", "頭暈", "疲倦", "喘", "疼痛", "麻", "視力", "血糖"])
+                if not distinct and any(kw in desc_val for kw in ["高血壓", "高血脂", "高脂血", "腎臟病", "心臟病"]):
+                    candidates.pop("symptom_description", None)
+        except Exception:
+            candidates = {}
+
+        intake = session.intake_snapshot.model_copy(deep=True)
+
+        def _is_placeholder(fname: str, val: Any) -> bool:
+            if isinstance(val, list) and val == ["不清楚（待看診確認）"]:
+                return True
+            if isinstance(val, str) and val in {"待確認", "不清楚（待看診確認）"}:
+                return True
+            return False
+
+        valid: dict[str, Any] = {}
+        for k, v in candidates.items():
+            if k not in cls.INTAKE_FIELD_ORDER or not v:
+                continue
+            existing = getattr(intake, k, None)
+            is_symptom = k in {"symptom_onset", "symptom_description", "symptom_severity"}
+            if not existing or _is_placeholder(k, existing) or is_symptom:
+                if isinstance(v, list):
+                    tv = [str(x).strip()[:limit] for x in v]
+                    v = tv
+                elif isinstance(v, str) and len(v) > limit:
+                    v = v[:limit]
+                if k == "symptom_description" and "symptom_onset" in candidates and str(v).strip() == text.strip()[:limit]:
+                    continue
+                valid[k] = v
+
+        if valid:
+            for f, val in valid.items():
+                setattr(intake, f, val)
+            from tfda_context_gate.intake.tool import build_implicit_confirm, build_implicit_confirm_for_fields
+
+            label_map = {
+                "known_medications": "用藥",
+                "allergies": "過敏",
+                "chronic_conditions": "慢性病",
+                "family_history": "家族史",
+                "symptom_onset": "症狀開始時間",
+                "symptom_description": "症狀描述",
+                "symptom_severity": "程度",
+                "questions_for_doctor": "想問醫師的問題",
+            }
+            raw_snip = text.strip()[:30]
+            if field not in valid or len(valid) > 1:
+                if len(valid) == 1:
+                    f = next(iter(valid))
+                    label = label_map.get(f, f)
+                    confirm = f"你說的「{raw_snip}」我記在「{label}」"
+                else:
+                    base = build_implicit_confirm_for_fields(valid, raw_text=text)
+                    labels = "、".join(label_map.get(k, k) for k in valid)
+                    if base:
+                        confirm = f"{base}（已分別記在「{labels}」）"
+                    else:
+                        norm_parts = []
+                        for vv in valid.values():
+                            if isinstance(vv, list):
+                                norm_parts.append("、".join(str(x) for x in vv))
+                            else:
+                                norm_parts.append(str(vv))
+                        confirm = build_implicit_confirm(text, "；".join(norm_parts))
+            else:
+                confirm = build_implicit_confirm_for_fields(valid, raw_text=text)
+                if confirm is None:
+                    first_val = next(iter(valid.values()))
+                    norm = "、".join(str(x) for x in first_val) if isinstance(first_val, list) else str(first_val)
+                    confirm = build_implicit_confirm(text, norm)
+            if _was_truncated and _trunc_marker not in confirm:
+                confirm = f"{confirm} {_trunc_marker}"
+            return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
+
+        # F1-R1/R2: candidates hit already-filled non-symptom field -> don't pollute pending
+        if candidates and not valid:
+            pending_q = session.pending_question or cls._question_for_field(field)
+            if pending_q:
+                return session, pending_q
+            return session, None
+
         normalized = re.sub(r"\s+", "", text).lower()
         uncertain = bool(re.search(r"不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚", normalized) or "不太知道" in normalized)
         skip = normalized in {"跳過", "略過", "先跳過", "稍後再補", "還沒想到"}
@@ -572,17 +749,8 @@ class ConversationOrchestrator:
             "family_history": r"(?:沒有|無).*家族史|家族(?:沒有|無)",
         }
         none_answer = none_answer or bool(re.search(none_patterns.get(field, r"(?!x)x"), normalized))
-        intake = session.intake_snapshot.model_copy(deep=True)
 
-        try:
-            from tfda_context_gate.intake.tool import PreVisitIntakeTool, build_implicit_confirm, build_implicit_confirm_for_fields
-            early_extracted = PreVisitIntakeTool().extract_fields_from_utterance(
-                text, stage=cls._field_stage(field)
-            )
-        except Exception:
-            early_extracted = {}
-
-        if (uncertain or skip) and not early_extracted:
+        if (uncertain or skip) and not valid:
             if field in {"symptom_onset", "symptom_description", "symptom_severity"}:
                 setattr(intake, field, "待確認")
                 return session.model_copy(update={"intake_snapshot": intake}, deep=True), (
@@ -603,42 +771,26 @@ class ConversationOrchestrator:
             setattr(intake, field, value)
             return session.model_copy(update={"intake_snapshot": intake}, deep=True), "好，已記下目前沒有。"
 
-        try:
-            from tfda_context_gate.intake.tool import PreVisitIntakeTool, build_implicit_confirm, build_implicit_confirm_for_fields
-            extracted = early_extracted
-            if not extracted:
-                extracted = PreVisitIntakeTool().extract_fields_from_utterance(
-                    text, stage=cls._field_stage(field)
-                )
-        except Exception:
-            extracted = {}
-        if extracted:
-            for extracted_field, extracted_value in extracted.items():
-                if extracted_field in cls.INTAKE_FIELD_ORDER and not getattr(intake, extracted_field, None):
-                    setattr(intake, extracted_field, extracted_value)
-            confirm = build_implicit_confirm_for_fields(extracted, raw_text=text)
-            if confirm is None:
-                first_val = next(iter(extracted.values()))
-                if isinstance(first_val, list):
-                    norm = "、".join(str(x) for x in first_val)
-                else:
-                    norm = str(first_val)
-                confirm = build_implicit_confirm(text, norm)
-            return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
-        if field not in extracted and text.strip():
+        if text.strip():
             stripped = text.strip()
             if len(stripped) < 2 or re.fullmatch(r"[^\w\u4e00-\u9fa5]+", stripped) or not re.search(r"[\w\u4e00-\u9fa5]", stripped) or re.search(r"[#\/\*]{3,}", stripped):
+                pending_q = session.pending_question or cls._question_for_field(field)
+                if pending_q:
+                    return session, pending_q
                 return session, None
-            direct: Any = [stripped[:100]] if field in {
+            direct: Any = [stripped[:limit]] if field in {
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
-            } else stripped[:300]
+            } else stripped[:limit]
             setattr(intake, field, direct)
             if isinstance(direct, list):
                 norm_str = "、".join(str(x) for x in direct)
             else:
                 norm_str = str(direct)
             from tfda_context_gate.intake.tool import build_implicit_confirm
+
             confirm = build_implicit_confirm(text, norm_str)
+            if _was_truncated and _trunc_marker not in confirm:
+                confirm = f"{confirm} {_trunc_marker}"
             return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
         return session, None
 

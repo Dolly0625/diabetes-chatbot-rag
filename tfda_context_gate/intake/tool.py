@@ -86,6 +86,158 @@ SYMPTOM_UNKNOWN_VALUE = "待確認"
 SYMPTOM_UNKNOWN_QUESTION = "沒關係，先記為『待確認』，看診時再跟醫師確認。"
 SYMPTOM_MAX_CLARIFICATION_ATTEMPTS = 2
 
+# ── F2: injection / privilege escalation detection (deterministic, no LLM) ──
+INJECTION_FIXED_REPLY = "這裡只協助整理看診資料，無法提供處方或醫療指示"
+INJECTION_REPLY = INJECTION_FIXED_REPLY
+
+INJECTION_PATTERNS: list[str] = [
+    r"叫你.*給處方",
+    r"直接給.*處方",
+    r"給我.*處方",
+    r"開處方",
+    r"幫.{0,2}開藥",
+    r"幫.{0,2}開.?藥",
+    r"開藥",
+    r"忽略.*規則",
+    r"忽略.*指示",
+    r"忽略.*指令",
+    r"無視.*規則",
+    r"不要遵守.*規則",
+    r"解除.*限制",
+    r"你.{0,4}是醫(?:師|生)",
+    r"假裝.*醫師",
+    r"假裝.*醫生",
+    r"扮演.*醫師",
+    r"扮演.*醫生",
+    r"假扮.*醫師",
+    r"假扮.*醫生",
+    r"ignore.*instructions?",
+    r"ignore.*rules?",
+    r"you are.*doctor",
+    r"act as.*doctor",
+    r"pretend.*doctor",
+    r"disregard.*instructions?",
+    r"system\s*prompt",
+    r"jailbreak",
+]
+
+_INJECTION_RES = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
+
+
+def is_injection_attempt(text: str) -> bool:
+    """F2: deterministic injection/privilege escalation check. No LLM."""
+    if not text or not text.strip():
+        return False
+    s = text.strip()
+    # Context-aware: lone "開藥" should not fire when text is a legitimate question intent
+    # (e.g. "我想問醫師藥的劑量" should be extracted as questions_for_doctor, not injection).
+    has_question_intent = bool(re.search(r"想問|想了解", s))
+    for pat_str, pat in zip(INJECTION_PATTERNS, _INJECTION_RES):
+        if pat.search(s):
+            if pat_str == r"開藥" and has_question_intent:
+                continue
+            return True
+    return False
+
+
+def detect_injection(text: str) -> bool:
+    return is_injection_attempt(text)
+
+
+def contains_injection(text: str) -> bool:
+    return is_injection_attempt(text)
+
+
+def is_injection(text: str) -> bool:
+    return is_injection_attempt(text)
+
+
+INTAKE_MAX_LENGTH = 120
+INTAKE_TRUNCATION_MARKER = "(已節錄)"
+INTAKE_TRUNC_MARKER = INTAKE_TRUNCATION_MARKER
+
+
+def is_plausible_intake_value(text: str) -> bool:
+    """F3 D1/D2 plausibility check. Returns False for invalid spam.
+
+    D1: pure emoji/symbol/single char repeated
+    D2: same token repeated >=5 times or distinct chars <4 (with length guard)
+    Length >120 is still plausible (handled via truncation, not invalid).
+    """
+    if not text or not text.strip():
+        return False
+    s = text.strip()
+
+    if not re.search(r"[\w\u4e00-\u9fa5]", s):
+        return False
+    compact = re.sub(r"\s+", "", s)
+    if len(compact) >= 2 and len(set(compact)) == 1:
+        return False
+    if re.fullmatch(r"(.)\1{2,}", compact):
+        return False
+    if len(s) < 2:
+        return False
+    if re.fullmatch(r"[^\w\u4e00-\u9fa5]+", s):
+        return False
+
+    try:
+        if re.search(r"(.{1,10})\1{4,}", s):
+            m = re.search(r"(.{1,10})\1{4,}", s)
+            if m and len(m.group(0)) >= 5:
+                return False
+    except Exception:
+        pass
+
+    try:
+        tokens = re.split(r"\s+", s)
+        if len(tokens) >= 5:
+            for i in range(len(tokens) - 4):
+                if tokens[i] and all(t == tokens[i] for t in tokens[i : i + 5]):
+                    return False
+            from collections import Counter
+
+            cnt = Counter(tokens)
+            most_common, most_count = cnt.most_common(1)[0] if cnt else ("", 0)
+            if most_count >= 5 and len(tokens) >= 5:
+                if len(set(tokens)) < 4:
+                    return False
+    except Exception:
+        pass
+
+    compact_no_space = re.sub(r"\s+", "", compact)
+    compact_for_distinct = re.sub(r"[，。,\.，、；;！!？?·•\-—_—#\/\*\(\)\[\]{}]", "", compact_no_space)
+    distinct = set(compact_for_distinct)
+    if len(compact_for_distinct) >= 8 and len(distinct) < 4:
+        return False
+    if len(compact_for_distinct) >= 5 and len(distinct) < 3:
+        return False
+    if len(compact_for_distinct) >= 10 and len(distinct) < 4:
+        return False
+
+    return True
+
+
+def is_plausible(text: str) -> bool:
+    return is_plausible_intake_value(text)
+
+
+def truncate_intake_value(text: str, limit: int = INTAKE_MAX_LENGTH) -> tuple[str, bool]:
+    if not text:
+        return text, False
+    s = text.strip()
+    if len(s) > limit:
+        return s[:limit], True
+    return s, False
+
+
+def truncate_intake_text(text: str, limit: int = INTAKE_MAX_LENGTH) -> str:
+    if not text:
+        return text
+    s = text.strip()
+    if len(s) > limit:
+        return s[:limit]
+    return s
+
 
 def is_uncertain_answer(text: str) -> bool:
     if not text or not text.strip():
