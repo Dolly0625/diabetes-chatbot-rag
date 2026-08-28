@@ -161,14 +161,14 @@ FHIR_MEDICATION_UNKNOWN_SUFFIX: str = "待確認"
 
 # ── Intake field → question mapping (used by build_agent_question) ──
 INTAKE_FIELD_QUESTIONS: dict[str, str] = {
-    "known_medications": "第 1/8 題｜目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。",
-    "allergies": "第 2/8 題｜有沒有藥物或食物過敏？沒有、不確定都可以直接說。",
-    "chronic_conditions": "第 3/8 題｜除了糖尿病，還有高血壓、高血脂等慢性病嗎？",
-    "family_history": "第 4/8 題｜家人中有人有糖尿病或相關疾病嗎？",
-    "symptom_onset": "第 5/8 題｜這次想看診的狀況大約從什麼時候開始？",
-    "symptom_description": "第 6/8 題｜目前最主要的症狀或困擾是什麼？",
-    "symptom_severity": "第 7/8 題｜程度大約是輕度、中度、重度，或 1–10 分中的幾分？",
-    "questions_for_doctor": "第 8/8 題｜這次最想問醫師什麼？還沒想到也可以先跳過。",
+    "known_medications": "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。",
+    "allergies": "有沒有藥物或食物過敏？沒有、不確定都可以直接說。",
+    "chronic_conditions": "除了糖尿病，還有高血壓、高血脂等慢性病嗎？",
+    "family_history": "家人中有人有糖尿病或相關疾病嗎？",
+    "symptom_onset": "這次想看診的狀況大約從什麼時候開始？",
+    "symptom_description": "目前最主要的症狀或困擾是什麼？",
+    "symptom_severity": "程度大約是輕度、中度、重度，或 1–10 分中的幾分？",
+    "questions_for_doctor": "這次最想問醫師什麼？還沒想到也可以先跳過。",
     "time_frame": "請問這些症狀是現在發生、過去曾發生，還是假設性詢問？",
     "target_subject": "請問這些症狀是您本人、家人，還是其他對象的情況？",
     # Backward compat: generic B fields map to intake equivalents
@@ -208,10 +208,17 @@ INTAKE_STAGES: dict[str, list[str]] = {
 
 # Stage → user-facing question (topic-chunked, not per-field)
 STAGE_QUESTIONS: dict[str, str] = {
-    "stage1": "為了幫您整理看診資料，請問目前使用的藥品、過敏史、慢性病史及家族史？（可一次說明多項，如「吃 metformin，無過敏，有高血壓，家族無糖尿病」）",
+    "stage1": "請問目前用藥、過敏、慢性病、家族史？（可一次說多項）",
     "stage2": "請問症狀的相關資訊？（可一次說明，如「三個月前開始，早上血糖偏高約180，程度中等」包含時間、描述與嚴重度）",
     "stage3": "請問您想在看診時詢問醫師哪些問題？（可列多個問題）",
 }
+
+# ── P1-2 隱式確認帶內容重述 (Papenmeier paraphrase) ──
+# 禁用空泛「收到/了解/好的」單獨回覆；必須帶內容重述 raw → normalized
+IMPLICIT_CONFIRM_TEMPLATE = "你提到「{raw}」，我記為「{normalized}」，對嗎？"
+
+# 禁語：不得單獨作為確認句（僅在註解聲明，orchestrator 不應使用）
+IMPLICIT_CONFIRM_BANNED_PHRASES: tuple[str, ...] = ("收到", "了解", "好的", "知道了", "明白了")
 
 # Stage → FHIR Questionnaire section linkId
 STAGE_FHIR_SECTION: dict[str, str] = {

@@ -153,8 +153,16 @@ class ConversationOrchestrator:
                     updates["status"] = "AWAITING_CONFIRMATION"
                 new_stage = updates.get("intake_stage", session.intake_stage)
                 stage_completed = session.intake_stage != new_stage
+                reply_text = workflow.final_response
+                if stage_completed and session.intake_stage in {"stage1", "stage2"}:
+                    try:
+                        checkpoint = self._stage_checkpoint(next_intake, session.intake_stage)
+                        if checkpoint:
+                            reply_text = f"{checkpoint}\n\n{reply_text}"
+                    except Exception:
+                        pass
                 context = self.context_manager.append_turn(session.conversation_context, role="user", content="［藥袋圖片］")
-                context = self.context_manager.append_turn(context, role="assistant", content=workflow.final_response)
+                context = self.context_manager.append_turn(context, role="assistant", content=reply_text)
                 if stage_completed and session.intake_stage in {"stage1", "stage2", "stage3"}:
                     context = self.context_manager.mark_stage_completed(
                         context, session.intake_stage, next_stage=new_stage
@@ -164,7 +172,7 @@ class ConversationOrchestrator:
                 session = session.model_copy(update=updates, deep=True)
                 session = self._sync_clinical_context(session)
                 saved = self.repository.save(session, expected_version=previous_version)
-                result = OrchestratorResult(event_id=event_id, session_id=saved.session_id, reply=workflow.final_response, status=workflow.status, intake_stage=workflow.intake_stage)
+                result = OrchestratorResult(event_id=event_id, session_id=saved.session_id, reply=reply_text, status=workflow.status, intake_stage=workflow.intake_stage)
             self.repository.complete_webhook_event(
                 event_id, result.model_dump(mode="json"), claim_token=claim_token
             )
@@ -240,8 +248,7 @@ class ConversationOrchestrator:
                 )
                 if pending_question:
                     reply = (
-                        f"{reply}\n\n看診資料我先幫你保留，不用重填。"
-                        f"想繼續時可以回答這題，或點「繼續整理」：\n{pending_question}"
+                        f"{reply}\n\n資料已保留，想繼續可點「繼續整理」：\n{pending_question}"
                     )
                 context = self.context_manager.append_turn(
                     session.conversation_context, role="assistant", content=reply
@@ -295,13 +302,16 @@ class ConversationOrchestrator:
                 updates["status"] = "AWAITING_CONFIRMATION"
             session = session.model_copy(update=updates, deep=True)
             reply, status, intake_stage = workflow.final_response, workflow.status, workflow.intake_stage
-            if intake_note:
-                reply = f"{intake_note}\n\n{reply}"
             stage_completed = old_stage != session.intake_stage
+            checkpoint: str | None = None
             if stage_completed and old_stage in {"stage1", "stage2"}:
                 checkpoint = self._stage_checkpoint(resulting_intake, old_stage)
-                if checkpoint:
-                    reply = f"{checkpoint}\n\n{reply}"
+            if intake_note and checkpoint:
+                reply = f"{intake_note}\n\n{checkpoint}\n\n{reply}"
+            elif intake_note:
+                reply = f"{intake_note}\n\n{reply}"
+            elif checkpoint:
+                reply = f"{checkpoint}\n\n{reply}"
             session = self._sync_clinical_context(session)
             if stage_completed and old_stage in {"stage1", "stage2", "stage3"}:
                 session = session.model_copy(update={
@@ -338,6 +348,14 @@ class ConversationOrchestrator:
             return session, "請直接傳送藥袋照片；建議正面、背面各拍一張，文字保持清楚。", "AWAITING_IMAGE"
         if text in self.PAUSE_COMMANDS and self._is_intake_active(session):
             session = session.model_copy(update={"status": "PAUSED"})
+            try:
+                from tfda_context_gate.intake.tool import format_stage_progress
+
+                progress = format_stage_progress(session.intake_snapshot)
+                if progress and "第" not in progress:
+                    return session, f"好的，已先暫停；目前資料會保留，不用重新填。你可以先問其他問題，想回來時點「繼續整理」即可。\n{progress}"[:60], "PAUSED"
+            except Exception:
+                pass
             return session, "好的，已先暫停；目前資料會保留，不用重新填。你可以先問其他問題，想回來時點「繼續整理」即可。", "PAUSED"
         if text in self.CANCEL_COMMANDS and self._is_intake_active(session):
             reset = self._new_subject_state(session, text)
@@ -359,7 +377,18 @@ class ConversationOrchestrator:
             pending_field = session.pending_field or self._next_pending_field(session.intake_snapshot)
             question = session.pending_question or self._question_for_field(pending_field)
             session = session.model_copy(update={"status": "ACTIVE", "pending_field": pending_field, "pending_question": question})
-            return session, question or "看診資料已經整理完成，請查看摘要。", "NEEDS_CLARIFICATION"
+            base = question or "看診資料已經整理完成，請查看摘要。"
+            try:
+                from tfda_context_gate.intake.tool import format_stage_progress
+
+                progress = format_stage_progress(session.intake_snapshot)
+                if progress and "第" not in progress and "皆已完成" not in progress:
+                    return session, f"{progress}\n\n{base}"[:60], "NEEDS_CLARIFICATION"
+                if progress and "皆已完成" in progress:
+                    return session, f"{progress}\n\n{base}"[:60], "NEEDS_CLARIFICATION"
+            except Exception:
+                pass
+            return session, base, "NEEDS_CLARIFICATION"
         if text in {"使用說明與緊急協助", "使用說明"}:
             return session, "本系統提供糖尿病衛教與看診前整理，不是診斷或急診服務；若有呼吸困難、意識不清等緊急狀況，請立即聯絡當地緊急醫療服務。", "INFORMATION"
         if text in self.SUMMARY_COMMANDS:
@@ -533,7 +562,7 @@ class ConversationOrchestrator:
         if field is None:
             return session, None
         normalized = re.sub(r"\s+", "", text).lower()
-        uncertain = bool(re.search(r"不知道|不太知道|不清楚|忘記|不確定|記不得|沒印象", normalized))
+        uncertain = bool(re.search(r"不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚", normalized) or "不太知道" in normalized)
         skip = normalized in {"跳過", "略過", "先跳過", "稍後再補", "還沒想到"}
         none_answer = normalized in {"無", "沒有", "目前沒有", "沒有喔", "沒有欸", "沒吃", "沒有吃"}
         none_patterns = {
@@ -545,7 +574,20 @@ class ConversationOrchestrator:
         none_answer = none_answer or bool(re.search(none_patterns.get(field, r"(?!x)x"), normalized))
         intake = session.intake_snapshot.model_copy(deep=True)
 
-        if uncertain or skip:
+        try:
+            from tfda_context_gate.intake.tool import PreVisitIntakeTool, build_implicit_confirm, build_implicit_confirm_for_fields
+            early_extracted = PreVisitIntakeTool().extract_fields_from_utterance(
+                text, stage=cls._field_stage(field)
+            )
+        except Exception:
+            early_extracted = {}
+
+        if (uncertain or skip) and not early_extracted:
+            if field in {"symptom_onset", "symptom_description", "symptom_severity"}:
+                setattr(intake, field, "待確認")
+                return session.model_copy(update={"intake_snapshot": intake}, deep=True), (
+                    "沒關係，先記為『待確認』，看診時再跟醫師確認。"
+                )
             value: Any = ["不清楚（待看診確認）"] if field in {
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
             } else "不清楚（待看診確認）"
@@ -562,23 +604,42 @@ class ConversationOrchestrator:
             return session.model_copy(update={"intake_snapshot": intake}, deep=True), "好，已記下目前沒有。"
 
         try:
-            from tfda_context_gate.intake.tool import PreVisitIntakeTool
-            extracted = PreVisitIntakeTool().extract_fields_from_utterance(
-                text, stage=cls._field_stage(field)
-            )
+            from tfda_context_gate.intake.tool import PreVisitIntakeTool, build_implicit_confirm, build_implicit_confirm_for_fields
+            extracted = early_extracted
+            if not extracted:
+                extracted = PreVisitIntakeTool().extract_fields_from_utterance(
+                    text, stage=cls._field_stage(field)
+                )
         except Exception:
             extracted = {}
         if extracted:
             for extracted_field, extracted_value in extracted.items():
                 if extracted_field in cls.INTAKE_FIELD_ORDER and not getattr(intake, extracted_field, None):
                     setattr(intake, extracted_field, extracted_value)
-            return session.model_copy(update={"intake_snapshot": intake}, deep=True), "好，已記下。"
+            confirm = build_implicit_confirm_for_fields(extracted, raw_text=text)
+            if confirm is None:
+                first_val = next(iter(extracted.values()))
+                if isinstance(first_val, list):
+                    norm = "、".join(str(x) for x in first_val)
+                else:
+                    norm = str(first_val)
+                confirm = build_implicit_confirm(text, norm)
+            return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
         if field not in extracted and text.strip():
-            direct: Any = [text.strip()[:100]] if field in {
+            stripped = text.strip()
+            if len(stripped) < 2 or re.fullmatch(r"[^\w\u4e00-\u9fa5]+", stripped) or not re.search(r"[\w\u4e00-\u9fa5]", stripped) or re.search(r"[#\/\*]{3,}", stripped):
+                return session, None
+            direct: Any = [stripped[:100]] if field in {
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
-            } else text.strip()[:300]
+            } else stripped[:300]
             setattr(intake, field, direct)
-            return session.model_copy(update={"intake_snapshot": intake}, deep=True), "好，已記下。"
+            if isinstance(direct, list):
+                norm_str = "、".join(str(x) for x in direct)
+            else:
+                norm_str = str(direct)
+            from tfda_context_gate.intake.tool import build_implicit_confirm
+            confirm = build_implicit_confirm(text, norm_str)
+            return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
         return session, None
 
     @classmethod
@@ -601,18 +662,31 @@ class ConversationOrchestrator:
             return str(value or "未填")
 
         if stage == "stage1":
-            return (
+            base = (
                 "用藥與病史已記下："
                 f"用藥 {show(intake.known_medications)}；過敏 {show(intake.allergies)}；"
                 f"慢性病 {show(intake.chronic_conditions)}；家族史 {show(intake.family_history)}。"
             )
-        if stage == "stage2":
-            return (
+        elif stage == "stage2":
+            base = (
                 "症狀資訊已記下："
                 f"開始時間 {show(intake.symptom_onset)}；主要狀況 {show(intake.symptom_description)}；"
                 f"程度 {show(intake.symptom_severity)}。"
             )
-        return None
+        else:
+            base = None
+        try:
+            from tfda_context_gate.intake.tool import format_stage_progress
+
+            progress = format_stage_progress(intake)
+            if progress and "第" not in progress:
+                if base:
+                    return f"{base}\n{progress}"[:60]
+                if stage in {"stage1", "stage2", "stage3"}:
+                    return progress
+        except Exception:
+            pass
+        return base
 
     @staticmethod
     def _without_intake_invitation(reply: str) -> str:

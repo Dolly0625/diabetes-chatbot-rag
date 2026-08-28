@@ -415,6 +415,28 @@ def _reply_text(reply_token: str, text: str, *, quick_actions: list[dict[str, st
         return False
 
 
+def _enrich_reply_with_stage_progress(reply: str, status: str, intake: Any | None = None) -> str:
+    if status != "NEEDS_CLARIFICATION":
+        return reply
+    if "已完成" in reply or ("還差" in reply and "✅" in reply):
+        return reply
+    if intake is None:
+        return reply
+    try:
+        from tfda_context_gate.intake.tool import format_stage_progress
+
+        progress = format_stage_progress(intake)
+        if not progress or "第" in progress:
+            return reply
+        if "皆已完成" in progress:
+            return f"{reply}\n\n{progress}"
+        if "已完成" in progress or "還差" in progress:
+            return f"{reply}\n\n{progress}"
+    except Exception:
+        return reply
+    return reply
+
+
 def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, str]] | None:
     from line_bot.ui import PROXY_SOURCE_ACTIONS, REVIEW_ACTIONS, SUBJECT_SELECTION_ACTIONS
     if status == "NEEDS_ROLE_SELECTION":
@@ -429,6 +451,50 @@ def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, st
             {"label": "症狀", "text": "修改症狀"},
             {"label": "想問醫師", "text": "修改想問醫師的問題"},
         ]
+    if "對嗎？" in reply:
+        base: list[dict[str, str]] | None = None
+        if status == "NEEDS_CLARIFICATION":
+            if "家人本人描述" in reply:
+                base = PROXY_SOURCE_ACTIONS
+            elif "固定吃藥" in reply or "胰島素" in reply:
+                base = [
+                    {"label": "目前沒有用藥", "text": "目前沒有用藥"},
+                    {"label": "不清楚", "text": "不清楚"},
+                    {"label": "暫停整理", "text": "暫停整理"},
+                ]
+            elif "過敏" in reply:
+                base = [
+                    {"label": "沒有過敏", "text": "沒有過敏"},
+                    {"label": "不清楚", "text": "不清楚"},
+                    {"label": "暫停整理", "text": "暫停整理"},
+                ]
+            elif "慢性病" in reply or "高血壓" in reply:
+                base = [
+                    {"label": "沒有其他慢性病", "text": "沒有其他慢性病"},
+                    {"label": "不清楚", "text": "不清楚"},
+                    {"label": "暫停整理", "text": "暫停整理"},
+                ]
+            elif "家人" in reply and "糖尿病" in reply:
+                base = [
+                    {"label": "沒有家族史", "text": "沒有家族史"},
+                    {"label": "不清楚", "text": "不清楚"},
+                    {"label": "暫停整理", "text": "暫停整理"},
+                ]
+            elif "想問醫師" in reply:
+                base = [
+                    {"label": "還沒想到", "text": "還沒想到"},
+                    {"label": "跳過", "text": "跳過"},
+                    {"label": "暫停整理", "text": "暫停整理"},
+                ]
+            else:
+                base = [
+                    {"label": "不清楚", "text": "不清楚"},
+                    {"label": "跳過", "text": "跳過"},
+                    {"label": "暫停整理", "text": "暫停整理"},
+                ]
+        if base is not None:
+            return [{"label": "正確", "text": "正確"}, {"label": "更正", "text": "更正"}] + base[:2]
+        return [{"label": "正確", "text": "正確"}, {"label": "更正", "text": "更正"}]
     if status == "NEEDS_CONFIRMATION":
         return REVIEW_ACTIONS
     if status == "NEEDS_CLARIFICATION" and "家人本人描述" in reply:
@@ -436,31 +502,31 @@ def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, st
     if status in {"PAUSED", "SIDE_ANSWER"}:
         return [{"label": "繼續整理", "text": "繼續整理"}]
     if status == "NEEDS_CLARIFICATION":
-        if "第 1/8 題" in reply:
+        if "固定吃藥" in reply or "胰島素" in reply:
             return [
                 {"label": "目前沒有用藥", "text": "目前沒有用藥"},
                 {"label": "不清楚", "text": "不清楚"},
                 {"label": "暫停整理", "text": "暫停整理"},
             ]
-        if "第 2/8 題" in reply:
+        if "過敏" in reply:
             return [
                 {"label": "沒有過敏", "text": "沒有過敏"},
                 {"label": "不清楚", "text": "不清楚"},
                 {"label": "暫停整理", "text": "暫停整理"},
             ]
-        if "第 3/8 題" in reply:
+        if "慢性病" in reply or "高血壓" in reply:
             return [
                 {"label": "沒有其他慢性病", "text": "沒有其他慢性病"},
                 {"label": "不清楚", "text": "不清楚"},
                 {"label": "暫停整理", "text": "暫停整理"},
             ]
-        if "第 4/8 題" in reply:
+        if "家人" in reply and "糖尿病" in reply:
             return [
                 {"label": "沒有家族史", "text": "沒有家族史"},
                 {"label": "不清楚", "text": "不清楚"},
                 {"label": "暫停整理", "text": "暫停整理"},
             ]
-        if "第 8/8 題" in reply:
+        if "想問醫師" in reply:
             return [
                 {"label": "還沒想到", "text": "還沒想到"},
                 {"label": "跳過", "text": "跳過"},
@@ -712,6 +778,12 @@ async def callback(
                         text=text,
                     )
                     reply = product_result.reply
+                    try:
+                        session = orchestrator.session_for_user(str(user_id))
+                        intake = getattr(session, "intake_snapshot", None) if session else None
+                        reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
+                    except Exception:
+                        pass
                     quick_actions = _quick_actions_for_status(product_result.status, reply)
                 else:
                     # 單輪相容模式仍完整經過 B/D gates。
@@ -738,6 +810,12 @@ async def callback(
                         image_bytes=image_bytes,
                     )
                     reply = product_result.reply
+                    try:
+                        session = orchestrator.session_for_user(str(user_id))
+                        intake = getattr(session, "intake_snapshot", None) if session else None
+                        reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
+                    except Exception:
+                        pass
                     quick_actions = _quick_actions_for_status(product_result.status, reply)
                 else:
                     # OCR + 單輪相容工作流（raw image 永不存入 state）

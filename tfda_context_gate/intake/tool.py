@@ -20,6 +20,8 @@ from .schemas import (
     FHIR_LINKID_MAP,
     FHIR_MEDICATION_UNKNOWN_STATUS,
     FHIR_MEDICATION_UNKNOWN_SUFFIX,
+    IMPLICIT_CONFIRM_BANNED_PHRASES,  # noqa: F401
+    IMPLICIT_CONFIRM_TEMPLATE,
     INTAKE_FIELD_QUESTIONS,
     INTAKE_STAGES,
     IntakeQuestion,
@@ -33,10 +35,92 @@ from .schemas import (
 from .timeline import build_timeline
 
 
+def build_implicit_confirm(raw_text: str, normalized_value: str) -> str:
+    raw = (raw_text or "").strip()[:30]
+    normalized = (normalized_value or "").strip()[:25]
+    if not raw:
+        raw = normalized[:30] if normalized else "剛才的內容"
+    if not normalized:
+        normalized = raw
+    return IMPLICIT_CONFIRM_TEMPLATE.format(raw=raw, normalized=normalized)
+
+
+def build_implicit_confirm_for_fields(
+    extracted: dict[str, Any],
+    raw_text: str | None = None,
+) -> str | None:
+    if not extracted:
+        return None
+    filtered = {k: v for k, v in extracted.items() if not k.startswith("_")}
+    if not filtered:
+        return None
+    parts: list[str] = []
+    for _field, value in list(filtered.items())[:2]:
+        if isinstance(value, list):
+            parts.append("、".join(str(x) for x in value if str(x).strip()))
+        elif value is not None:
+            parts.append(str(value).strip())
+    normalized = "；".join(p for p in parts if p)
+    if not normalized:
+        return None
+    if raw_text is not None:
+        raw = raw_text.strip()[:30]
+    else:
+        raw_candidate = extracted.get("_raw") or extracted.get("raw") or ""
+        if isinstance(raw_candidate, str) and raw_candidate.strip():
+            raw = raw_candidate.strip()[:30]
+        else:
+            raw = normalized[:30]
+    return build_implicit_confirm(raw, normalized)
+
+
 PREVISIT_DISCLAIMER = "本摘要僅整理您已提供的資訊，未包含診斷或治療建議；請攜帶此摘要與醫師討論，最終判斷由醫師負責。"
 
 MEDICATION_CONFIDENCE_THRESHOLD = 0.7
 MEDICATION_MAX_CLARIFICATION_ATTEMPTS = 2
+
+UNCERTAIN_PATTERNS = r"不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚"
+UNCERTAIN_RE = re.compile(UNCERTAIN_PATTERNS)
+SYMPTOM_FIELDS: set[str] = {"symptom_onset", "symptom_description", "symptom_severity"}
+SYMPTOM_UNKNOWN_VALUE = "待確認"
+SYMPTOM_UNKNOWN_QUESTION = "沒關係，先記為『待確認』，看診時再跟醫師確認。"
+SYMPTOM_MAX_CLARIFICATION_ATTEMPTS = 2
+
+
+def is_uncertain_answer(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    if "不太知道" in text:
+        return True
+    return bool(UNCERTAIN_RE.search(text))
+
+
+def handle_symptom_clarification(field: str, utterance: str, attempt: int = 1) -> dict[str, Any]:
+    if is_uncertain_answer(utterance):
+        return {
+            "status": "unknown",
+            "field": field,
+            "value": SYMPTOM_UNKNOWN_VALUE,
+            "question": SYMPTOM_UNKNOWN_QUESTION,
+            "attempt": attempt,
+        }
+    if attempt >= SYMPTOM_MAX_CLARIFICATION_ATTEMPTS:
+        return {
+            "status": "unknown",
+            "field": field,
+            "value": SYMPTOM_UNKNOWN_VALUE,
+            "question": SYMPTOM_UNKNOWN_QUESTION,
+            "attempt": attempt,
+        }
+    next_attempt = attempt + 1
+    q_text = INTAKE_FIELD_QUESTIONS.get(field, f"請補充：{field}")
+    return {
+        "status": "need_clarify",
+        "field": field,
+        "attempt": next_attempt,
+        "question": q_text,
+        "reason": "symptom_needs_clarify",
+    }
 
 
 class PreVisitIntakeTool:
@@ -213,7 +297,23 @@ class PreVisitIntakeTool:
             return f"{cleaned}-{FHIR_MEDICATION_UNKNOWN_SUFFIX}"
         return cleaned
 
+    def is_uncertain_answer(self, text: str) -> bool:
+        return is_uncertain_answer(text)
+
+    def handle_symptom_clarification(self, field: str, utterance: str, *, attempt: int = 1) -> dict[str, Any]:
+        return handle_symptom_clarification(field, utterance, attempt)
+
     def handle_medication_clarification(self, utterance: str, *, attempt: int) -> dict[str, Any]:
+        if is_uncertain_answer(utterance):
+            return {
+                "status": "unknown",
+                "medications": [SYMPTOM_UNKNOWN_VALUE],
+                "value": SYMPTOM_UNKNOWN_VALUE,
+                "question": SYMPTOM_UNKNOWN_QUESTION,
+                "reason": "medication_unknown_uncertain",
+                "confidence": self.assess_medication_confidence(utterance),
+                "original_text": utterance,
+            }
         confidence = self.assess_medication_confidence(utterance)
         if confidence >= MEDICATION_CONFIDENCE_THRESHOLD:
             meds = self._extract_medications(utterance)
@@ -224,7 +324,7 @@ class PreVisitIntakeTool:
             q = self.get_medication_clarification_question(next_attempt)
             return {"status": "need_clarify", "attempt": next_attempt, "question": q["question"], "reason": q["reason"], "confidence": confidence}
         unknown_text = self.mark_medication_unknown(utterance)
-        return {"status": "unknown", "medications": [unknown_text], "reason": "medication_unknown_after_2_attempts", "confidence": confidence, "original_text": utterance}
+        return {"status": "unknown", "medications": [unknown_text], "value": SYMPTOM_UNKNOWN_VALUE, "question": SYMPTOM_UNKNOWN_QUESTION, "reason": "medication_unknown_after_2_attempts", "confidence": confidence, "original_text": utterance}
 
     def to_fhir_medication_statement(self, medication_text: str, *, request_id: str) -> dict[str, Any]:
         is_unknown = FHIR_MEDICATION_UNKNOWN_SUFFIX in medication_text
@@ -337,6 +437,12 @@ class PreVisitIntakeTool:
                     missing_stages.append(stage)
                     break
         return missing_stages
+
+    def format_stage_progress(self, intake: PreVisitIntake | dict[str, Any]) -> str:
+        return format_stage_progress(intake)
+
+    def get_stage_progress_text(self, intake: PreVisitIntake | dict[str, Any]) -> str:
+        return format_stage_progress(intake)
 
     # ── Multi-field extraction (single utterance → 2-3 fields) ──
 
@@ -552,3 +658,55 @@ class PreVisitIntakeTool:
             "fixed_via_a": is_red_flag and is_fixed_referral,
             "a_result": result.model_dump(mode="json"),
         }
+STAGE_LABELS: dict[str, str] = {"stage1": "用藥與過敏", "stage2": "症狀", "stage3": "想問醫師"}
+_STAGE_ORDER: list[str] = ["stage1", "stage2", "stage3"]
+
+
+def _normalize_intake(intake: PreVisitIntake | dict[str, Any] | None) -> PreVisitIntake:
+    if intake is None:
+        return PreVisitIntake()
+    if isinstance(intake, dict):
+        try:
+            return PreVisitIntake.model_validate(intake)
+        except Exception:
+            return PreVisitIntake()
+    if isinstance(intake, PreVisitIntake):
+        return intake
+    try:
+        return PreVisitIntake.model_validate(intake)  # type: ignore[arg-type]
+    except Exception:
+        return PreVisitIntake()
+
+
+def _missing_stages_for_progress(intake: PreVisitIntake) -> list[str]:
+    missing: list[str] = []
+    for stage in _STAGE_ORDER:
+        fields = INTAKE_STAGES.get(stage, [])
+        for f in fields:
+            val = getattr(intake, f, None)
+            if not val:
+                missing.append(stage)
+                break
+    return missing
+
+
+def format_stage_progress(intake: PreVisitIntake | dict[str, Any] | None) -> str:
+    obj = _normalize_intake(intake)
+    missing = _missing_stages_for_progress(obj)
+    completed = [s for s in _STAGE_ORDER if s not in missing]
+    if not missing:
+        text = "用藥與過敏、症狀、想問醫師 皆已完成 ✅"
+        return text[:60]
+    if not completed:
+        labels = "、".join(STAGE_LABELS[s] for s in missing)
+        text = f"還差：{labels} {len(missing)} 段，先從用藥開始吧"
+        return text[:60]
+    completed_labels = "、".join(STAGE_LABELS[s] for s in completed)
+    missing_labels = "、".join(STAGE_LABELS[s] for s in missing)
+    text = f"已完成：{completed_labels} ✅ 還差：{missing_labels} {len(missing)} 段"
+    return text[:60]
+
+
+def get_stage_progress_text(intake: PreVisitIntake | dict[str, Any] | None) -> str:
+    return format_stage_progress(intake)
+

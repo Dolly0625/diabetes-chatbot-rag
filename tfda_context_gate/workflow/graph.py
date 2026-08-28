@@ -120,14 +120,14 @@ class WorkflowState(TypedDict, total=False):
 
 def build_agent_question(missing_information: list[str]) -> str:
     intake_questions = {
-        "known_medications": "第 1/8 題｜目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。",
-        "allergies": "第 2/8 題｜有沒有藥物或食物過敏？沒有、不確定都可以直接說。",
-        "chronic_conditions": "第 3/8 題｜除了糖尿病，還有高血壓、高血脂等慢性病嗎？",
-        "family_history": "第 4/8 題｜家人中有人有糖尿病或相關疾病嗎？",
-        "symptom_onset": "第 5/8 題｜這次想看診的狀況大約從什麼時候開始？",
-        "symptom_description": "第 6/8 題｜目前最主要的症狀或困擾是什麼？",
-        "symptom_severity": "第 7/8 題｜程度大約是輕度、中度、重度，或 1–10 分中的幾分？",
-        "questions_for_doctor": "第 8/8 題｜這次最想問醫師什麼？還沒想到也可以先跳過。",
+        "known_medications": "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。",
+        "allergies": "有沒有藥物或食物過敏？沒有、不確定都可以直接說。",
+        "chronic_conditions": "除了糖尿病，還有高血壓、高血脂等慢性病嗎？",
+        "family_history": "家人中有人有糖尿病或相關疾病嗎？",
+        "symptom_onset": "這次想看診的狀況大約從什麼時候開始？",
+        "symptom_description": "目前最主要的症狀或困擾是什麼？",
+        "symptom_severity": "程度大約是輕度、中度、重度，或 1–10 分中的幾分？",
+        "questions_for_doctor": "這次最想問醫師什麼？還沒想到也可以先跳過。",
         "time_frame": "請問這些症狀是現在發生、過去曾發生，還是假設性詢問？",
         "target_subject": "請問這些症狀是您本人、家人，還是其他對象的情況？",
     }
@@ -339,10 +339,23 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
             missing_field, next_question = _next_intake_question(obj, "stage1")
             with trace.span("INTAKE_STAGE1", "intake_extraction") as span:
                 span.set(status="NEEDS_CLARIFICATION" if missing_field else "COMPLETED", question=next_question, missing_information=[missing_field] if missing_field else [], identified_missing_information=[missing_field] if missing_field else [])
+            def _with_confirm(q: str | None) -> str | None:
+                if q is None or not extracted:
+                    return q
+                try:
+                    from tfda_context_gate.intake.tool import build_implicit_confirm_for_fields
+                    c = build_implicit_confirm_for_fields(extracted, raw_text=original)
+                    if c:
+                        return f"{c}\n{q}"
+                except Exception:
+                    pass
+                return q
             if missing_field and next_question:
-                return {"intake": obj, "intake_stage": "stage1", "question": next_question, "status": "NEEDS_CLARIFICATION", "final_response": next_question, "termination_reason": "NEEDS_CLARIFICATION", "clarification_count": state.get("clarification_count", 0) + 1}
+                final_q = _with_confirm(next_question)
+                return {"intake": obj, "intake_stage": "stage1", "question": final_q, "status": "NEEDS_CLARIFICATION", "final_response": final_q, "termination_reason": "NEEDS_CLARIFICATION", "clarification_count": state.get("clarification_count", 0) + 1}
             next_question = build_agent_question(["symptom_onset"])
-            return {"intake": obj, "intake_stage": "stage2", "question": next_question, "status": "NEEDS_CLARIFICATION", "final_response": next_question, "termination_reason": "NEXT_INTAKE_STAGE"}
+            final_q2 = _with_confirm(next_question)
+            return {"intake": obj, "intake_stage": "stage2", "question": final_q2, "status": "NEEDS_CLARIFICATION", "final_response": final_q2, "termination_reason": "NEXT_INTAKE_STAGE"}
         except Exception as e:
             with trace.span("INTAKE_STAGE1", "intake_extraction") as span:
                 span.set(status="ERROR", error_type="IntakeExtractionError", error_message=str(e)[:200])
@@ -373,10 +386,23 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
             missing_field, next_question = _next_intake_question(obj, "stage2")
             with trace.span("INTAKE_STAGE2", "intake_extraction") as span:
                 span.set(status="NEEDS_CLARIFICATION" if missing_field else "COMPLETED", question=next_question, missing_information=[missing_field] if missing_field else [], identified_missing_information=[missing_field] if missing_field else [])
+            def _with_confirm(q: str | None) -> str | None:
+                if q is None or not extracted:
+                    return q
+                try:
+                    from tfda_context_gate.intake.tool import build_implicit_confirm_for_fields
+                    c = build_implicit_confirm_for_fields(extracted, raw_text=text_to_extract)
+                    if c:
+                        return f"{c}\n{q}"
+                except Exception:
+                    pass
+                return q
             if missing_field and next_question:
-                return {"intake": obj, "intake_stage": "stage2", "question": next_question, "status": "NEEDS_CLARIFICATION", "final_response": next_question, "termination_reason": "NEEDS_CLARIFICATION", "clarification_count": state.get("clarification_count", 0) + 1}
+                final_q = _with_confirm(next_question)
+                return {"intake": obj, "intake_stage": "stage2", "question": final_q, "status": "NEEDS_CLARIFICATION", "final_response": final_q, "termination_reason": "NEEDS_CLARIFICATION", "clarification_count": state.get("clarification_count", 0) + 1}
             next_question = build_agent_question(["questions_for_doctor"])
-            return {"intake": obj, "intake_stage": "stage3", "question": next_question, "status": "NEEDS_CLARIFICATION", "final_response": next_question, "termination_reason": "NEXT_INTAKE_STAGE"}
+            final_q2 = _with_confirm(next_question)
+            return {"intake": obj, "intake_stage": "stage3", "question": final_q2, "status": "NEEDS_CLARIFICATION", "final_response": final_q2, "termination_reason": "NEXT_INTAKE_STAGE"}
         except Exception as e:
             with trace.span("INTAKE_STAGE2", "intake_extraction") as span:
                 span.set(status="ERROR", error_type="IntakeExtractionError", error_message=str(e)[:200])

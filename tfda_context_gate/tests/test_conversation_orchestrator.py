@@ -144,7 +144,7 @@ def test_unknown_answer_is_valid_and_advances_to_next_single_question(tmp_path):
 
     assert result.status == "NEEDS_CLARIFICATION"
     assert "待看診確認" in result.reply
-    assert "第 2/8 題" in result.reply
+    assert "過敏" in result.reply and "第" not in result.reply  # INTAKE_FIELD_QUESTIONS["allergies"] 含「過敏」，防 drifts
     assert "目前無法處理此請求" not in result.reply
     assert session is not None
     assert session.intake_snapshot.known_medications == ["不清楚（待看診確認）"]
@@ -166,8 +166,8 @@ def test_general_education_digression_answers_then_returns_to_saved_intake(tmp_p
 
     assert result.status == "SIDE_ANSWER"
     assert "一般糖尿病飲食原則" in result.reply
-    assert "看診資料我先幫你保留" in result.reply
-    assert "第 2/8 題" in result.reply
+    assert "資料已保留" in result.reply
+    assert "過敏" in result.reply and "第" not in result.reply  # INTAKE_FIELD_QUESTIONS["allergies"] 防漂移
     assert session is not None and session.pending_field == "allergies"
     assert session.intake_snapshot.known_medications == ["不清楚（待看診確認）"]
 
@@ -188,7 +188,7 @@ def test_intake_can_pause_and_resume_without_losing_progress(tmp_path):
 
     assert paused.status == "PAUSED"
     assert resumed.status == "NEEDS_CLARIFICATION"
-    assert "第 2/8 題" in resumed.reply
+    assert "過敏" in resumed.reply and "第" not in resumed.reply  # INTAKE_FIELD_QUESTIONS["allergies"] 防漂移
     assert session is not None and session.status == "ACTIVE"
     assert session.intake_snapshot.known_medications == ["無"]
 
@@ -226,7 +226,7 @@ def test_stage_checkpoint_summarizes_before_next_section(tmp_path):
     assert result is not None
     assert result.intake_stage == "stage2"
     assert "用藥與病史已記下" in result.reply
-    assert "第 5/8 題" in result.reply
+    assert "什麼時候開始" in result.reply and "第" not in result.reply  # INTAKE_FIELD_QUESTIONS["symptom_onset"] 防漂移
 
 
 def test_duplicate_webhook_replays_same_result_without_duplicate_turn(tmp_path):
