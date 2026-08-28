@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import threading
+import time
+import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
@@ -32,7 +34,51 @@ ASYNC_FORMAL_TIMEOUT_S_ALIAS = ASYNC_FORMAL_TIMEOUT_S
 # provides cross-process durability; this set prevents duplicate push within same process.
 _pushed_events: set[str] = set()
 _pushed_lock = threading.Lock()
+# P3-R4 bounded concurrency for async formal: global semaphore limits concurrent
+# formal background executions to 5; excess tasks block inside thread (FIFO queue)
+# while placeholder reply returns immediately (<1s).
+_FORMAL_SEMAPHORE = threading.Semaphore(5)
 logger = logging.getLogger(__name__)
+
+# ── P3-R1 text-level dedup for async formal (120s TTL, thread-safe) ───────────
+TEXT_DEDUP_TTL_S = 120
+TEXT_DEDUP_REPLY = "這題正在幫你查了，稍候"
+_text_dedup: dict[tuple[str, str], float] = {}
+_text_dedup_lock = threading.Lock()
+
+
+def _normalize_text(text: str) -> str:
+    try:
+        return unicodedata.normalize("NFKC", text).strip().lower()
+    except Exception:
+        return (text or "").strip().lower()
+
+
+def _is_text_duplicate(user_id: str, text: str) -> bool:
+    norm = _normalize_text(text)
+    if not norm:
+        return False
+    key = (user_id, norm)
+    now = time.time()
+    with _text_dedup_lock:
+        expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
+        for k in expired:
+            _text_dedup.pop(k, None)
+        ts = _text_dedup.get(key)
+        return ts is not None and now - ts < TEXT_DEDUP_TTL_S
+
+
+def _mark_text_dedup(user_id: str, text: str) -> None:
+    norm = _normalize_text(text)
+    if not norm:
+        return
+    key = (user_id, norm)
+    now = time.time()
+    with _text_dedup_lock:
+        expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
+        for k in expired:
+            _text_dedup.pop(k, None)
+        _text_dedup[key] = now
 
 
 def _orch_should_use_formal(raw: str | None, task_type: str | None) -> bool:
@@ -531,131 +577,132 @@ class ConversationOrchestrator:
             return
 
         def _background() -> None:
-            workflow: WorkflowResult | None = None
-            for attempt in range(2):
-                try:
-                    sess = self.repository.get(session_id)
-                    target_session = sess if sess is not None else ProductSession.model_validate(
-                        {
-                            "session_id": session_id,
-                            "principal_id_hash": self._hash(line_user_id),
-                            "conversation_context": self.context_manager.create(session_id),
-                            "created_at": datetime.now(timezone.utc).isoformat(),
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                            "expires_at": (datetime.now(timezone.utc) + self.session_ttl).isoformat(),
-                        }
+            with _FORMAL_SEMAPHORE:
+                workflow: WorkflowResult | None = None
+                for attempt in range(2):
+                    try:
+                        sess = self.repository.get(session_id)
+                        target_session = sess if sess is not None else ProductSession.model_validate(
+                            {
+                                "session_id": session_id,
+                                "principal_id_hash": self._hash(line_user_id),
+                                "conversation_context": self.context_manager.create(session_id),
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                                "expires_at": (datetime.now(timezone.utc) + self.session_ttl).isoformat(),
+                            }
+                        )
+                        wf = self._run_formal_with_timeout(text, target_session, self.async_formal_timeout_s)
+                        workflow = wf
+                        break
+                    except FuturesTimeoutError:
+                        logger.warning("async formal timeout attempt %s for %s", attempt + 1, event_id[:8])
+                        if attempt == 1:
+                            workflow = WorkflowResult(
+                                request_id=event_id,
+                                status="FALLBACK",
+                                final_response=HONEST_FALLBACK_TEXT,
+                                fallback_reason="FORMAL_TIMEOUT",
+                                a_result=None,
+                                query_expansion=None,
+                                rag_result=None,
+                                b_result=None,
+                                c_result=None,
+                                d_result=None,
+                                agent_action=None,
+                                agent_reason_code=None,
+                                question=None,
+                                current_query=text,
+                                execution_history=[],
+                                agent_steps=0,
+                                rewrite_count=0,
+                                clarification_count=0,
+                                termination_reason="FORMAL_TIMEOUT",
+                                intake_snapshot=None,
+                                intake_stage=None,
+                                previsit_summary=None,
+                                system_risk_classification=None,
+                                trace={"events": [], "evaluations": []},
+                            )
+                        else:
+                            continue
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("async formal error attempt %s for %s: %s", attempt + 1, event_id[:8], exc)
+                        if attempt == 1:
+                            workflow = WorkflowResult(
+                                request_id=event_id,
+                                status="FALLBACK",
+                                final_response=HONEST_FALLBACK_TEXT,
+                                fallback_reason="SYSTEM_DEPENDENCY",
+                                a_result=None,
+                                query_expansion=None,
+                                rag_result=None,
+                                b_result=None,
+                                c_result=None,
+                                d_result=None,
+                                agent_action=None,
+                                agent_reason_code=None,
+                                question=None,
+                                current_query=text,
+                                execution_history=[],
+                                agent_steps=0,
+                                rewrite_count=0,
+                                clarification_count=0,
+                                termination_reason="SYSTEM_DEPENDENCY",
+                                intake_snapshot=None,
+                                intake_stage=None,
+                                previsit_summary=None,
+                                system_risk_classification=None,
+                                trace={"events": [], "evaluations": []},
+                            )
+                        else:
+                            continue
+                if workflow is None:
+                    workflow = WorkflowResult(
+                        request_id=event_id,
+                        status="FALLBACK",
+                        final_response=HONEST_FALLBACK_TEXT,
+                        fallback_reason="SYSTEM_DEPENDENCY",
+                        a_result=None,
+                        query_expansion=None,
+                        rag_result=None,
+                        b_result=None,
+                        c_result=None,
+                        d_result=None,
+                        agent_action=None,
+                        agent_reason_code=None,
+                        question=None,
+                        current_query=text,
+                        execution_history=[],
+                        agent_steps=0,
+                        rewrite_count=0,
+                        clarification_count=0,
+                        termination_reason="SYSTEM_DEPENDENCY",
+                        intake_snapshot=None,
+                        intake_stage=None,
+                        previsit_summary=None,
+                        system_risk_classification=None,
+                        trace={"events": [], "evaluations": []},
                     )
-                    wf = self._run_formal_with_timeout(text, target_session, self.async_formal_timeout_s)
-                    workflow = wf
-                    break
-                except FuturesTimeoutError:
-                    logger.warning("async formal timeout attempt %s for %s", attempt + 1, event_id[:8])
-                    if attempt == 1:
-                        workflow = WorkflowResult(
-                            request_id=event_id,
-                            status="FALLBACK",
-                            final_response=HONEST_FALLBACK_TEXT,
-                            fallback_reason="FORMAL_TIMEOUT",
-                            a_result=None,
-                            query_expansion=None,
-                            rag_result=None,
-                            b_result=None,
-                            c_result=None,
-                            d_result=None,
-                            agent_action=None,
-                            agent_reason_code=None,
-                            question=None,
-                            current_query=text,
-                            execution_history=[],
-                            agent_steps=0,
-                            rewrite_count=0,
-                            clarification_count=0,
-                            termination_reason="FORMAL_TIMEOUT",
-                            intake_snapshot=None,
-                            intake_stage=None,
-                            previsit_summary=None,
-                            system_risk_classification=None,
-                            trace={"events": [], "evaluations": []},
-                        )
-                    else:
-                        continue
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("async formal error attempt %s for %s: %s", attempt + 1, event_id[:8], exc)
-                    if attempt == 1:
-                        workflow = WorkflowResult(
-                            request_id=event_id,
-                            status="FALLBACK",
-                            final_response=HONEST_FALLBACK_TEXT,
-                            fallback_reason="SYSTEM_DEPENDENCY",
-                            a_result=None,
-                            query_expansion=None,
-                            rag_result=None,
-                            b_result=None,
-                            c_result=None,
-                            d_result=None,
-                            agent_action=None,
-                            agent_reason_code=None,
-                            question=None,
-                            current_query=text,
-                            execution_history=[],
-                            agent_steps=0,
-                            rewrite_count=0,
-                            clarification_count=0,
-                            termination_reason="SYSTEM_DEPENDENCY",
-                            intake_snapshot=None,
-                            intake_stage=None,
-                            previsit_summary=None,
-                            system_risk_classification=None,
-                            trace={"events": [], "evaluations": []},
-                        )
-                    else:
-                        continue
-            if workflow is None:
-                workflow = WorkflowResult(
-                    request_id=event_id,
-                    status="FALLBACK",
-                    final_response=HONEST_FALLBACK_TEXT,
-                    fallback_reason="SYSTEM_DEPENDENCY",
-                    a_result=None,
-                    query_expansion=None,
-                    rag_result=None,
-                    b_result=None,
-                    c_result=None,
-                    d_result=None,
-                    agent_action=None,
-                    agent_reason_code=None,
-                    question=None,
-                    current_query=text,
-                    execution_history=[],
-                    agent_steps=0,
-                    rewrite_count=0,
-                    clarification_count=0,
-                    termination_reason="SYSTEM_DEPENDENCY",
-                    intake_snapshot=None,
-                    intake_stage=None,
-                    previsit_summary=None,
-                    system_risk_classification=None,
-                    trace={"events": [], "evaluations": []},
-                )
-            if self._is_duplicate_push(event_id):
-                return
-            push_text = self.prepare_formal_push_text(workflow, text)
-            ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
-            if ok:
-                try:
-                    latest = self.repository.get(session_id)
-                    if latest is not None:
-                        ctx = self.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
-                        ctx, _ = self.context_manager.compact(ctx, stage_completed=False)
-                        updated = latest.model_copy(update={"conversation_context": ctx}, deep=True)
-                        try:
-                            self.repository.save(updated, expected_version=latest.version)
-                        except ProductSessionConflict:
-                            pass
-                except Exception:
-                    pass
-                if _should_push_honest_fallback(workflow):
-                    self._maybe_record_question_for_doctor(line_user_id, text, workflow)
+                if self._is_duplicate_push(event_id):
+                    return
+                push_text = self.prepare_formal_push_text(workflow, text)
+                ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
+                if ok:
+                    try:
+                        latest = self.repository.get(session_id)
+                        if latest is not None:
+                            ctx = self.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
+                            ctx, _ = self.context_manager.compact(ctx, stage_completed=False)
+                            updated = latest.model_copy(update={"conversation_context": ctx}, deep=True)
+                            try:
+                                self.repository.save(updated, expected_version=latest.version)
+                            except ProductSessionConflict:
+                                pass
+                    except Exception:
+                        pass
+                    if _should_push_honest_fallback(workflow):
+                        self._maybe_record_question_for_doctor(line_user_id, text, workflow)
 
         threading.Thread(target=_background, daemon=True).start()
 
@@ -697,6 +744,33 @@ class ConversationOrchestrator:
             session = self._load_or_create(line_user_id)
             clean_text = text.strip()
             if self._is_async_narrow_eligible(session, clean_text):
+                now = time.time()
+                norm = _normalize_text(clean_text)
+                key = (line_user_id, norm)
+                is_dup = False
+                with _text_dedup_lock:
+                    expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
+                    for k in expired:
+                        _text_dedup.pop(k, None)
+                    ts = _text_dedup.get(key)
+                    if ts is not None and now - ts < TEXT_DEDUP_TTL_S:
+                        is_dup = True
+                    else:
+                        if norm:
+                            _text_dedup[key] = now
+                if is_dup:
+                    dedup_result = OrchestratorResult(
+                        event_id=event_id,
+                        session_id=session.session_id,
+                        reply=TEXT_DEDUP_REPLY,
+                        status="ASYNC_PENDING",
+                        intake_stage=session.intake_stage,
+                        replayed=False,
+                    )
+                    self.repository.complete_webhook_event(
+                        event_id, dedup_result.model_dump(mode="json"), claim_token=claim_token
+                    )
+                    return dedup_result
                 previous_version = session.version
                 context = self.context_manager.append_turn(
                     session.conversation_context, role="user", content=clean_text or "（空白訊息）"
