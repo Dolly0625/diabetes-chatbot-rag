@@ -32,7 +32,7 @@ HPA_RAW_DIR = PACKAGE_ROOT / "data" / "processed" / "hpa_raw"
 # Source mapping for cache files
 HPA_SOURCE_IDS = ["FOOD_NUTRITION", "HPA_DIET_GUIDE", "HPA_DIABETES_BOOK"]
 
-RETRIEVAL_THRESHOLD = float(os.getenv("RETRIEVAL_THRESHOLD", os.getenv("RETRIEVAL_ALPHA", "0.75")))
+RETRIEVAL_THRESHOLD = float(os.getenv("RETRIEVAL_THRESHOLD", os.getenv("RETRIEVAL_ALPHA", "0.55")))
 HPA_CACHE_VERSION = "g5-faq-v1"
 
 # G5 FAQ keyword weighting +0.05 per D5 table

@@ -20,7 +20,7 @@ DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"  # 預設多語嵌入
 CACHE_DIR = PACKAGE_ROOT / "data" / "processed" / ".vector_cache"  # 向量快取目錄（持久化）
 
 # G4 retrieval precision: similarity threshold α (tunable) and topic consistency
-RETRIEVAL_THRESHOLD = float(os.getenv("RETRIEVAL_THRESHOLD", os.getenv("RETRIEVAL_ALPHA", "0.75")))
+RETRIEVAL_THRESHOLD = float(os.getenv("RETRIEVAL_THRESHOLD", os.getenv("RETRIEVAL_ALPHA", "0.55")))
 CACHE_VERSION = "g5-faq-v1"
 
 _FAQ_CAUSE_KEYWORDS = ["為什麼", "成因", "為什麼會", "怎麼來的", "怎麼會", "為何"]

@@ -30,8 +30,17 @@ import hmac
 import os
 import sys
 import uuid
+import logging
+import threading
 from pathlib import Path
 from typing import Any, Iterator
+
+logger = logging.getLogger(__name__)
+HONEST_FALLBACK_PUSH_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你 📋"
+ASYNC_FORMAL_TIMEOUT_S = float(os.getenv("ASYNC_FORMAL_TIMEOUT_S", "120"))
+_pushed_events: set[str] = set()
+_pushed_lock = threading.Lock()
 
 # Ensure project root is on sys.path for direct execution (python line_bot/app.py)
 _project_root = Path(__file__).resolve().parents[1]
@@ -230,6 +239,7 @@ def handle_text_message(
     use_stream: bool = False,
     chunk_size: int = 20,
     sse_format: bool = False,
+    use_formal: bool = True,
 ) -> Any:
     """Handle text message via workflow (no image). Returns WorkflowResult or iterator if streaming."""
     from tfda_context_gate.workflow.runner import run_workflow, stream_workflow
@@ -241,8 +251,9 @@ def handle_text_message(
             intake_data=intake_data,
             chunk_size=chunk_size,
             sse_format=sse_format,
+            use_formal=use_formal,
         )
-    return run_workflow(req, intake_data=intake_data)
+    return run_workflow(req, intake_data=intake_data, use_formal=use_formal)
 
 
 def handle_image_message(
@@ -256,6 +267,7 @@ def handle_image_message(
     use_stream: bool = False,
     chunk_size: int = 20,
     sse_format: bool = False,
+    use_formal: bool = True,
 ) -> Any:
     """Handle single image message: OCR -> merge into intake_data -> workflow.
 
@@ -275,12 +287,14 @@ def handle_image_message(
             ocr_service=ocr_service,
             chunk_size=chunk_size,
             sse_format=sse_format,
+            use_formal=use_formal,
         )
     return run_workflow(
         req,
         intake_data=intake_data,
         image_bytes=image_bytes,
         ocr_service=ocr_service,
+        use_formal=use_formal,
     )
 
 
@@ -296,6 +310,7 @@ def handle_front_back_images(
     use_stream: bool = False,
     chunk_size: int = 20,
     sse_format: bool = False,
+    use_formal: bool = True,
 ) -> Any:
     """Handle front/back medication bag images: OCR both, merge, workflow.
 
@@ -314,6 +329,7 @@ def handle_front_back_images(
             ocr_service=ocr_service,
             chunk_size=chunk_size,
             sse_format=sse_format,
+            use_formal=use_formal,
         )
     return run_workflow(
         req,
@@ -321,6 +337,7 @@ def handle_front_back_images(
         image_bytes_front=front_bytes,
         image_bytes_back=back_bytes,
         ocr_service=ocr_service,
+        use_formal=use_formal,
     )
 
 
@@ -330,9 +347,10 @@ def stream_text_reply(
     request_id: str | None = None,
     chunk_size: int = 20,
     sse_format: bool = False,
+    use_formal: bool = True,
 ) -> Iterator[str]:
     """Streaming helper for text: yields chunks via stream_workflow."""
-    gen = handle_text_message(text, request_id=request_id, use_stream=True, chunk_size=chunk_size, sse_format=sse_format)
+    gen = handle_text_message(text, request_id=request_id, use_stream=True, chunk_size=chunk_size, sse_format=sse_format, use_formal=use_formal)
     yield from gen  # type: ignore[misc]
 
 
@@ -343,12 +361,219 @@ def stream_image_reply(
     request_id: str | None = None,
     chunk_size: int = 20,
     sse_format: bool = False,
+    use_formal: bool = True,
 ) -> Iterator[str]:
     """Streaming helper for image: OCR + stream_workflow."""
     gen = handle_image_message(
-        image_bytes, text_fallback=text_fallback, request_id=request_id, use_stream=True, chunk_size=chunk_size, sse_format=sse_format
+        image_bytes, text_fallback=text_fallback, request_id=request_id, use_stream=True, chunk_size=chunk_size, sse_format=sse_format, use_formal=use_formal
     )
     yield from gen  # type: ignore[misc]
+
+
+def _format_formal_push_text(workflow: Any, original_text: str = "") -> str:
+    try:
+        status = getattr(workflow, "status", None) or (workflow.get("status") if isinstance(workflow, dict) else None)
+        final = getattr(workflow, "final_response", None) or (workflow.get("final_response") if isinstance(workflow, dict) else "") or ""
+        fallback_reason = getattr(workflow, "fallback_reason", None) or (workflow.get("fallback_reason") if isinstance(workflow, dict) else None) or ""
+        if status == "COMPLETED" and final.strip():
+            base = final.strip()
+            sources: list[str] = []
+            rag = getattr(workflow, "rag_result", None) or (workflow.get("rag_result") if isinstance(workflow, dict) else None) or {}
+            if isinstance(rag, dict):
+                for ev in (rag.get("evidences") or rag.get("chunks") or [])[:2]:
+                    if isinstance(ev, dict):
+                        src = ev.get("source") or ev.get("doc_id") or ev.get("title")
+                        if src:
+                            sources.append(str(src))
+            c_res = getattr(workflow, "c_result", None) or (workflow.get("c_result") if isinstance(workflow, dict) else None) or {}
+            if isinstance(c_res, dict):
+                for k in ("source", "sources", "evidence_id"):
+                    v = c_res.get(k)
+                    if v and str(v) not in sources:
+                        if isinstance(v, list):
+                            sources.extend([str(x) for x in v[:2] if str(x) not in sources])
+                        else:
+                            sources.append(str(v))
+            if sources:
+                return f"{base}\n\n資料來源：{'、'.join(sources[:2])}"
+            return base
+        if status == "FALLBACK" and fallback_reason in {"B_INSUFFICIENT", "FORMAL_TIMEOUT", "C_FAILURE", "SYSTEM_DEPENDENCY", "B_UNSAFE"}:
+            return HONEST_FALLBACK_PUSH_TEXT
+        if final.strip():
+            return final.strip()
+        return HONEST_FALLBACK_PUSH_TEXT
+    except Exception:
+        return HONEST_FALLBACK_PUSH_TEXT
+
+
+def _is_duplicate_push(event_id: str | None) -> bool:
+    if not event_id:
+        return False
+    with _pushed_lock:
+        if event_id in _pushed_events:
+            return True
+    return False
+
+
+def _mark_pushed(event_id: str | None) -> None:
+    if not event_id:
+        return
+    with _pushed_lock:
+        _pushed_events.add(event_id)
+
+
+def _push_text(line_user_id: str, text: str, event_id: str | None = None) -> bool:
+    if not line_user_id or not text:
+        return False
+    if event_id and _is_duplicate_push(event_id):
+        return False
+    if len(text) > 4900:
+        text = text[:4900] + "…"
+    for attempt in range(2):
+        try:
+            api = _get_messaging_api()
+            if api is None:
+                return False
+            from linebot.v3.messaging import PushMessageRequest, TextMessage
+
+            api.push_message(PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text)]))
+            if event_id:
+                _mark_pushed(event_id)
+            return True
+        except Exception as exc:
+            logger.warning("push_message failed attempt %s for %s: %s", attempt + 1, event_id, exc)
+            if attempt == 0:
+                continue
+            return False
+    return False
+
+
+def _maybe_record_question_for_doctor(orchestrator: Any, line_user_id: str, original_text: str, workflow: Any) -> None:
+    try:
+        status = getattr(workflow, "status", None) or (workflow.get("status") if isinstance(workflow, dict) else None)
+        if status != "FALLBACK":
+            return
+        push_text = _format_formal_push_text(workflow, original_text)
+        if push_text != HONEST_FALLBACK_PUSH_TEXT:
+            return
+        if orchestrator is None:
+            return
+        try:
+            session = orchestrator.session_for_user(line_user_id)
+        except Exception:
+            session = None
+        if session is None:
+            try:
+                session = orchestrator._load_or_create(line_user_id)
+            except Exception:
+                return
+        q = original_text.strip()[:200]
+        if not q or q in session.intake_snapshot.questions_for_doctor:
+            return
+        if len(session.intake_snapshot.questions_for_doctor) >= 10:
+            return
+        updated = session.intake_snapshot.model_copy(update={"questions_for_doctor": [*session.intake_snapshot.questions_for_doctor, q]}, deep=True)
+        try:
+            orchestrator.repository.save(session.model_copy(update={"intake_snapshot": updated}, deep=True), expected_version=session.version)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _should_use_async_formal(text: str, task_type: str | None = None) -> bool:
+    try:
+        from tfda_context_gate.line_orchestration.orchestrator import _orch_should_use_formal
+
+        return _orch_should_use_formal(text, task_type)
+    except Exception:
+        return False
+
+
+def _schedule_formal_push(
+    orchestrator: Any,
+    line_user_id: str,
+    event_id: str,
+    text: str,
+) -> None:
+    def _bg() -> None:
+        try:
+            if _is_duplicate_push(event_id):
+                return
+            wf = None
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                try:
+                    if orchestrator is not None:
+                        session = orchestrator.session_for_user(line_user_id)
+                        declared_role = "PATIENT"
+                        if session is not None:
+                            try:
+                                from tfda_context_gate.line_orchestration.orchestrator import ConversationOrchestrator as _CO
+
+                                declared_role = _CO._declared_role(session.actor_role)  # type: ignore[attr-defined]
+                            except Exception:
+                                declared_role = "PATIENT"
+                        if False and hasattr(orchestrator, "_run_formal_with_timeout"):
+                            wf = orchestrator._run_formal_with_timeout(text, session if session is not None else orchestrator._load_or_create(line_user_id), ASYNC_FORMAL_TIMEOUT_S)  # type: ignore[attr-defined]
+                        else:
+                            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+                            def _call() -> Any:
+                                return orchestrator._call_workflow(
+                                    {"request_id": f"line-push-{event_id[:8]}", "schema_version": "a.v0.1", "user_raw_input": text, "declared_role": declared_role, "language": "zh-TW"},
+                                    use_formal=True,
+                                )
+
+                            with ThreadPoolExecutor(max_workers=1) as ex:
+                                fut = ex.submit(_call)
+                                wf = fut.result(timeout=ASYNC_FORMAL_TIMEOUT_S)
+                    else:
+                        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+                        def _compat_call() -> Any:
+                            return handle_text_message(text, request_id=f"compat-{event_id[:8]}", use_formal=True)
+
+                        with ThreadPoolExecutor(max_workers=1) as ex:
+                            fut = ex.submit(_compat_call)
+                            wf = fut.result(timeout=ASYNC_FORMAL_TIMEOUT_S)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    is_timeout = "TimeoutError" in type(exc).__name__ or "FuturesTimeoutError" in type(exc).__name__
+                    logger.warning("formal workflow %s attempt %s for %s: %s", "timeout" if is_timeout else "error", attempt + 1, event_id[:8], exc)
+                    if attempt == 0:
+                        continue
+                    from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
+
+                    reason = "FORMAL_TIMEOUT" if is_timeout else "SYSTEM_DEPENDENCY"
+                    wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason=reason, a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason=reason, intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
+            if wf is None:
+                from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
+
+                wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason="SYSTEM_DEPENDENCY", a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason="SYSTEM_DEPENDENCY", intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
+            push_text = _format_formal_push_text(wf, text)
+            ok = False
+            for attempt in range(2):
+                try:
+                    ok = _push_text(line_user_id, push_text, event_id=event_id)
+                    if ok:
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("push retry failed %s: %s", event_id, exc)
+                    if attempt == 0:
+                        continue
+            if ok and push_text == HONEST_FALLBACK_PUSH_TEXT and orchestrator is not None:
+                _maybe_record_question_for_doctor(orchestrator, line_user_id, text, wf)
+            if not ok and not _is_duplicate_push(event_id):
+                try:
+                    _push_text(line_user_id, HONEST_FALLBACK_PUSH_TEXT, event_id=event_id)
+                except Exception:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("schedule formal push crashed %s: %s", event_id, exc)
+
+    threading.Thread(target=_bg, daemon=True).start()
 
 
 # ── LINE Messaging API helpers ──────────────────────────────────────────────
@@ -772,6 +997,33 @@ async def callback(
                 orchestrator = _get_conversation_orchestrator()
                 webhook_event_id = ev.get("webhookEventId") or message.get("id")
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":
+                    if _is_duplicate_push(str(webhook_event_id)):
+                        try:
+                            existing = orchestrator.repository.get_webhook_event(str(webhook_event_id))
+                            if existing is not None and existing.status == "COMPLETED" and existing.result:
+                                product_result = orchestrator.handle_text(
+                                    event_id=str(webhook_event_id),
+                                    line_user_id=str(user_id),
+                                    text=text,
+                                )
+                                reply = product_result.reply
+                                try:
+                                    session = orchestrator.session_for_user(str(user_id))
+                                    intake = getattr(session, "intake_snapshot", None) if session else None
+                                    reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
+                                except Exception:
+                                    pass
+                                quick_actions = _quick_actions_for_status(product_result.status, reply)
+                                _send(reply_token, reply, quick_actions=quick_actions)
+                                continue
+                        except Exception:
+                            pass
+                        _send(reply_token, "此訊息已在處理中，請稍候。")
+                        continue
+                    if orchestrator.use_formal and _should_use_async_formal(text, None):
+                        _send(reply_token, ASYNC_PLACEHOLDER_REPLY)
+                        _schedule_formal_push(orchestrator, str(user_id), str(webhook_event_id), text)
+                        continue
                     product_result = orchestrator.handle_text(
                         event_id=str(webhook_event_id),
                         line_user_id=str(user_id),
@@ -785,12 +1037,16 @@ async def callback(
                     except Exception:
                         pass
                     quick_actions = _quick_actions_for_status(product_result.status, reply)
+                    _send(reply_token, reply, quick_actions=quick_actions)
                 else:
-                    # 單輪相容模式仍完整經過 B/D gates。
-                    result = handle_text_message(text, request_id=f"line-{user_id[:8]}-{uuid.uuid4().hex[:4]}")
-                    reply = getattr(result, "final_response", str(result))
-                    quick_actions = None
-                _send(reply_token, reply, quick_actions=quick_actions)
+                    if _should_use_async_formal(text, None) and not _is_duplicate_push(str(webhook_event_id) if webhook_event_id else None):
+                        _send(reply_token, ASYNC_PLACEHOLDER_REPLY)
+                        _schedule_formal_push(None, str(user_id), str(webhook_event_id) if webhook_event_id else f"compat-{uuid.uuid4().hex[:8]}", text)
+                    else:
+                        result = handle_text_message(text, request_id=f"line-{user_id[:8]}-{uuid.uuid4().hex[:4]}")
+                        reply = getattr(result, "final_response", str(result))
+                        quick_actions = None
+                        _send(reply_token, reply, quick_actions=quick_actions)
 
             elif msg_type == "image":
                 message_id = message.get("id", "")

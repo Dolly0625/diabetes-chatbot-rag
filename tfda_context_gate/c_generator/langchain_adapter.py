@@ -14,6 +14,63 @@ from .schemas import ClinicianEvidenceDraft, EvidenceAwareV2Answer
 from .system_prompts import CLINICIAN_DRAFT_SYSTEM, EVIDENCE_AWARE_V2_SYSTEM
 from .user_prompts import clinician_draft_user_prompt, evidence_aware_v2_user_prompt
 
+def _ensure_grounded_prefix_answer(
+    result: EvidenceAwareV2Answer | ClinicianEvidenceDraft,
+    *,
+    request_id: str,
+    query: str,
+) -> EvidenceAwareV2Answer | ClinicianEvidenceDraft:
+    try:
+        from .deterministic_generators import (
+            GROUNDED_PREFIX_TEMPLATES,
+            _pick_grounded_prefix,
+        )
+    except Exception:
+        return result
+    if isinstance(result, ClinicianEvidenceDraft):
+        return result
+    decision = getattr(result, "decision", None)
+    if decision == "INSUFFICIENT":
+        ans = getattr(result, "answer", "") or ""
+        if "根據提供的資料" in ans:
+            cleaned = ans.replace("根據提供的資料：", "").replace("根據提供的資料:", "").replace("根據提供的資料", "").lstrip(" ：: \n")
+            try:
+                return result.model_copy(update={"answer": cleaned})  # type: ignore[attr-defined]
+            except Exception:
+                result.answer = cleaned  # type: ignore[attr-defined]
+        return result
+    ans = getattr(result, "answer", "") or ""
+    if not ans:
+        return result
+    if any(ans.startswith(p) for p in GROUNDED_PREFIX_TEMPLATES):
+        if "根據提供的資料" in ans[:20]:
+            ans = ans.replace("根據提供的資料：", "", 1).replace("根據提供的資料:", "", 1).replace("根據提供的資料", "", 1).lstrip(" ：: \n")
+            if not any(ans.startswith(p) for p in GROUNDED_PREFIX_TEMPLATES):
+                prefix = _pick_grounded_prefix(request_id, query)
+                ans = prefix + ans
+            try:
+                return result.model_copy(update={"answer": ans})  # type: ignore[attr-defined]
+            except Exception:
+                result.answer = ans  # type: ignore[attr-defined]
+        return result
+    if "根據提供的資料" in ans:
+        cleaned = ans.replace("根據提供的資料：", "").replace("根據提供的資料:", "").replace("根據提供的資料", "")
+        cleaned = cleaned.lstrip(" ：: \n。")
+        prefix = _pick_grounded_prefix(request_id, query)
+        new_ans = prefix + cleaned
+        try:
+            return result.model_copy(update={"answer": new_ans})  # type: ignore[attr-defined]
+        except Exception:
+            result.answer = new_ans  # type: ignore[attr-defined]
+        return result
+    prefix = _pick_grounded_prefix(request_id, query)
+    new_ans = prefix + ans
+    try:
+        return result.model_copy(update={"answer": new_ans})  # type: ignore[attr-defined]
+    except Exception:
+        result.answer = new_ans  # type: ignore[attr-defined]
+    return result
+
 
 class LangChainCV2Generator:
     """已配置 C v2 structured-output chain 的轉接器（線上 LLM 版）。
@@ -145,12 +202,13 @@ class LangChainCV2Generator:
                 parsed_result = ClinicianEvidenceDraft.model_validate(parsed_result)
             else:
                 parsed_result = EvidenceAwareV2Answer.model_validate(parsed_result)
+        if parsed_result is not None:
+            parsed_result = _ensure_grounded_prefix_answer(parsed_result, request_id=request.request_id, query=request.original_query)  # type: ignore[arg-type]
         self._last_streamed_result = parsed_result
-        answer = getattr(parsed_result, "answer", "")
+        answer = getattr(parsed_result, "answer", "") if parsed_result is not None else ""
         yield from self._chunk_answer(str(answer), chunk_size)
 
     def generate(self, request: CWorkflowInput) -> Union[EvidenceAwareV2Answer, ClinicianEvidenceDraft]:
-        """透過注入的 chain 產生 v2 結構化回答；醫護角色時產生臨床草稿。"""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         if self.role == "HEALTHCARE_PROFESSIONAL":
@@ -164,15 +222,18 @@ class LangChainCV2Generator:
             if parsed is None:
                 raise ValueError("C clinician draft structured output did not contain parsed data")
             if isinstance(parsed, dict) and parsed.get("decision") == "CLINICIAN_DRAFT":
-                return ClinicianEvidenceDraft.model_validate(parsed)
-            return EvidenceAwareV2Answer.model_validate(parsed)
+                validated = ClinicianEvidenceDraft.model_validate(parsed)
+                return _ensure_grounded_prefix_answer(validated, request_id=request.request_id, query=request.original_query)
+            validated = EvidenceAwareV2Answer.model_validate(parsed)
+            return _ensure_grounded_prefix_answer(validated, request_id=request.request_id, query=request.original_query)  # type: ignore[return-value]
         response = self.chain.invoke(
             [
-                SystemMessage(content=EVIDENCE_AWARE_V2_SYSTEM),  # v2 系統提示（含 10 條規則與 decision 三態）
-                HumanMessage(content=evidence_aware_v2_user_prompt(to_legacy_v2_case(request))),  # 先轉 legacy 形狀再組 user prompt
+                SystemMessage(content=EVIDENCE_AWARE_V2_SYSTEM),
+                HumanMessage(content=evidence_aware_v2_user_prompt(to_legacy_v2_case(request))),
             ]
         )
-        parsed = response.get("parsed") if isinstance(response, dict) else response  # 相容 dict（含 parsed/raw）與直接物件兩種回傳
-        if parsed is None:  # 結構化解析失敗 → 明確報錯
+        parsed = response.get("parsed") if isinstance(response, dict) else response
+        if parsed is None:
             raise ValueError("C v2 structured output did not contain parsed data")
-        return EvidenceAwareV2Answer.model_validate(parsed)  # 驗證並轉為 v2 契約物件
+        validated = EvidenceAwareV2Answer.model_validate(parsed)
+        return _ensure_grounded_prefix_answer(validated, request_id=request.request_id, query=request.original_query)  # type: ignore[return-value]

@@ -236,6 +236,40 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
                 span.set(status="BLOCKED", router_status=result.router_status.value, intent_tags=[item.value for item in result.intent_tags], risk_flags=[item.value for item in result.risk_flags], reason_codes=[item.value for item in result.reason_codes], rag_allowed=result.rag_allowed, prompt_guard_result="BLOCKED", termination_reason="RED_FLAG_DETERMINISTIC_ABORT")
             emergency_reason = "A_EMERGENCY" if result.router_status.value == "E_EMERGENCY" else "A_URGENT_HUMAN"
             return {"a_result": result, "status": "FALLBACK", "final_response": fallback_response(emergency_reason), "fallback_reason": emergency_reason, "termination_reason": "RED_FLAG_DETERMINISTIC_ABORT"}
+        # G2 whitelist short-circuit (P3 latency fix): chit-chat before LLM, after red-flag invariant
+        try:
+            from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _G2Extractor
+            _g2_hit = _G2Extractor.is_chit_chat_text(raw_input)
+        except Exception:
+            _g2_hit = False
+        if _g2_hit:
+            _is_cap = _is_capability_query(raw_input)
+            reason = "O_GENERIC" if _is_cap else "CHIT_CHAT_OUT_OF_SCOPE"
+            try:
+                from tfda_context_gate.a_router.labels import DeclaredRole as _G2DR, LanguageCode as _G2LC, RouterStatus as _G2RS, PolicyReasonCode as _G2PRC, IntentTag as _G2IT
+                from tfda_context_gate.a_router.schemas import AResult as _G2AR, ContextModifiers as _G2CM
+                _g2_req_id = request.request_id if hasattr(request, "request_id") else state.get("request_id", "unknown")
+                _g2_schema_ver = request.schema_version if hasattr(request, "schema_version") else "a.v0.1"
+                _g2_decl_role = request.declared_role if hasattr(request, "declared_role") else _G2DR.PATIENT
+                if isinstance(_g2_decl_role, str):
+                    try:
+                        _g2_decl_role = _G2DR(_g2_decl_role)
+                    except Exception:
+                        _g2_decl_role = _G2DR.PATIENT
+                _g2_lang = request.language if hasattr(request, "language") else _G2LC.ZH_TW
+                if isinstance(_g2_lang, str):
+                    try:
+                        _g2_lang = _G2LC(_g2_lang)
+                    except Exception:
+                        _g2_lang = _G2LC.ZH_TW
+                _g2_result = _G2AR(request_id=_g2_req_id, schema_version=_g2_schema_ver, user_raw_input=raw_input, declared_role=_g2_decl_role, language=_g2_lang, intent_tags=[_G2IT.NON_MEDICAL], risk_flags=[], context_modifiers=_G2CM(language=_g2_lang), router_status=_G2RS.O_OUT_OF_SCOPE, reason_codes=[_G2PRC.REASON_OUT_OF_SCOPE], rag_allowed=False, task_type=None)
+            except Exception:
+                from tfda_context_gate.a_router.labels import DeclaredRole as _G2DR2, LanguageCode as _G2LC2, RouterStatus as _G2RS2, PolicyReasonCode as _G2PRC2, IntentTag as _G2IT2
+                from tfda_context_gate.a_router.schemas import AResult as _G2AR2, ContextModifiers as _G2CM2
+                _g2_result = _G2AR2(request_id=state.get("request_id", "unknown"), schema_version="a.v0.1", user_raw_input=raw_input, declared_role=_G2DR2.PATIENT, language=_G2LC2.ZH_TW, intent_tags=[_G2IT2.NON_MEDICAL], risk_flags=[], context_modifiers=_G2CM2(language=_G2LC2.ZH_TW), router_status=_G2RS2.O_OUT_OF_SCOPE, reason_codes=[_G2PRC2.REASON_OUT_OF_SCOPE], rag_allowed=False, task_type=None)
+            with trace.span("A", "input_router") as span:
+                span.set(status="BLOCKED", router_status=_g2_result.router_status.value, intent_tags=[item.value for item in _g2_result.intent_tags], risk_flags=[], reason_codes=[item.value for item in _g2_result.reason_codes], rag_allowed=False, termination_reason="G2_WHITELIST_SHORT_CIRCUIT", fallback_reason=reason)
+            return {"a_result": _g2_result, "status": "BLOCKED", "final_response": fallback_response(reason), "fallback_reason": reason, "termination_reason": "G2_WHITELIST_SHORT_CIRCUIT"}
         with trace.span("A", "input_router") as span:
             result = route_request(request, extractor=extractor, prompt_injection_guard=prompt_injection_guard)
             span.set(status=("COMPLETED" if result.rag_allowed else ("FALLBACK" if result.router_status.value == "F_ROUTER_DEPENDENCY" else "BLOCKED")), router_status=result.router_status.value, intent_tags=[item.value for item in result.intent_tags], risk_flags=[item.value for item in result.risk_flags], reason_codes=[item.value for item in result.reason_codes], rag_allowed=result.rag_allowed, prompt_guard_result="BLOCKED" if not result.rag_allowed else "ALLOWED")
@@ -912,8 +946,17 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
                 return {"d_result": result, "status": "FALLBACK", "final_response": result.final_response, "fallback_reason": "D_FALLBACK", "termination_reason": "D_FALLBACK"}
             is_clinician = getattr(c_res, "decision", None) == "CLINICIAN_DRAFT" or hasattr(c_res, "source_table")
             b_res_for_d = state.get("b_result")
-            # dummy B 已下沉至 gate，此處僅透傳（若 None 則 gate 內補齊）
-            payload = c_to_d(request_id=state["request_context"].request_id, a_result=state["a_result"], b_result=b_res_for_d, c_result=c_res) if b_res_for_d is not None else {"request_id": state["request_context"].request_id, "schema_version": "d.v0.1", "a_result": state["a_result"].model_dump(mode="json"), "b_result": None, "c_result": c_res.model_dump(mode="json") if hasattr(c_res, "model_dump") else dict(c_res)}
+            if b_res_for_d is not None:
+                payload = c_to_d(request_id=state["request_context"].request_id, a_result=state["a_result"], b_result=b_res_for_d, c_result=c_res)
+            else:
+                c_dict = c_res.model_dump(mode="json") if hasattr(c_res, "model_dump") else dict(c_res)
+                try:
+                    from tfda_context_gate.workflow.adapters import _normalize_c_answer_for_d
+
+                    c_dict = _normalize_c_answer_for_d(c_dict, request_id=state["request_context"].request_id)
+                except Exception:
+                    pass
+                payload = {"request_id": state["request_context"].request_id, "schema_version": "d.v0.1", "a_result": state["a_result"].model_dump(mode="json"), "b_result": None, "c_result": c_dict}
             result = run_output_gate(payload, verifier=verifier)
             span.set(status="COMPLETED" if result.decision == "PASS" else "FALLBACK", decision=result.decision, failure_type=result.failure_type, reason_codes=result.reason_codes, failed_claims=[claim.model_dump(mode="json") for claim in result.failed_claims], invalid_evidence_ids=result.invalid_evidence_ids, fallback_reason=None if result.decision == "PASS" else "D_FALLBACK", presentation_mode="CLINICIAN_DRAFT" if is_clinician else "PATIENT_EDUCATION", draft_type="clinician_evidence_draft" if is_clinician else "patient_education", candidate_decision=getattr(c_res, "decision", None))
             if result.decision == "PASS":

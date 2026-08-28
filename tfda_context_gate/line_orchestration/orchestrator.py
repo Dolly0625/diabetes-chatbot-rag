@@ -2,10 +2,78 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
+import os
 import re
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+FORMAL_WORKFLOW_TIMEOUT_S = float(os.getenv("FORMAL_WORKFLOW_TIMEOUT_S", "45"))
+SYNC_FORMAL_TIMEOUT_S = float(os.getenv("SYNC_FORMAL_TIMEOUT_S", os.getenv("SYNC_FORMAL_TIMEOUT", str(FORMAL_WORKFLOW_TIMEOUT_S))))
+SYNC_FORMAL_TIMEOUT = SYNC_FORMAL_TIMEOUT_S
+ASYNC_FORMAL_TIMEOUT_S = float(os.getenv("ASYNC_FORMAL_TIMEOUT_S", os.getenv("ASYNC_FORMAL_TIMEOUT", "120")))
+ASYNC_FORMAL_TIMEOUT = ASYNC_FORMAL_TIMEOUT_S
+LINE_USE_FORMAL_DEFAULT = os.getenv("LINE_USE_FORMAL", "true").lower() in ("1", "true", "yes")
+
+# ── Async formal push: honest fallback + idempotency ─────────────────────────
+HONEST_FALLBACK_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+HONEST_FALLBACK_REASONS = {"B_INSUFFICIENT", "FORMAL_TIMEOUT", "C_FAILURE", "SYSTEM_DEPENDENCY", "B_UNSAFE"}
+
+# LINE educational narrow path (G) async: placeholder + background formal (120s + 1 retry)
+# Service restart loss is acceptable (in-memory set only, documented).
+ASYNC_PLACEHOLDER_REPLY = "查詢中，請稍候，資料整理完成後會推送給你 📋"
+SYNC_FORMAL_TIMEOUT_S_ALIAS = SYNC_FORMAL_TIMEOUT_S
+ASYNC_FORMAL_TIMEOUT_S_ALIAS = ASYNC_FORMAL_TIMEOUT_S
+
+# In-memory idempotency for push per event (process-local). Repository webhook_events
+# provides cross-process durability; this set prevents duplicate push within same process.
+_pushed_events: set[str] = set()
+_pushed_lock = threading.Lock()
+logger = logging.getLogger(__name__)
+
+
+def _orch_should_use_formal(raw: str | None, task_type: str | None) -> bool:
+    if task_type == "pre_visit_intake":
+        return False
+    if not raw:
+        return False
+    try:
+        from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor
+        from tfda_context_gate.workflow.intake_router import is_red_flag as _is_red
+
+        if _is_red(raw):
+            return False
+        if RuleBasedSignalExtractor.is_pre_visit_intake_text(raw):
+            return False
+        if RuleBasedSignalExtractor.is_chit_chat_text(raw):
+            return False
+    except Exception:
+        pass
+    try:
+        import re as _re
+        import unicodedata as _ud
+
+        n = _ud.normalize("NFKC", raw).strip()
+        if len(n) < 4 or n in ("怎麼辦", "怎辦", "怎麼半", "help", "？", "?", "…"):
+            return False
+        if _re.search(r"可以跟我說什麼|可以說什麼|能做什麼|會做什麼|能幫什麼|我能幫什麼|介紹一下|你會什麼|功能有哪些", n, _re.IGNORECASE):
+            return False
+        from tfda_context_gate.a_router.policy import DEFAULT_POLICY, policy_gate
+        from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _RB
+
+        try:
+            sig = _RB().extract(n, language=None)  # type: ignore[arg-type]
+        except Exception:
+            return False
+        decision = policy_gate(sig, DEFAULT_POLICY)
+        if getattr(decision.status, "value", str(decision.status)) != "G_GENERAL_EDUCATION":
+            return False
+        return True
+    except Exception:
+        return False
 
 from tfda_context_gate.access_control import (
     ActorRole,
@@ -28,6 +96,52 @@ from .schemas import OrchestratorResult
 
 
 WorkflowRunner = Callable[..., WorkflowResult]
+
+PushSender = Callable[[str, str], bool]
+
+
+def _format_push_answer(workflow: WorkflowResult, original_text: str) -> str:
+    if workflow.status == "COMPLETED" and workflow.final_response:
+        base = workflow.final_response.strip()
+        sources: list[str] = []
+        try:
+            rag = workflow.rag_result or {}
+            evidences = rag.get("evidences") or rag.get("chunks") or []
+            if isinstance(evidences, list):
+                for ev in evidences[:2]:
+                    if isinstance(ev, dict):
+                        src = ev.get("source") or ev.get("doc_id") or ev.get("title")
+                        if src:
+                            sources.append(str(src))
+            c_res = workflow.c_result or {}
+            if isinstance(c_res, dict):
+                for key in ("source", "sources", "evidence_id"):
+                    val = c_res.get(key)
+                    if val and str(val) not in sources:
+                        if isinstance(val, list):
+                            sources.extend([str(x) for x in val[:2] if str(x) not in sources])
+                        else:
+                            sources.append(str(val))
+        except Exception:
+            pass
+        if sources:
+            return f"{base}\n\n資料來源：{ '、'.join(sources[:2])}"
+        return base
+    reason = (workflow.fallback_reason or workflow.termination_reason or "") or ""
+    if workflow.status == "FALLBACK" and reason in HONEST_FALLBACK_REASONS:
+        return HONEST_FALLBACK_TEXT
+    if workflow.status in ("FALLBACK", "BLOCKED"):
+        if workflow.final_response and workflow.final_response.strip():
+            return workflow.final_response.strip()
+        return HONEST_FALLBACK_TEXT
+    return workflow.final_response.strip() if workflow.final_response else HONEST_FALLBACK_TEXT
+
+
+def _should_push_honest_fallback(workflow: WorkflowResult) -> bool:
+    if workflow.status != "COMPLETED":
+        return True
+    reason = workflow.fallback_reason or ""
+    return reason in HONEST_FALLBACK_REASONS
 
 
 class ConversationOrchestrator:
@@ -59,6 +173,10 @@ class ConversationOrchestrator:
         workflow_runner: WorkflowRunner = run_workflow,
         session_ttl: timedelta = timedelta(days=7),
         context_manager: ConversationContextManager | None = None,
+        use_formal: bool | None = None,
+        formal_timeout_s: float | None = None,
+        async_formal_timeout_s: float | None = None,
+        sync_formal_timeout_s: float | None = None,
     ) -> None:
         if len(identity_hash_key) < 16:
             raise ValueError("identity_hash_key must contain at least 16 characters")
@@ -68,6 +186,488 @@ class ConversationOrchestrator:
         self.session_ttl = session_ttl
         self.context_manager = context_manager or ConversationContextManager()
         self.risk_policy = RiskSignalPolicy()
+        if use_formal is None:
+            env_val = os.getenv("LINE_USE_FORMAL")
+            if env_val is not None:
+                self.use_formal = env_val.lower() in ("1", "true", "yes")
+            elif os.getenv("PYTEST_CURRENT_TEST") is not None:
+                self.use_formal = False
+            else:
+                self.use_formal = LINE_USE_FORMAL_DEFAULT
+        else:
+            self.use_formal = use_formal
+        # SYNC = 45 for direct run_workflow (tests), ASYNC = 120 for background LINE
+        _sync_default = sync_formal_timeout_s if sync_formal_timeout_s is not None else formal_timeout_s if formal_timeout_s is not None else SYNC_FORMAL_TIMEOUT_S
+        self.formal_timeout_s = _sync_default
+        self.sync_formal_timeout_s = _sync_default
+        self.async_formal_timeout_s = async_formal_timeout_s if async_formal_timeout_s is not None else ASYNC_FORMAL_TIMEOUT_S
+
+    def _call_workflow(self, *args: Any, **kwargs: Any) -> WorkflowResult:
+        if not self.use_formal:
+            return self.workflow_runner(*args, **kwargs)
+        _raw = None
+        try:
+            if args and isinstance(args[0], dict):
+                _raw = args[0].get("user_raw_input")
+            _tt = kwargs.get("task_type")
+            if not _orch_should_use_formal(str(_raw) if _raw is not None else None, _tt):
+                kwargs["use_formal"] = False
+                return self.workflow_runner(*args, **kwargs)
+        except Exception:
+            pass
+        kwargs["use_formal"] = True
+        # Ensure formal path also respects timeout
+        timeout = self.formal_timeout_s
+        if timeout is None or timeout <= 0:
+            return self.workflow_runner(*args, **kwargs)
+        future_kwargs = dict(kwargs)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self.workflow_runner, *args, **future_kwargs)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                # Formal timeout -> honest educational fallback (P3 15->45, not system error)
+                _honest = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+                return WorkflowResult(
+                    request_id=str(args[0].get("request_id", "timeout")) if args and isinstance(args[0], dict) else "timeout",
+                    status="FALLBACK",
+                    final_response=_honest,
+                    fallback_reason="FORMAL_TIMEOUT",
+                    a_result=None,
+                    query_expansion=None,
+                    rag_result=None,
+                    b_result=None,
+                    c_result=None,
+                    d_result=None,
+                    agent_action=None,
+                    agent_reason_code=None,
+                    question=None,
+                    current_query=None,
+                    execution_history=[],
+                    agent_steps=0,
+                    rewrite_count=0,
+                    clarification_count=0,
+                    termination_reason="FORMAL_TIMEOUT",
+                    intake_snapshot=None,
+                    intake_stage=None,
+                    previsit_summary=None,
+                    system_risk_classification=None,
+                    trace={"events": [], "evaluations": []},
+                )
+
+    def _call_workflow_async_with_retry(self, *args: Any, **kwargs: Any) -> WorkflowResult:
+        if not self.use_formal:
+            return self.workflow_runner(*args, **kwargs)
+        try:
+            _raw = args[0].get("user_raw_input") if args and isinstance(args[0], dict) else None
+            _tt = kwargs.get("task_type")
+            if _raw is not None and not _orch_should_use_formal(str(_raw), _tt):
+                kwargs["use_formal"] = False
+                return self.workflow_runner(*args, **kwargs)
+        except Exception:
+            pass
+        kwargs["use_formal"] = True
+        timeout = self.async_formal_timeout_s
+        if timeout is None or timeout <= 0:
+            return self.workflow_runner(*args, **kwargs)
+        for attempt in range(2):
+            future_kwargs = dict(kwargs)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.workflow_runner, *args, **future_kwargs)
+                try:
+                    return future.result(timeout=timeout)
+                except FuturesTimeoutError:
+                    if attempt == 0:
+                        continue
+                    _honest = HONEST_FALLBACK_TEXT
+                    return WorkflowResult(
+                        request_id=str(args[0].get("request_id", "timeout")) if args and isinstance(args[0], dict) else "timeout",
+                        status="FALLBACK",
+                        final_response=_honest,
+                        fallback_reason="FORMAL_TIMEOUT",
+                        a_result=None,
+                        query_expansion=None,
+                        rag_result=None,
+                        b_result=None,
+                        c_result=None,
+                        d_result=None,
+                        agent_action=None,
+                        agent_reason_code=None,
+                        question=None,
+                        current_query=None,
+                        execution_history=[],
+                        agent_steps=0,
+                        rewrite_count=0,
+                        clarification_count=0,
+                        termination_reason="FORMAL_TIMEOUT",
+                        intake_snapshot=None,
+                        intake_stage=None,
+                        previsit_summary=None,
+                        system_risk_classification=None,
+                        trace={"events": [], "evaluations": []},
+                    )
+                except Exception:
+                    if attempt == 0:
+                        continue
+                    _honest = HONEST_FALLBACK_TEXT
+                    return WorkflowResult(
+                        request_id=str(args[0].get("request_id", "timeout")) if args and isinstance(args[0], dict) else "timeout",
+                        status="FALLBACK",
+                        final_response=_honest,
+                        fallback_reason="SYSTEM_DEPENDENCY",
+                        a_result=None,
+                        query_expansion=None,
+                        rag_result=None,
+                        b_result=None,
+                        c_result=None,
+                        d_result=None,
+                        agent_action=None,
+                        agent_reason_code=None,
+                        question=None,
+                        current_query=None,
+                        execution_history=[],
+                        agent_steps=0,
+                        rewrite_count=0,
+                        clarification_count=0,
+                        termination_reason="SYSTEM_DEPENDENCY",
+                        intake_snapshot=None,
+                        intake_stage=None,
+                        previsit_summary=None,
+                        system_risk_classification=None,
+                        trace={"events": [], "evaluations": []},
+                    )
+        _honest = HONEST_FALLBACK_TEXT
+        return WorkflowResult(
+            request_id=str(args[0].get("request_id", "async-timeout")) if args and isinstance(args[0], dict) else "async-timeout",
+            status="FALLBACK",
+            final_response=_honest,
+            fallback_reason="FORMAL_TIMEOUT",
+            a_result=None,
+            query_expansion=None,
+            rag_result=None,
+            b_result=None,
+            c_result=None,
+            d_result=None,
+            agent_action=None,
+            agent_reason_code=None,
+            question=None,
+            current_query=None,
+            execution_history=[],
+            agent_steps=0,
+            rewrite_count=0,
+            clarification_count=0,
+            termination_reason="FORMAL_TIMEOUT",
+            intake_snapshot=None,
+            intake_stage=None,
+            previsit_summary=None,
+            system_risk_classification=None,
+            trace={"events": [], "evaluations": []},
+        )
+
+    def _is_duplicate_push(self, event_id: str) -> bool:
+        with _pushed_lock:
+            if event_id in _pushed_events:
+                return True
+        try:
+            rec = self.repository.get_webhook_event(event_id)
+            if rec is not None and rec.status == "COMPLETED" and isinstance(rec.result, dict) and rec.result.get("pushed"):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _mark_pushed(self, event_id: str) -> None:
+        with _pushed_lock:
+            _pushed_events.add(event_id)
+
+    def _push_with_retry(
+        self,
+        line_user_id: str,
+        text: str,
+        event_id: str | None = None,
+        push_sender: PushSender | None = None,
+    ) -> bool:
+        if event_id and self._is_duplicate_push(event_id):
+            return False
+        for attempt in range(2):
+            try:
+                if push_sender is not None:
+                    ok = push_sender(line_user_id, text)
+                else:
+                    ok = self._default_push_sender(line_user_id, text)
+                if ok:
+                    if event_id:
+                        self._mark_pushed(event_id)
+                        try:
+                            rec = self.repository.get_webhook_event(event_id)
+                            if rec is not None and rec.result is not None:
+                                updated = dict(rec.result)
+                                updated["pushed"] = True
+                                pass
+                        except Exception:
+                            pass
+                    return True
+                if attempt == 0:
+                    continue
+                return False
+            except Exception as exc:
+                logger.warning("push failed attempt %s: %s", attempt + 1, exc)
+                if attempt == 0:
+                    continue
+                return False
+        return False
+
+    def _default_push_sender(self, line_user_id: str, text: str) -> bool:
+        try:
+            import os as _os
+
+            token = _os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or _os.getenv("LINE_ACCESS_TOKEN") or _os.getenv("LINE_CHANNEL_TOKEN") or ""
+            if not token:
+                return False
+            from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
+            from linebot.v3.messaging import PushMessageRequest, TextMessage
+
+            config = Configuration(access_token=token)
+            with ApiClient(configuration=config) as api_client:
+                api = MessagingApi(api_client=api_client)
+                api.push_message(PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text[:4900])]))
+            return True
+        except Exception as exc:
+            logger.warning("default push failed: %s", exc)
+            raise
+
+    def _maybe_record_question_for_doctor(self, line_user_id: str, original_text: str, workflow: WorkflowResult) -> None:
+        if not original_text or not original_text.strip():
+            return
+        if workflow.status != "FALLBACK":
+            return
+        reason = workflow.fallback_reason or workflow.termination_reason or ""
+        if reason not in HONEST_FALLBACK_REASONS and workflow.final_response != HONEST_FALLBACK_TEXT:
+            return
+        try:
+            session = self.session_for_user(line_user_id)
+            if session is None:
+                try:
+                    session = self._load_or_create(line_user_id)
+                except Exception:
+                    return
+            intake = session.intake_snapshot
+            q = original_text.strip()[:200]
+            if q in intake.questions_for_doctor:
+                return
+            if len(intake.questions_for_doctor) >= 10:
+                return
+            updated = intake.model_copy(update={"questions_for_doctor": [*intake.questions_for_doctor, q]}, deep=True)
+            try:
+                self.repository.save(session.model_copy(update={"intake_snapshot": updated}, deep=True), expected_version=session.version)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def prepare_formal_push_text(self, workflow: WorkflowResult, original_text: str) -> str:
+        text = _format_push_answer(workflow, original_text)
+        if _should_push_honest_fallback(workflow) and text == HONEST_FALLBACK_TEXT:
+            return text
+        return text
+
+    def push_formal_result(
+        self,
+        *,
+        line_user_id: str,
+        event_id: str,
+        workflow: WorkflowResult,
+        original_text: str,
+        push_sender: PushSender | None = None,
+    ) -> bool:
+        if self._is_duplicate_push(event_id):
+            return False
+        push_text = self.prepare_formal_push_text(workflow, original_text)
+        ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
+        if ok and _should_push_honest_fallback(workflow):
+            self._maybe_record_question_for_doctor(line_user_id, original_text, workflow)
+        return ok
+
+    def _is_async_narrow_eligible(self, session: ProductSession, text: str) -> bool:
+        if not self.use_formal:
+            return False
+        if self._is_intake_active(session, text):
+            return False
+        try:
+            stripped = text.strip()
+            if stripped in self.SELF_COMMANDS or stripped in self.PROXY_COMMANDS or stripped in self.PROXY_CONSENT_COMMANDS or stripped in self.CONFIRM_COMMANDS or stripped in self.START_INTAKE_COMMANDS or stripped in self.SHARE_COMMANDS or stripped in self.SUMMARY_COMMANDS or stripped in self.MODIFY_COMMANDS or stripped in self.PAUSE_COMMANDS or stripped in self.CANCEL_COMMANDS or stripped in self.RESUME_COMMANDS:
+                return False
+            if stripped in self.PROXY_SUBJECT_SOURCE_COMMANDS or stripped in self.PROXY_OBSERVED_SOURCE_COMMANDS:
+                return False
+        except Exception:
+            pass
+        try:
+            return _orch_should_use_formal(text, None)
+        except Exception:
+            return False
+
+    def _run_formal_with_timeout(self, text: str, session: ProductSession, timeout_s: float) -> WorkflowResult:
+        request = {
+            "request_id": f"{session.session_id}-async-{threading.get_ident() % 10000}",
+            "schema_version": "a.v0.1",
+            "user_raw_input": text,
+            "declared_role": self._declared_role(session.actor_role),
+            "language": "zh-TW",
+        }
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self.workflow_runner, request, use_formal=True)
+            return future.result(timeout=timeout_s)
+
+    def _spawn_async_formal(
+        self,
+        *,
+        event_id: str,
+        line_user_id: str,
+        text: str,
+        session_id: str,
+        push_sender: PushSender | None = None,
+    ) -> None:
+        if self._is_duplicate_push(event_id):
+            return
+
+        def _background() -> None:
+            workflow: WorkflowResult | None = None
+            for attempt in range(2):
+                try:
+                    sess = self.repository.get(session_id)
+                    target_session = sess if sess is not None else ProductSession.model_validate(
+                        {
+                            "session_id": session_id,
+                            "principal_id_hash": self._hash(line_user_id),
+                            "conversation_context": self.context_manager.create(session_id),
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "expires_at": (datetime.now(timezone.utc) + self.session_ttl).isoformat(),
+                        }
+                    )
+                    wf = self._run_formal_with_timeout(text, target_session, self.async_formal_timeout_s)
+                    workflow = wf
+                    break
+                except FuturesTimeoutError:
+                    logger.warning("async formal timeout attempt %s for %s", attempt + 1, event_id[:8])
+                    if attempt == 1:
+                        workflow = WorkflowResult(
+                            request_id=event_id,
+                            status="FALLBACK",
+                            final_response=HONEST_FALLBACK_TEXT,
+                            fallback_reason="FORMAL_TIMEOUT",
+                            a_result=None,
+                            query_expansion=None,
+                            rag_result=None,
+                            b_result=None,
+                            c_result=None,
+                            d_result=None,
+                            agent_action=None,
+                            agent_reason_code=None,
+                            question=None,
+                            current_query=text,
+                            execution_history=[],
+                            agent_steps=0,
+                            rewrite_count=0,
+                            clarification_count=0,
+                            termination_reason="FORMAL_TIMEOUT",
+                            intake_snapshot=None,
+                            intake_stage=None,
+                            previsit_summary=None,
+                            system_risk_classification=None,
+                            trace={"events": [], "evaluations": []},
+                        )
+                    else:
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("async formal error attempt %s for %s: %s", attempt + 1, event_id[:8], exc)
+                    if attempt == 1:
+                        workflow = WorkflowResult(
+                            request_id=event_id,
+                            status="FALLBACK",
+                            final_response=HONEST_FALLBACK_TEXT,
+                            fallback_reason="SYSTEM_DEPENDENCY",
+                            a_result=None,
+                            query_expansion=None,
+                            rag_result=None,
+                            b_result=None,
+                            c_result=None,
+                            d_result=None,
+                            agent_action=None,
+                            agent_reason_code=None,
+                            question=None,
+                            current_query=text,
+                            execution_history=[],
+                            agent_steps=0,
+                            rewrite_count=0,
+                            clarification_count=0,
+                            termination_reason="SYSTEM_DEPENDENCY",
+                            intake_snapshot=None,
+                            intake_stage=None,
+                            previsit_summary=None,
+                            system_risk_classification=None,
+                            trace={"events": [], "evaluations": []},
+                        )
+                    else:
+                        continue
+            if workflow is None:
+                workflow = WorkflowResult(
+                    request_id=event_id,
+                    status="FALLBACK",
+                    final_response=HONEST_FALLBACK_TEXT,
+                    fallback_reason="SYSTEM_DEPENDENCY",
+                    a_result=None,
+                    query_expansion=None,
+                    rag_result=None,
+                    b_result=None,
+                    c_result=None,
+                    d_result=None,
+                    agent_action=None,
+                    agent_reason_code=None,
+                    question=None,
+                    current_query=text,
+                    execution_history=[],
+                    agent_steps=0,
+                    rewrite_count=0,
+                    clarification_count=0,
+                    termination_reason="SYSTEM_DEPENDENCY",
+                    intake_snapshot=None,
+                    intake_stage=None,
+                    previsit_summary=None,
+                    system_risk_classification=None,
+                    trace={"events": [], "evaluations": []},
+                )
+            if self._is_duplicate_push(event_id):
+                return
+            push_text = self.prepare_formal_push_text(workflow, text)
+            ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
+            if ok:
+                try:
+                    latest = self.repository.get(session_id)
+                    if latest is not None:
+                        ctx = self.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
+                        ctx, _ = self.context_manager.compact(ctx, stage_completed=False)
+                        updated = latest.model_copy(update={"conversation_context": ctx}, deep=True)
+                        try:
+                            self.repository.save(updated, expected_version=latest.version)
+                        except ProductSessionConflict:
+                            pass
+                except Exception:
+                    pass
+                if _should_push_honest_fallback(workflow):
+                    self._maybe_record_question_for_doctor(line_user_id, text, workflow)
+
+        threading.Thread(target=_background, daemon=True).start()
+
+    def handle_text_async_push(
+        self,
+        *,
+        event_id: str,
+        line_user_id: str,
+        text: str,
+        push_sender: PushSender | None = None,
+    ) -> OrchestratorResult:
+        return self.handle_text(event_id=event_id, line_user_id=line_user_id, text=text, push_sender=push_sender)
 
     def handle_text(
         self,
@@ -75,6 +675,7 @@ class ConversationOrchestrator:
         event_id: str,
         line_user_id: str,
         text: str,
+        push_sender: PushSender | None = None,
     ) -> OrchestratorResult:
         principal_hash = self._hash(line_user_id)
         existing_event = self.repository.get_webhook_event(event_id)
@@ -94,13 +695,54 @@ class ConversationOrchestrator:
 
         try:
             session = self._load_or_create(line_user_id)
+            clean_text = text.strip()
+            if self._is_async_narrow_eligible(session, clean_text):
+                previous_version = session.version
+                context = self.context_manager.append_turn(
+                    session.conversation_context, role="user", content=clean_text or "（空白訊息）"
+                )
+                placeholder = ASYNC_PLACEHOLDER_REPLY
+                context = self.context_manager.append_turn(context, role="assistant", content=placeholder)
+                context, _ = self.context_manager.compact(context, stage_completed=False)
+                session_for_save = session.model_copy(update={"conversation_context": context}, deep=True)
+                try:
+                    saved = self.repository.save(session_for_save, expected_version=previous_version)
+                except ProductSessionConflict:
+                    latest = self.repository.get(session.session_id)
+                    if latest is None:
+                        raise
+                    ctx2 = self.context_manager.append_turn(
+                        latest.conversation_context, role="user", content=clean_text or "（空白訊息）"
+                    )
+                    ctx2 = self.context_manager.append_turn(ctx2, role="assistant", content=placeholder)
+                    ctx2, _ = self.context_manager.compact(ctx2, stage_completed=False)
+                    saved_latest = latest.model_copy(update={"conversation_context": ctx2}, deep=True)
+                    saved = self.repository.save(saved_latest, expected_version=latest.version)
+                result_placeholder = OrchestratorResult(
+                    event_id=event_id,
+                    session_id=saved.session_id,
+                    reply=placeholder,
+                    status="ASYNC_PENDING",
+                    intake_stage=saved.intake_stage,
+                )
+                self.repository.complete_webhook_event(
+                    event_id, result_placeholder.model_dump(mode="json"), claim_token=claim_token
+                )
+                self._spawn_async_formal(
+                    event_id=event_id,
+                    line_user_id=line_user_id,
+                    text=clean_text,
+                    session_id=saved.session_id,
+                    push_sender=push_sender,
+                )
+                return result_placeholder
             try:
-                result = self._process_text(session, text.strip())
+                result = self._process_text(session, clean_text)
             except ProductSessionConflict:
                 latest = self.repository.get(session.session_id)
                 if latest is None:
                     raise
-                result = self._process_text(latest, text.strip())
+                result = self._process_text(latest, clean_text)
             result = result.model_copy(update={"event_id": event_id})
             self.repository.complete_webhook_event(
                 event_id, result.model_dump(mode="json"), claim_token=claim_token
@@ -133,7 +775,7 @@ class ConversationOrchestrator:
             if not self._is_intake_active(session):
                 result = OrchestratorResult(event_id=event_id, session_id=session.session_id, reply="請先選擇「為自己整理」或「代家人整理」，再上傳藥袋。", status="NEEDS_AUTHORIZATION", intake_stage=session.intake_stage)
             else:
-                workflow = self.workflow_runner(
+                workflow = self._call_workflow(
                     {"request_id": f"{session.session_id}-img-v{previous_version + 1}", "schema_version": "a.v0.1", "user_raw_input": "我上傳藥袋供看診前整理", "declared_role": self._declared_role(session.actor_role), "language": "zh-TW"},
                     task_type="pre_visit_intake",
                     intake=session.intake_snapshot,
@@ -235,7 +877,7 @@ class ConversationOrchestrator:
             intake_stage = session.intake_stage
         else:
             if self._is_intake_active(session, text) and self._looks_like_side_question(session, text):
-                workflow = self.workflow_runner({
+                workflow = self._call_workflow({
                     "request_id": f"{session.session_id}-side-v{previous_version + 1}",
                     "schema_version": "a.v0.1",
                     "user_raw_input": text,
@@ -272,7 +914,7 @@ class ConversationOrchestrator:
                 # 丟給醫療 intent router，否則容易被誤判為無法回答的請求。
                 if intake_note:
                     workflow_text = "我要繼續整理看診前資料"
-            workflow = self.workflow_runner(
+            workflow = self._call_workflow(
                 {
                     "request_id": f"{session.session_id}-v{previous_version + 1}",
                     "schema_version": "a.v0.1",
