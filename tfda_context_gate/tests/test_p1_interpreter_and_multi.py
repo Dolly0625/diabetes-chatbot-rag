@@ -29,7 +29,11 @@ def _h(s: str) -> str:
 
 
 def _new_orchestrator(tmp_path: Path, **kwargs):
+    from tfda_context_gate.conversation.interpreter import DeterministicConversationInterpreter
+
     repo = SQLiteProductSessionRepository(tmp_path / f"{tmp_path.name}.sqlite3")
+    if "interpreter" not in kwargs:
+        kwargs["interpreter"] = DeterministicConversationInterpreter()
     orch = ConversationOrchestrator(repo, identity_hash_key=_KEY, **kwargs)
     return repo, orch
 
