@@ -47,6 +47,23 @@ def _build_formal_generator():
     if "mimo" in model.lower():
         kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
         kwargs["reasoning_effort"] = "none"
+    # Keep C's transport timeout at the client boundary.  It is independently
+    # configurable and defaults to the interpreter timeout when present; the
+    # outer 45/120s workflow boundaries are not used as HTTP timeouts.
+    timeout_raw = (
+        env_value("C_GENERATOR_LLM_TIMEOUT_S", "")
+        or env_value("FORMAL_C_LLM_TIMEOUT_S", "")
+        or env_value("CONVERSATION_LLM_TIMEOUT_S", "")
+        or "8"
+    )
+    try:
+        c_timeout = max(0.1, float(timeout_raw))
+    except (TypeError, ValueError):
+        c_timeout = 8.0
+    kwargs["timeout"] = c_timeout
+    # request_timeout is accepted by older langchain-openai versions and is
+    # harmlessly ignored by newer versions that alias it to timeout.
+    kwargs["request_timeout"] = c_timeout
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as exc:

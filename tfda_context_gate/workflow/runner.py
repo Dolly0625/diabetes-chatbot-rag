@@ -6,9 +6,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import time
 
 from collections.abc import Iterator, Mapping
 from typing import Any
+
+from tfda_context_gate.e_observability.deadline import deadline_scope_active, run_with_deadline
+from tfda_context_gate.e_observability.staged_latency import StagedLatencyRecorder
 
 from tfda_context_gate.agent import AGENT_LIMITS, AgentLimits, AgentPlanner, QueryRewriter
 from tfda_context_gate.a_router.schemas import RequestContext
@@ -97,7 +101,7 @@ def _dump(value: Any) -> dict[str, Any] | None:
     return value.model_dump(mode="json") if hasattr(value, "model_dump") else dict(value)
 
 
-def _finish(trace: TraceRecorder, *, request_id: str, state: WorkflowState, status: str, final_response: str, fallback_reason: str | None) -> WorkflowResult:
+def _finish(trace: TraceRecorder, *, request_id: str, state: WorkflowState, status: str, final_response: str, fallback_reason: str | None, staged_recorder: StagedLatencyRecorder | None = None) -> WorkflowResult:
     decision = state.get("agent_decision")
     if status == "FALLBACK":
         trace.record("FALLBACK", "termination", "FALLBACK", agent_action=decision.action if decision is not None else None, reason_codes=[fallback_reason] if fallback_reason else [], fallback_reason=fallback_reason, termination_reason=state.get("termination_reason"))
@@ -112,7 +116,38 @@ def _finish(trace: TraceRecorder, *, request_id: str, state: WorkflowState, stat
         if previsit_summary is not None
         else None
     )
-    return WorkflowResult(request_id=request_id, status=status, final_response=final_response, fallback_reason=fallback_reason, a_result=_dump(state.get("a_result")), query_expansion=_dump(state.get("query_expansion")), rag_result=_dump(state.get("rag_result")), b_result=_dump(state.get("b_result")), c_result=_dump(state.get("c_result")), d_result=_dump(state.get("d_result")), agent_action=decision.action if decision is not None else None, agent_reason_code=state.get("agent_reason_code"), question=state.get("question"), current_query=state.get("current_query"), execution_history=attempts, agent_steps=state.get("agent_steps", 0), rewrite_count=state.get("rewrite_count", 0), clarification_count=state.get("clarification_count", 0), termination_reason=state.get("termination_reason"), intake_snapshot=intake_snapshot, intake_stage=state.get("intake_stage"), previsit_summary=previsit_summary, system_risk_classification=risk_snapshot, trace=trace.snapshot())
+    snapshot = trace.snapshot()
+    if staged_recorder is not None:
+        try:
+            staged = staged_recorder.snapshot()
+            # Overlay workflow-derived stage timings from trace metrics if available
+            try:
+                metrics = trace.metrics()
+                lb = getattr(metrics, "latency_by_component", {}) or {}
+                # Map component latencies to staged keys where missing
+                comp_map = {"RAG": "rag_retrieval_ms", "B": "b_gate_ms", "C": "answer_generator_ms", "D": "d_gate_ms", "SYSTEM": "total_ms"}
+                for comp, key in comp_map.items():
+                    if comp in lb and key not in staged:
+                        staged[key] = lb[comp].total_ms if hasattr(lb[comp], "total_ms") else 0.0
+                    elif comp in lb and staged.get(key, 0.0) == 0.0:
+                        # Fill missing stage from metrics if recorder didn't measure
+                        staged[key] = lb[comp].total_ms if hasattr(lb[comp], "total_ms") else staged[key]
+                # Also derive from events directly for finer granularity if needed
+                for ev in getattr(trace, "_events", []):
+                    if ev.component == "RAG" and ev.latency_ms:
+                        staged["rag_retrieval_ms"] = max(staged.get("rag_retrieval_ms", 0.0) or 0.0, ev.latency_ms)
+                    elif ev.component == "B" and ev.latency_ms:
+                        staged["b_gate_ms"] = max(staged.get("b_gate_ms", 0.0) or 0.0, ev.latency_ms)
+                    elif ev.component == "C" and ev.latency_ms:
+                        staged["answer_generator_ms"] = max(staged.get("answer_generator_ms", 0.0) or 0.0, ev.latency_ms)
+                    elif ev.component == "D" and ev.latency_ms:
+                        staged["d_gate_ms"] = max(staged.get("d_gate_ms", 0.0) or 0.0, ev.latency_ms)
+            except Exception:
+                pass
+            snapshot["staged_latency"] = staged
+        except Exception:
+            pass
+    return WorkflowResult(request_id=request_id, status=status, final_response=final_response, fallback_reason=fallback_reason, a_result=_dump(state.get("a_result")), query_expansion=_dump(state.get("query_expansion")), rag_result=_dump(state.get("rag_result")), b_result=_dump(state.get("b_result")), c_result=_dump(state.get("c_result")), d_result=_dump(state.get("d_result")), agent_action=decision.action if decision is not None else None, agent_reason_code=state.get("agent_reason_code"), question=state.get("question"), current_query=state.get("current_query"), execution_history=attempts, agent_steps=state.get("agent_steps", 0), rewrite_count=state.get("rewrite_count", 0), clarification_count=state.get("clarification_count", 0), termination_reason=state.get("termination_reason"), intake_snapshot=intake_snapshot, intake_stage=state.get("intake_stage"), previsit_summary=previsit_summary, system_risk_classification=risk_snapshot, trace=snapshot)
 
 
 def _request_metadata(request: Any) -> tuple[str, str | None, str | None]:
@@ -159,6 +194,7 @@ def run_workflow(request: RequestContext | dict[str, Any], *, prompt_injection_g
         trace.record_failure("SYSTEM", "workflow", failure_type="SCHEMA", status="ERROR", reason_codes=["REQUEST_SCHEMA_INVALID"], fallback_reason="SYSTEM_DEPENDENCY", error_type=type(exc).__name__, error_message=str(exc))
         return _finish(trace, request_id=request_id, state={"current_query": original_query or "invalid"}, status="FALLBACK", final_response=fallback_response("SYSTEM_DEPENDENCY"), fallback_reason="SYSTEM_DEPENDENCY")
     trace = TraceRecorder(request_context.request_id, declared_role=request_context.declared_role.value, original_query=request_context.user_raw_input, sink=trace_sink)
+    staged_recorder = StagedLatencyRecorder()
     if task_type is None:
         try:
             from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor
@@ -236,15 +272,23 @@ def run_workflow(request: RequestContext | dict[str, Any], *, prompt_injection_g
                 runtime_stage = _rs
                 return g.invoke(local_state)  # type: ignore[no-any-return]
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_run_formal)
-                try:
-                    state = future.result(timeout=FORMAL_WORKFLOW_TIMEOUT_S)
-                except concurrent.futures.TimeoutError as te:
-                    raise TimeoutError(f"formal workflow timed out after {FORMAL_WORKFLOW_TIMEOUT_S}s") from te
+            # The orchestrator may already own the outer deadline worker.  In
+            # that case run inline to avoid nested shared-pool deadlock; the
+            # outer guard remains the hard caller bound.  Direct runner calls
+            # use the bounded deadline helper.
+            if deadline_scope_active():
+                state = _run_formal()
+            else:
+                state_result, timed_out, _guard = run_with_deadline(
+                    _run_formal,
+                    timeout_s=FORMAL_WORKFLOW_TIMEOUT_S,
+                )
+                if timed_out or state_result is None:
+                    raise TimeoutError(f"formal workflow timed out after {FORMAL_WORKFLOW_TIMEOUT_S}s")
+                state = state_result
             status = state.get("status") or "FALLBACK"
             final_response = state.get("final_response") or fallback_response("SYSTEM_DEPENDENCY")
-            return _finish(trace, request_id=request_context.request_id, state=state, status=status, final_response=final_response, fallback_reason=state.get("fallback_reason"))
+            return _finish(trace, request_id=request_context.request_id, state=state, status=status, final_response=final_response, fallback_reason=state.get("fallback_reason"), staged_recorder=staged_recorder)
         if tool_executor is not None and retriever is not None:
             try:
                 reg = getattr(tool_executor, "registry", None)
@@ -274,7 +318,7 @@ def run_workflow(request: RequestContext | dict[str, Any], *, prompt_injection_g
         state = graph.invoke(state)
         status = state.get("status") or "FALLBACK"
         final_response = state.get("final_response") or fallback_response("SYSTEM_DEPENDENCY")
-        return _finish(trace, request_id=request_context.request_id, state=state, status=status, final_response=final_response, fallback_reason=state.get("fallback_reason"))
+        return _finish(trace, request_id=request_context.request_id, state=state, status=status, final_response=final_response, fallback_reason=state.get("fallback_reason"), staged_recorder=staged_recorder)
     except Exception as exc:
         is_timeout = isinstance(exc, TimeoutError) or isinstance(exc, concurrent.futures.TimeoutError)
         current_stage = runtime_stage.get("current", "SYSTEM") if isinstance(runtime_stage, dict) else "SYSTEM"
@@ -288,4 +332,4 @@ def run_workflow(request: RequestContext | dict[str, Any], *, prompt_injection_g
         safe_state: WorkflowState = state if isinstance(state, dict) and state.get("request_id") else {"current_query": original_query or "invalid", "request_id": request_id}  # type: ignore[typeddict-item]
         if is_timeout and isinstance(safe_state, dict):
             safe_state["termination_reason"] = "FORMAL_TIMEOUT"  # type: ignore[typeddict-item]
-        return _finish(trace, request_id=request_context.request_id, state=safe_state, status="FALLBACK", final_response=fallback_response(stage_reason), fallback_reason=stage_reason)
+        return _finish(trace, request_id=request_context.request_id, state=safe_state, status="FALLBACK", final_response=fallback_response(stage_reason), fallback_reason=stage_reason, staged_recorder=staged_recorder)

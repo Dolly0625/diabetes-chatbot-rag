@@ -740,7 +740,8 @@ class PreVisitIntakeTool:
 
     def _extract_description(self, text: str) -> str | None:
         # Look for symptom descriptions - collect all matching sentences
-        symptom_keywords = ["血糖", "頭暈", "口渴", "頻尿", "疲倦", "不舒服", "疼痛", "麻", "視力", "傷口", "感染", "血壓", "尿尿", "夜尿", "起夜", "多尿"]
+        # Include colloquial variants that map via NORMALIZATION_MAP (嘴巴乾→口乾, 跑廁所→頻尿)
+        symptom_keywords = ["血糖", "頭暈", "口渴", "頻尿", "疲倦", "不舒服", "疼痛", "麻", "視力", "傷口", "感染", "血壓", "尿尿", "夜尿", "起夜", "多尿", "嘴巴乾", "嘴巴很乾", "口乾", "跑廁所", "上廁所", "口乾舌燥", "很渴", "很乾"]
         sentences = re.split(r"[。；;，,]", text)
         found: list[str] = []
         for s in sentences:

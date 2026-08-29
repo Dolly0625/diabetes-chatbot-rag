@@ -8,13 +8,14 @@ Fail-safe：timeout/schema error/依賴失敗時退回 deterministic。
 
 from __future__ import annotations
 
-import concurrent.futures
 import os
 import re
 import unicodedata
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from tfda_context_gate.e_observability.deadline import run_with_deadline
 
 from tfda_context_gate.conversation.schemas import StrictModel
 
@@ -537,6 +538,12 @@ class FormalConversationInterpreter:
             if "mimo" in bare.lower():
                 kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
                 kwargs["reasoning_effort"] = "none"
+            # Prefer native HTTP timeout where client is created (Task B.1)
+            # ChatOpenAI supports timeout/request_timeout; set both for compatibility
+            native_timeout = float(os.getenv("CONVERSATION_LLM_TIMEOUT_S", str(self.timeout_s)))
+            kwargs["timeout"] = native_timeout
+            # request_timeout is alias in some versions
+            kwargs["request_timeout"] = native_timeout
             llm = ChatOpenAI(**kwargs)
             self._llm = llm
             self._chain = llm.with_structured_output(ConversationTurnInterpretation, method="json_schema", strict=False, include_raw=True)
@@ -584,14 +591,12 @@ class FormalConversationInterpreter:
                     return parsed
                 return ConversationTurnInterpretation.model_validate(parsed)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(_invoke)
-                try:
-                    result = fut.result(timeout=self.timeout_s)
-                    return result
-                except concurrent.futures.TimeoutError:
-                    return self.fallback.interpret(envelope)
-                except Exception:
-                    return self.fallback.interpret(envelope)
+            result, timed_out, _guard = run_with_deadline(
+                _invoke,
+                timeout_s=self.timeout_s,
+            )
+            if timed_out or result is None:
+                return self.fallback.interpret(envelope)
+            return result
         except Exception:
             return self.fallback.interpret(envelope)

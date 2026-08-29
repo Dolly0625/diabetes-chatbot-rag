@@ -9,9 +9,17 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from tfda_context_gate.line_orchestration.latency import StagedLatencyRecorder
+from tfda_context_gate.line_orchestration.deadline import DeadlineGuard, run_with_deadline
+
+# Task C honest evaluation: interpreter is serial bottleneck before branches; after interpreter,
+# candidate_validation (~1ms) vs education RAG+C (2-45s) could parallelize but gain negligible.
+# Speculative parallel before interpreter would lose resolved_education_query and risk policy bypass,
+# so we skip forcing parallelism and keep sequential order: red_flag→auth→interpreter→join→validate→B/D→single persistence.
 
 FORMAL_WORKFLOW_TIMEOUT_S = float(os.getenv("FORMAL_WORKFLOW_TIMEOUT_S", "45"))
 SYNC_FORMAL_TIMEOUT_S = float(os.getenv("SYNC_FORMAL_TIMEOUT_S", os.getenv("SYNC_FORMAL_TIMEOUT", str(FORMAL_WORKFLOW_TIMEOUT_S))))
@@ -96,6 +104,140 @@ def _normalize_text(text: str) -> str:
         return unicodedata.normalize("NFKC", text).strip().lower()
     except Exception:
         return (text or "").strip().lower()
+
+
+# ── P2A.1 deterministic mixed-intent backstop (Task A) ───────────────────────
+# Precedence explicit in one function: formal education miss → deterministic question-clause split.
+# No new LLM call; general patterns, not hardcoded example sentences.
+_EDU_QUESTION_CLAUSE_RE = re.compile(
+    r"(衛教|怎麼吃|可以吃幾|怎麼處理|可以喝|飲食|水果|血糖|胰島素|副作用|會傷腎|可以吃|能吃|芭樂)",
+    re.IGNORECASE,
+)
+_QUESTION_WORD_RE = re.compile(r"(嗎|怎麼|如何|是不是|是否|可不可以|能不能|會不會)", re.IGNORECASE)
+
+
+def _extract_question_clause(text: str) -> str | None:
+    """Deterministically find the education question clause in a mixed utterance.
+
+    General pattern: clause containing 衛教/怎麼吃/可以吃幾/飲食/水果 etc and question markers
+    (？ / 嗎 / 怎麼 / 如何). Split by punctuation, prefer clause with ？ and edu keyword.
+    """
+    try:
+        n = unicodedata.normalize("NFKC", text or "").strip()
+    except Exception:
+        n = (text or "").strip()
+    if not n:
+        return None
+    parts = [p.strip() for p in re.split(r"[，,。；;、]", n) if p.strip()]
+    if not parts:
+        return None
+    edu_pat = _EDU_QUESTION_CLAUSE_RE
+    # Prefer clause with ？ and edu or question word
+    for p in parts:
+        has_q_mark = "？" in p or "?" in p
+        has_q_word = bool(_QUESTION_WORD_RE.search(p)) or "？" in p or "?" in p
+        has_edu = bool(edu_pat.search(p))
+        if has_q_mark and has_edu:
+            return p
+        if has_q_mark and has_q_word:
+            return p
+    best: str | None = None
+    for p in parts:
+        has_q_word = bool(_QUESTION_WORD_RE.search(p))
+        has_edu = bool(edu_pat.search(p))
+        has_q_mark = "？" in p or "?" in p
+        if has_edu and (has_q_word or has_q_mark):
+            best = p
+            break
+        if has_edu and ("可以" in p or "能" in p):
+            best = p
+    if best:
+        return best
+    # fallback: last part ending with ？ that looks like question
+    if parts and ("？" in parts[-1] or "?" in parts[-1]):
+        if edu_pat.search(parts[-1]) or _QUESTION_WORD_RE.search(parts[-1]):
+            return parts[-1]
+        return parts[-1]
+    return None
+
+
+def _maybe_apply_mixed_backstop(text: str, interpretation: Any) -> Any:
+    """Single-function deterministic backstop with explicit precedence.
+
+    Precedence:
+      1. If interpretation already has EDUCATION_QUESTION → keep as is (formal succeeded)
+      2. Else if text is multi-clause and contains a question clause (edu + ？/嗎/怎麼/如何) → synthesize mixed intent
+      3. Else → keep original (no backstop)
+
+    Synthesizes: intents += EDUCATION_QUESTION, resolved_education_query = question clause,
+    and cleans formal intake_candidates whose source_quote is the question clause (問句不得寫成症狀).
+    No LLM call; imports is_multi_clause/is_question_like but does not modify candidate_merge.
+    """
+    if interpretation is None:
+        return None
+    try:
+        intents = list(getattr(interpretation, "intents", []) or [])
+    except Exception:
+        return interpretation
+    if "EDUCATION_QUESTION" in intents:
+        return interpretation
+    # Must look like mixed: multi-clause + question clause
+    try:
+        from tfda_context_gate.intake.candidate_merge import is_multi_clause, is_question_like
+    except Exception:
+        return interpretation
+    if not is_multi_clause(text):
+        return interpretation
+    q_clause = _extract_question_clause(text)
+    if not q_clause:
+        return interpretation
+    # Verify q_clause looks like education/question, not pure intake
+    has_edu = bool(_EDU_QUESTION_CLAUSE_RE.search(q_clause))
+    has_q = ("？" in q_clause or "?" in q_clause or "嗎" in q_clause or bool(_QUESTION_WORD_RE.search(q_clause)))
+    if not (has_edu or has_q):
+        return interpretation
+    # Ensure intake part remains after removing question clause
+    intake_text = text.replace(q_clause, "").strip("，,。；;、 \t\n")
+    if not intake_text or len(intake_text.strip()) < 2:
+        return interpretation
+    # Clean formal candidates whose source_quote is polluted by question clause
+    new_cands: list[Any] = []
+    for cand in getattr(interpretation, "intake_candidates", []) or []:
+        try:
+            sq = getattr(cand, "source_quote", "") or ""
+            # If source_quote contains the question clause verbatim, it is polluted
+            if q_clause.strip() and q_clause.strip() in sq:
+                cleaned = cand.model_copy(update={"source_quote": (getattr(cand, "candidate_value", "") or sq)[:100]})
+                new_cands.append(cleaned)
+            elif is_question_like(sq) and getattr(cand, "field_name", "") in (
+                "symptom_description",
+                "symptom_onset",
+                "symptom_severity",
+                "known_medications",
+            ):
+                # Question source must not become symptom/medication; keep but fix provenance to candidate_value
+                cleaned = cand.model_copy(update={"source_quote": (getattr(cand, "candidate_value", "") or sq)[:100]})
+                new_cands.append(cleaned)
+            else:
+                new_cands.append(cand)
+        except Exception:
+            new_cands.append(cand)
+    new_intents = list(intents)
+    if "INTAKE_ANSWER" not in new_intents:
+        new_intents.append("INTAKE_ANSWER")
+    new_intents.append("EDUCATION_QUESTION")
+    try:
+        return interpretation.model_copy(
+            update={"intents": new_intents, "resolved_education_query": q_clause, "intake_candidates": new_cands}
+        )
+    except Exception:
+        try:
+            interpretation.intents = new_intents  # type: ignore[attr-defined]
+            interpretation.resolved_education_query = q_clause  # type: ignore[attr-defined]
+            interpretation.intake_candidates = new_cands  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return interpretation
 
 
 def _is_text_duplicate(user_id: str, text: str) -> bool:
@@ -326,6 +468,42 @@ def _should_push_honest_fallback(workflow: WorkflowResult) -> bool:
     return reason in HONEST_FALLBACK_REASONS
 
 
+def _timeout_workflow_result(
+    request_id: str,
+    current_query: str | None = None,
+    *,
+    reason: str = "FORMAL_TIMEOUT",
+) -> WorkflowResult:
+    """Construct the safe fallback result used by sync/async boundaries."""
+
+    return WorkflowResult(
+        request_id=request_id,
+        status="FALLBACK",
+        final_response=HONEST_FALLBACK_TEXT,
+        fallback_reason=reason,
+        a_result=None,
+        query_expansion=None,
+        rag_result=None,
+        b_result=None,
+        c_result=None,
+        d_result=None,
+        agent_action=None,
+        agent_reason_code=None,
+        question=None,
+        current_query=current_query,
+        execution_history=[],
+        agent_steps=0,
+        rewrite_count=0,
+        clarification_count=0,
+        termination_reason=reason,
+        intake_snapshot=None,
+        intake_stage=None,
+        previsit_summary=None,
+        system_risk_classification=None,
+        trace={"events": [], "evaluations": []},
+    )
+
+
 class ConversationOrchestrator:
     """LINE 產品狀態編排；醫療決策仍完全交給固定 workflow。"""
 
@@ -411,52 +589,31 @@ class ConversationOrchestrator:
         except Exception:
             pass
         kwargs["use_formal"] = True
-        # Ensure formal path also respects timeout
         timeout = self.formal_timeout_s
         if timeout is None or timeout <= 0:
             return self.workflow_runner(*args, **kwargs)
         future_kwargs = dict(kwargs)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self.workflow_runner, *args, **future_kwargs)
-            try:
-                return future.result(timeout=timeout)
-            except FuturesTimeoutError:
-                # Formal timeout -> honest educational fallback (P3 15->45, not system error)
-                _honest = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
-                return WorkflowResult(
-                    request_id=str(args[0].get("request_id", "timeout")) if args and isinstance(args[0], dict) else "timeout",
-                    status="FALLBACK",
-                    final_response=_honest,
-                    fallback_reason="FORMAL_TIMEOUT",
-                    a_result=None,
-                    query_expansion=None,
-                    rag_result=None,
-                    b_result=None,
-                    c_result=None,
-                    d_result=None,
-                    agent_action=None,
-                    agent_reason_code=None,
-                    question=None,
-                    current_query=None,
-                    execution_history=[],
-                    agent_steps=0,
-                    rewrite_count=0,
-                    clarification_count=0,
-                    termination_reason="FORMAL_TIMEOUT",
-                    intake_snapshot=None,
-                    intake_stage=None,
-                    previsit_summary=None,
-                    system_risk_classification=None,
-                    trace={"events": [], "evaluations": []},
-                )
+        request_id = str(args[0].get("request_id", "timeout")) if args and isinstance(args[0], dict) else "timeout"
+        current_query = str(args[0].get("user_raw_input", "")) if args and isinstance(args[0], dict) else None
+        result, timed_out, guard = run_with_deadline(
+            self.workflow_runner,
+            *args,
+            timeout_s=timeout,
+            **future_kwargs,
+        )
+        if timed_out or result is None or guard.should_abort():
+            return _timeout_workflow_result(request_id, current_query)
+        return result
 
     def _call_workflow_async_with_retry(self, *args: Any, **kwargs: Any) -> WorkflowResult:
+        """Run the async formal path with bounded admission and one retry."""
+
         if not self.use_formal:
             return self.workflow_runner(*args, **kwargs)
         try:
-            _raw = args[0].get("user_raw_input") if args and isinstance(args[0], dict) else None
-            _tt = kwargs.get("task_type")
-            if _raw is not None and not _orch_should_use_formal(str(_raw), _tt):
+            raw = args[0].get("user_raw_input") if args and isinstance(args[0], dict) else None
+            task_type = kwargs.get("task_type")
+            if raw is not None and not _orch_should_use_formal(str(raw), task_type):
                 kwargs["use_formal"] = False
                 return self.workflow_runner(*args, **kwargs)
         except Exception:
@@ -465,99 +622,26 @@ class ConversationOrchestrator:
         timeout = self.async_formal_timeout_s
         if timeout is None or timeout <= 0:
             return self.workflow_runner(*args, **kwargs)
+
+        request_id = str(args[0].get("request_id", "async-timeout")) if args and isinstance(args[0], dict) else "async-timeout"
+        current_query = str(args[0].get("user_raw_input", "")) if args and isinstance(args[0], dict) else None
         for attempt in range(2):
-            future_kwargs = dict(kwargs)
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self.workflow_runner, *args, **future_kwargs)
-                try:
-                    return future.result(timeout=timeout)
-                except FuturesTimeoutError:
-                    if attempt == 0:
-                        continue
-                    _honest = HONEST_FALLBACK_TEXT
-                    return WorkflowResult(
-                        request_id=str(args[0].get("request_id", "timeout")) if args and isinstance(args[0], dict) else "timeout",
-                        status="FALLBACK",
-                        final_response=_honest,
-                        fallback_reason="FORMAL_TIMEOUT",
-                        a_result=None,
-                        query_expansion=None,
-                        rag_result=None,
-                        b_result=None,
-                        c_result=None,
-                        d_result=None,
-                        agent_action=None,
-                        agent_reason_code=None,
-                        question=None,
-                        current_query=None,
-                        execution_history=[],
-                        agent_steps=0,
-                        rewrite_count=0,
-                        clarification_count=0,
-                        termination_reason="FORMAL_TIMEOUT",
-                        intake_snapshot=None,
-                        intake_stage=None,
-                        previsit_summary=None,
-                        system_risk_classification=None,
-                        trace={"events": [], "evaluations": []},
-                    )
-                except Exception:
-                    if attempt == 0:
-                        continue
-                    _honest = HONEST_FALLBACK_TEXT
-                    return WorkflowResult(
-                        request_id=str(args[0].get("request_id", "timeout")) if args and isinstance(args[0], dict) else "timeout",
-                        status="FALLBACK",
-                        final_response=_honest,
-                        fallback_reason="SYSTEM_DEPENDENCY",
-                        a_result=None,
-                        query_expansion=None,
-                        rag_result=None,
-                        b_result=None,
-                        c_result=None,
-                        d_result=None,
-                        agent_action=None,
-                        agent_reason_code=None,
-                        question=None,
-                        current_query=None,
-                        execution_history=[],
-                        agent_steps=0,
-                        rewrite_count=0,
-                        clarification_count=0,
-                        termination_reason="SYSTEM_DEPENDENCY",
-                        intake_snapshot=None,
-                        intake_stage=None,
-                        previsit_summary=None,
-                        system_risk_classification=None,
-                        trace={"events": [], "evaluations": []},
-                    )
-        _honest = HONEST_FALLBACK_TEXT
-        return WorkflowResult(
-            request_id=str(args[0].get("request_id", "async-timeout")) if args and isinstance(args[0], dict) else "async-timeout",
-            status="FALLBACK",
-            final_response=_honest,
-            fallback_reason="FORMAL_TIMEOUT",
-            a_result=None,
-            query_expansion=None,
-            rag_result=None,
-            b_result=None,
-            c_result=None,
-            d_result=None,
-            agent_action=None,
-            agent_reason_code=None,
-            question=None,
-            current_query=None,
-            execution_history=[],
-            agent_steps=0,
-            rewrite_count=0,
-            clarification_count=0,
-            termination_reason="FORMAL_TIMEOUT",
-            intake_snapshot=None,
-            intake_stage=None,
-            previsit_summary=None,
-            system_risk_classification=None,
-            trace={"events": [], "evaluations": []},
-        )
+            try:
+                result, timed_out, guard = run_with_deadline(
+                    self.workflow_runner,
+                    *args,
+                    timeout_s=timeout,
+                    **dict(kwargs),
+                )
+                if not timed_out and result is not None and not guard.should_abort():
+                    return result
+            except Exception:
+                if attempt == 0:
+                    continue
+                return _timeout_workflow_result(request_id, current_query, reason="SYSTEM_DEPENDENCY")
+            if attempt == 0:
+                continue
+        return _timeout_workflow_result(request_id, current_query)
 
     def _is_duplicate_push(self, event_id: str) -> bool:
         with _pushed_lock:
@@ -581,16 +665,21 @@ class ConversationOrchestrator:
         text: str,
         event_id: str | None = None,
         push_sender: PushSender | None = None,
+        deadline_guard: DeadlineGuard | None = None,
     ) -> bool:
         if event_id and self._is_duplicate_push(event_id):
             return False
         for attempt in range(2):
             try:
+                if deadline_guard is not None and deadline_guard.should_abort():
+                    return False
                 if push_sender is not None:
                     ok = push_sender(line_user_id, text)
                 else:
                     ok = self._default_push_sender(line_user_id, text)
                 if ok:
+                    if deadline_guard is not None and deadline_guard.should_abort():
+                        return False
                     if event_id:
                         self._mark_pushed(event_id)
                         try:
@@ -715,9 +804,15 @@ class ConversationOrchestrator:
             "declared_role": self._declared_role(session.actor_role),
             "language": "zh-TW",
         }
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self.workflow_runner, request, use_formal=True)
-            return future.result(timeout=timeout_s)
+        result, timed_out, guard = run_with_deadline(
+            self.workflow_runner,
+            request,
+            timeout_s=timeout_s,
+            use_formal=True,
+        )
+        if timed_out or result is None or guard.should_abort():
+            raise FuturesTimeoutError(f"deadline expired for {session.session_id}")
+        return result
 
     def _spawn_async_formal(
         self,
@@ -730,6 +825,7 @@ class ConversationOrchestrator:
     ) -> None:
         if self._is_duplicate_push(event_id):
             return
+        spawn_guard = DeadlineGuard(self.async_formal_timeout_s * 2 + 5)
 
         def _execute_and_push() -> None:
             workflow: WorkflowResult | None = None
@@ -840,12 +936,26 @@ class ConversationOrchestrator:
                 )
             if self._is_duplicate_push(event_id):
                 return
+            if spawn_guard.should_abort():
+                return
             push_text = self.prepare_formal_push_text(workflow, text)
-            ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
+            if spawn_guard.should_abort():
+                return
+            ok = self._push_with_retry(
+                line_user_id,
+                push_text,
+                event_id=event_id,
+                push_sender=push_sender,
+                deadline_guard=spawn_guard,
+            )
             if ok:
+                if spawn_guard.should_abort():
+                    return
                 try:
                     latest = self.repository.get(session_id)
                     if latest is not None:
+                        if spawn_guard.should_abort():
+                            return
                         ctx = self.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
                         ctx, _ = self.context_manager.compact(ctx, stage_completed=False)
                         updated = latest.model_copy(update={"conversation_context": ctx}, deep=True)
@@ -855,6 +965,8 @@ class ConversationOrchestrator:
                             pass
                 except Exception:
                     pass
+                if spawn_guard.should_abort():
+                    return
                 if _should_push_honest_fallback(workflow):
                     self._maybe_record_question_for_doctor(line_user_id, text, workflow)
 
@@ -1109,41 +1221,45 @@ class ConversationOrchestrator:
             raise
 
     def _process_text(self, session: ProductSession, text: str) -> OrchestratorResult:
+        recorder = StagedLatencyRecorder(session_id=session.session_id)
         previous_version = session.version
-        # 3: RiskSignalPolicy on current_message + existing monotonic risk state (before envelope/interpreter)
-        risk = self.risk_policy.classify(text)
-        cumulative_risk = self._merge_risk(session.system_risk_classification, risk.model_dump(mode="json"))
-        context = self.context_manager.apply_structured_updates(
-            session.conversation_context,
-            {
-                "system_risk_classification": cumulative_risk,
-                "risk_flags": ["POSSIBLE_EMERGENCY"] if risk.level == "RED_FLAG" else [],
-            },
-        )
-        session = session.model_copy(
-            update={"conversation_context": context, "system_risk_classification": cumulative_risk},
-            deep=True,
-        )
+        workflow: Any | None = None  # type: ignore[var-annotated]
+        with recorder.stage("red_flag_and_auth_ms"):
+            risk = self.risk_policy.classify(text)
+            cumulative_risk = self._merge_risk(session.system_risk_classification, risk.model_dump(mode="json"))
+            context = self.context_manager.apply_structured_updates(
+                session.conversation_context,
+                {
+                    "system_risk_classification": cumulative_risk,
+                    "risk_flags": ["POSSIBLE_EMERGENCY"] if risk.level == "RED_FLAG" else [],
+                },
+            )
+            session = session.model_copy(
+                update={"conversation_context": context, "system_risk_classification": cumulative_risk},
+                deep=True,
+            )
 
         # 4: 紅旗立即中止 — 不得把 Interpreter 放在紅旗之前
         if cumulative_risk.get("level") == "RED_FLAG":
-            # Still need to record user turn for trace before returning
             ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
             session = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
             reply = fallback_response("A_EMERGENCY")
             session = self._sync_clinical_context(session)
             context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
             context, _ = self.context_manager.compact(context, stage_completed=False)
-            saved = self.repository.save(
-                session.model_copy(update={"conversation_context": context}, deep=True),
-                expected_version=previous_version,
-            )
+            with recorder.stage("persistence_ms"):
+                saved = self.repository.save(
+                    session.model_copy(update={"conversation_context": context}, deep=True),
+                    expected_version=previous_version,
+                )
+            self._last_staged_latency = recorder.snapshot()
             return OrchestratorResult(
                 event_id="pending",
                 session_id=saved.session_id,
                 reply=reply,
                 status="FALLBACK",
                 intake_stage=saved.intake_stage,
+                fallback_reason="A_EMERGENCY",
             )
 
         # 5: Identity check (bounded, cold-start also, before envelope, not via LLM)
@@ -1154,7 +1270,9 @@ class ConversationOrchestrator:
             session = self._sync_clinical_context(session)
             ctx_assistant = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
             ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
-            saved = self.repository.save(session.model_copy(update={"conversation_context": ctx_assistant}, deep=True), expected_version=previous_version)
+            with recorder.stage("persistence_ms"):
+                saved = self.repository.save(session.model_copy(update={"conversation_context": ctx_assistant}, deep=True), expected_version=previous_version)
+            self._last_staged_latency = recorder.snapshot()
             return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status="INFORMATION", intake_stage=saved.intake_stage)
 
         # 6: Explicit product control fast path (before AI) — spec 6
@@ -1192,18 +1310,24 @@ class ConversationOrchestrator:
         envelope = None
         interpretation = None
         if not _skip_ai_for_intake:
-            try:
-                envelope = build_conversation_envelope(session, text)
-                self._last_envelope = envelope
+            with recorder.stage("conversation_interpreter_ms"):
                 try:
-                    interpretation = self.interpreter.interpret(envelope)
+                    envelope = build_conversation_envelope(session, text)
+                    self._last_envelope = envelope
+                    try:
+                        interpretation = self.interpreter.interpret(envelope)
+                    except Exception:
+                        interpretation = DeterministicConversationInterpreter().interpret(envelope)
+                    # Deterministic mixed-intent backstop: if formal missed EDUCATION_QUESTION but text has intake+question clauses, synthesize
+                    try:
+                        interpretation = _maybe_apply_mixed_backstop(text, interpretation)
+                    except Exception:
+                        pass
+                    self._last_interpretation = interpretation
                 except Exception:
-                    interpretation = DeterministicConversationInterpreter().interpret(envelope)
-                self._last_interpretation = interpretation
-            except Exception:
-                interpretation = None
-                self._last_envelope = envelope
-                self._last_interpretation = None
+                    interpretation = None
+                    self._last_envelope = envelope
+                    self._last_interpretation = None
 
             # 10: 若 interpreter 判斷需澄清 (subject 切換不明等)，先追問，不自行轉換
             if interpretation and interpretation.needs_clarification:
@@ -1327,12 +1451,7 @@ class ConversationOrchestrator:
             session, reply, status = command_result
             intake_stage = session.intake_stage
         else:
-            # P1: side question handling must respect interpreter multi-intent and cross-turn resolution
-            is_side_candidate = self._looks_like_side_question(session, text)
-            if interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents:
-                is_side_candidate = False
-            if interpretation and interpretation.resolved_education_query and interpretation.references_resolved:
-                is_side_candidate = True
+            is_side_candidate = self._resolve_is_side_candidate(session, text, interpretation)
             if self._is_intake_active(session, text) and is_side_candidate:
                 side_query = text
                 if interpretation and interpretation.resolved_education_query and interpretation.references_resolved:
@@ -1346,6 +1465,16 @@ class ConversationOrchestrator:
                     "declared_role": self._declared_role(session.actor_role),
                     "language": "zh-TW",
                 })
+                try:
+                    wf_staged_side = None
+                    if hasattr(workflow, "trace") and isinstance(workflow.trace, dict):
+                        wf_staged_side = workflow.trace.get("staged_latency")
+                    if wf_staged_side:
+                        for _k in ("rag_retrieval_ms", "answer_generator_ms", "b_gate_ms", "d_gate_ms"):
+                            if _k in wf_staged_side and isinstance(wf_staged_side[_k], (int, float)):
+                                recorder.record(_k, float(wf_staged_side[_k]))
+                except Exception:
+                    pass
                 reply = self._without_intake_invitation(workflow.final_response)
                 pending_question = session.pending_question or self._question_for_field(
                     session.pending_field or self._next_pending_field(session.intake_snapshot)
@@ -1358,10 +1487,18 @@ class ConversationOrchestrator:
                     session.conversation_context, role="assistant", content=reply
                 )
                 context, _ = self.context_manager.compact(context, stage_completed=False)
-                saved = self.repository.save(
-                    session.model_copy(update={"conversation_context": context}, deep=True),
-                    expected_version=previous_version,
-                )
+                with recorder.stage("persistence_ms"):
+                    saved = self.repository.save(
+                        session.model_copy(update={"conversation_context": context}, deep=True),
+                        expected_version=previous_version,
+                    )
+                staged = recorder.snapshot()
+                try:
+                    if hasattr(workflow, "trace") and isinstance(workflow.trace, dict):
+                        workflow.trace["staged_latency"] = staged
+                except Exception:
+                    pass
+                self._last_staged_latency = staged
                 return OrchestratorResult(
                     event_id="pending", session_id=saved.session_id, reply=reply,
                     status="SIDE_ANSWER", intake_stage=saved.intake_stage,
@@ -1401,24 +1538,53 @@ class ConversationOrchestrator:
                     intake_text_for_normalize = text
             if not is_control_or_chitchat and self._is_intake_active(session, intake_text_for_normalize) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
                 _merged_valid: list[Any] | None = None
-                if not _skip_ai_for_intake and interpretation is not None and getattr(interpretation, "intake_candidates", None):
-                    try:
-                        from tfda_context_gate.intake.candidate_merge import (
-                            deterministic_to_candidates,
-                            formal_to_candidates,
-                            merge_candidates,
-                        )
-                        from tfda_context_gate.intake.tool import PreVisitIntakeTool as _P2ATool
+                with recorder.stage("candidate_validation_ms"):
+                    if not _skip_ai_for_intake and interpretation is not None and getattr(interpretation, "intake_candidates", None):
+                        try:
+                            from tfda_context_gate.intake.candidate_merge import (
+                                deterministic_to_candidates,
+                                formal_to_candidates,
+                                merge_candidates,
+                            )
+                            from tfda_context_gate.intake.tool import PreVisitIntakeTool as _P2ATool
 
-                        _tool2 = _P2ATool()
-                        _det_extracted = _tool2.extract_fields_from_utterance(intake_text_for_normalize, stage=None)
-                        _det_cands = deterministic_to_candidates(_det_extracted, intake_text_for_normalize)
-                        _formal_cands = formal_to_candidates(interpretation.intake_candidates, intake_text_for_normalize)
-                        _valid, _need_clarify = merge_candidates(_det_cands, _formal_cands, existing_intake=session.intake_snapshot)
-                        _merged_valid = _valid
-                    except Exception:
-                        _merged_valid = None
-                session, intake_note = self._normalize_intake_answer(session, intake_text_for_normalize, merged_valid=_merged_valid)
+                            _tool2 = _P2ATool()
+                            _det_extracted = _tool2.extract_fields_from_utterance(intake_text_for_normalize, stage=None)
+                            _det_cands = deterministic_to_candidates(_det_extracted, intake_text_for_normalize)
+                            _formal_cands = formal_to_candidates(interpretation.intake_candidates, intake_text_for_normalize)
+                            _valid, _need_clarify = merge_candidates(_det_cands, _formal_cands, existing_intake=session.intake_snapshot)
+                            # B fix: 問句不得寫成症狀 + prevent symptom-as-medication misroute
+                            try:
+                                from tfda_context_gate.intake.candidate_merge import is_question_like as _is_q_like
+
+                                _filtered: list[Any] = []
+                                for _c in _valid:
+                                    _field = getattr(_c, "target_field", "")
+                                    _val = getattr(_c, "value", "") or ""
+                                    _sq = getattr(_c, "source_quote", "") or ""
+                                    _raw = getattr(_c, "raw", "") or intake_text_for_normalize
+                                    # Question clause must not become symptom/medication
+                                    if _field in ("symptom_description", "symptom_onset", "symptom_severity", "known_medications"):
+                                        if _is_q_like(_raw) or _is_q_like(_sq) or _is_q_like(_val):
+                                            if _is_q_like(_sq):
+                                                continue
+                                            if _field in ("symptom_description", "symptom_onset", "symptom_severity"):
+                                                if _is_q_like(_val) or ("？" in _val or "是不是" in _val or "糖尿病嗎" in _val):
+                                                    continue
+                                    # Symptom-like text must not go to known_medications without med keyword
+                                    if _field == "known_medications":
+                                        _sym_like = bool(re.search(r"嘴巴乾|口乾|跑廁所|上廁所|口渴|頻尿|頭暈|夜尿|很乾", _val))
+                                        _med_like = bool(re.search(r"metformin|二甲雙胍|胰島素|insulin|吃藥|用藥|服用|藥", _val, re.IGNORECASE))
+                                        if _sym_like and not _med_like:
+                                            continue
+                                    _filtered.append(_c)
+                                _valid = _filtered
+                            except Exception:
+                                pass
+                            _merged_valid = _valid
+                        except Exception:
+                            _merged_valid = None
+                    session, intake_note = self._normalize_intake_answer(session, intake_text_for_normalize, merged_valid=_merged_valid)
                 if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
                     session = self._sync_clinical_context(session)
                     context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=intake_note or "請問程度大約是輕度、中度、重度，或 1–10 分中的幾分？")
@@ -1476,6 +1642,16 @@ class ConversationOrchestrator:
                     task_type=_task_type,
                     intake=_intake_val,
                 )
+            try:
+                wf_staged = None
+                if hasattr(workflow, "trace") and isinstance(workflow.trace, dict):
+                    wf_staged = workflow.trace.get("staged_latency")
+                if wf_staged:
+                    for _k in ("rag_retrieval_ms", "answer_generator_ms", "b_gate_ms", "d_gate_ms"):
+                        if _k in wf_staged and isinstance(wf_staged[_k], (int, float)):
+                            recorder.record(_k, float(wf_staged[_k]))
+            except Exception:
+                pass
             is_multi_multi = interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents
             pending_q_from_workflow = workflow.question
             # P1 multi: education workflow has no intake question, need to preserve next intake question
@@ -1512,8 +1688,10 @@ class ConversationOrchestrator:
                 updates["pending_field"] = "questions_for_doctor"
                 updates["pending_question"] = _QMAP.get("questions_for_doctor")
             session = session.model_copy(update=updates, deep=True)
-            # Intake write succeeded but workflow mis-routed short answers to Q_NEED_MORE/BLOCKED — override to stay in intake
-            if intake_note is not None and workflow.status in ("BLOCKED", "FALLBACK") and workflow.fallback_reason in ("Q_NEED_MORE", "O_GENERIC", "CHIT_CHAT_OUT_OF_SCOPE", "B_INSUFFICIENT", "O_GENERIC"):
+            # Intake write succeeded but workflow mis-routed short answers to Q_NEED_MORE/BLOCKED — override to stay in intake.
+            # For mixed intent, preserve honest fallback instead of hiding it.
+            is_honest_fallback = workflow.fallback_reason in HONEST_FALLBACK_REASONS
+            if intake_note is not None and workflow.status in ("BLOCKED", "FALLBACK") and workflow.fallback_reason in ("Q_NEED_MORE", "O_GENERIC", "CHIT_CHAT_OUT_OF_SCOPE", "B_INSUFFICIENT", "O_GENERIC") and not (is_multi_multi and is_honest_fallback):
                 pending_after = self._next_pending_field(resulting_intake)
                 if pending_after:
                     from tfda_context_gate.intake.schemas import INTAKE_FIELD_QUESTIONS as _QOVR
@@ -1558,9 +1736,11 @@ class ConversationOrchestrator:
             elif checkpoint:
                 reply = f"{checkpoint}\n\n{reply}"
             # P1 multi: deterministically append next intake question after education answer
+            # For honest fallback, also append pending to keep intake flow while preserving honesty
             if is_multi_multi and session.pending_field and session.pending_question:
                 nxt_q = session.pending_question
-                if nxt_q and nxt_q.strip() not in reply and workflow.status == "COMPLETED":
+                honest = workflow.fallback_reason in HONEST_FALLBACK_REASONS if hasattr(workflow, "fallback_reason") else False
+                if nxt_q and nxt_q.strip() not in reply and (workflow.status == "COMPLETED" or (workflow.status == "FALLBACK" and honest)):
                     reply = f"{reply}\n\n{nxt_q}"
             session = self._sync_clinical_context(session)
             if stage_completed and old_stage in {"stage1", "stage2", "stage3"}:
@@ -1574,15 +1754,40 @@ class ConversationOrchestrator:
             context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
             context, _ = self.context_manager.compact(context, stage_completed=stage_completed)
             session = session.model_copy(update={"conversation_context": context}, deep=True)
-            saved = self.repository.save(session, expected_version=previous_version)
-            return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status=status, intake_stage=intake_stage)
+            with recorder.stage("persistence_ms"):
+                saved = self.repository.save(session, expected_version=previous_version)
+            staged = recorder.snapshot()
+            try:
+                if hasattr(workflow, "trace") and isinstance(workflow.trace, dict):
+                    workflow.trace["staged_latency"] = staged
+            except Exception:
+                pass
+            self._last_staged_latency = staged
+            return OrchestratorResult(
+                event_id="pending",
+                session_id=saved.session_id,
+                reply=reply,
+                status=status,
+                intake_stage=intake_stage,
+                fallback_reason=getattr(workflow, "fallback_reason", None),
+            )
 
         session = self._sync_clinical_context(session)
         context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
         context, _ = self.context_manager.compact(context, stage_completed=False)
         session = session.model_copy(update={"conversation_context": context}, deep=True)
-        saved = self.repository.save(session, expected_version=previous_version)
-        return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status=status, intake_stage=intake_stage)
+        with recorder.stage("persistence_ms"):
+            saved = self.repository.save(session, expected_version=previous_version)
+        staged = recorder.snapshot()
+        self._last_staged_latency = staged
+        return OrchestratorResult(
+            event_id="pending",
+            session_id=saved.session_id,
+            reply=reply,
+            status=status,
+            intake_stage=intake_stage,
+            fallback_reason=getattr(workflow, "fallback_reason", None),
+        )
 
     _PROXY_FUZZY_RE = re.compile(r"幫.{0,10}問|代.{0,10}整理|幫.{0,10}整理|替.{0,10}問", re.IGNORECASE)
     _UNCERTAIN_RE = re.compile(r"不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚|不太知道", re.IGNORECASE)
@@ -2096,7 +2301,7 @@ class ConversationOrchestrator:
                     v = merged
             elif isinstance(v, str) and len(v) > limit:
                 v = v[:limit]
-            if k == "symptom_description" and "symptom_onset" in candidates and str(v).strip() == text.strip()[:limit]:
+            if k == "symptom_description" and "symptom_onset" in candidates and str(v).strip() == text.strip()[:limit] and field != "symptom_description":
                 continue
             if k == "questions_for_doctor" and isinstance(v, list):
                 if any("我要繼續整理看診前資料" in str(x) for x in v):
@@ -2285,6 +2490,43 @@ class ConversationOrchestrator:
             # severity standardization for direct write
             if field == "symptom_severity":
                 stripped = _standardize_severity(stripped)
+            if field == "known_medications":
+                try:
+                    _sym_like = bool(re.search(r"嘴巴乾|口乾|跑廁所|上廁所|口渴|頻尿|頭暈|夜尿|很乾|廁所", stripped))
+                    _med_like = bool(re.search(r"metformin|二甲雙胍|胰島素|insulin|吃藥|用藥|服用", stripped, re.IGNORECASE))
+                    if _sym_like and not _med_like:
+                        from tfda_context_gate.intake.tool import PreVisitIntakeTool as _DirectTool
+
+                        _dt = _DirectTool()
+                        _ext2 = _dt.extract_fields_from_utterance(stripped, stage="stage2")
+                        _desc = _ext2.get("symptom_description")
+                        if _desc:
+                            intake.symptom_description = _desc
+                            if _ext2.get("symptom_onset"):
+                                intake.symptom_onset = _ext2["symptom_onset"]
+                            from tfda_context_gate.intake.tool import build_implicit_confirm as _bic
+
+                            _conf = _bic(text, _desc)
+                            if _was_truncated and _trunc_marker not in _conf:
+                                _conf = f"{_conf} {_trunc_marker}"
+                            return session.model_copy(update={"intake_snapshot": intake}, deep=True), _conf
+                        # fallback: store as symptom_description to avoid medication pollution
+                        intake.symptom_description = stripped[:2000]
+                        from tfda_context_gate.intake.tool import build_implicit_confirm as _bic2
+
+                        _conf2 = _bic2(text, stripped[:25])
+                        if _was_truncated and _trunc_marker not in _conf2:
+                            _conf2 = f"{_conf2} {_trunc_marker}"
+                        return session.model_copy(update={"intake_snapshot": intake}, deep=True), _conf2
+                    from tfda_context_gate.intake.candidate_merge import is_question_like as _is_q_like2
+
+                    if _is_q_like2(stripped):
+                        _pending_q = session.pending_question or cls._question_for_field(field)
+                        if _pending_q:
+                            return session, _pending_q
+                        return session, None
+                except Exception:
+                    pass
             direct: Any = [stripped[:limit]] if field in {
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
             } else stripped[:limit]
@@ -2321,6 +2563,40 @@ class ConversationOrchestrator:
             normalized,
         )
         return bool(education_topic or (normalized.endswith(("?", "？")) and len(normalized) >= 6))
+
+    @staticmethod
+    def _is_mixed_intent(interpretation: Any) -> bool:
+        """Mixed intake answer + education question must NOT take SIDE_ANSWER path."""
+        try:
+            intents = getattr(interpretation, "intents", None) or []
+            return "INTAKE_ANSWER" in intents and "EDUCATION_QUESTION" in intents
+        except Exception:
+            return False
+
+    @classmethod
+    def _resolve_is_side_candidate(
+        cls, session: ProductSession, text: str, interpretation: Any
+    ) -> bool:
+        """Precedence: mixed intent never side, else references_resolved cross-turn is side, else heuristic.
+
+        Fixes bug where third line re-flipped mixed intent to True. Order matters:
+        mixed intent must force False AFTER references_resolved re-flip.
+        """
+        base = cls._looks_like_side_question(session, text)
+        # If mixed, it overrides everything — must go through intake merge + formal education workflow
+        if cls._is_mixed_intent(interpretation):
+            return False
+        # Cross-turn resolved reference (e.g., fruit followup "那一天可以吃多少？" → "糖尿病一天可以吃多少水果？")
+        # is considered side when not mixed and intake is active.
+        if interpretation and getattr(interpretation, "resolved_education_query", None) and getattr(
+            interpretation, "references_resolved", False
+        ):
+            return True
+        # Apply mixed guard again defensively (in case base was True due to heuristic)
+        # Already handled, but keep explicit for clarity.
+        if cls._is_mixed_intent(interpretation):
+            return False
+        return base
 
     @staticmethod
     def _stage_checkpoint(intake: PreVisitIntake, stage: str) -> str | None:

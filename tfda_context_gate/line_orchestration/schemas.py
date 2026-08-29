@@ -11,4 +11,6 @@ class OrchestratorResult(BaseModel):
     reply: str = Field(min_length=1)
     status: str = Field(min_length=1)
     intake_stage: str | None = None
+    # Present for smoke/telemetry classification; never contains user text.
+    fallback_reason: str | None = None
     replayed: bool = False
