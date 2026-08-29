@@ -249,6 +249,15 @@ def _demo_identity_headers_enabled() -> bool:
     return os.getenv("LINE_DEMO_ALLOW_ID_HEADERS", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def _demo_clinician_enabled() -> bool:
+    """Return only the safe capability flag; never expose the allowlist itself."""
+    mode_enabled = os.getenv("LINE_DEMO_MODE", "false").strip().lower() in {"1", "true", "yes"}
+    allowlist_configured = bool(
+        {value.strip() for value in os.getenv("DEMO_CLINICIAN_IDS", "").split(",") if value.strip()}
+    )
+    return mode_enabled and allowlist_configured
+
+
 def _unsigned_webhook_enabled() -> bool:
     return os.getenv("LINE_ALLOW_UNSIGNED_WEBHOOK", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -1233,6 +1242,78 @@ def line_client_config() -> dict[str, Any]:
     return {
         "liff_id": os.getenv("LINE_LIFF_ID", ""),
         "demo_identity_headers": _demo_identity_headers_enabled(),
+        # This is intentionally a boolean.  The configured clinician IDs are
+        # an authorization boundary and must not be enumerated to browsers.
+        "demo_clinician_enabled": _demo_clinician_enabled(),
+    }
+
+
+_PATIENT_REVIEW_FIELDS: tuple[tuple[str, str], ...] = (
+    ("known_medications", "目前用藥"),
+    ("allergies", "過敏史"),
+    ("chronic_conditions", "慢性病史"),
+    ("family_history", "家族史"),
+    ("symptom_onset", "症狀開始時間"),
+    ("symptom_description", "主要症狀"),
+    ("symptom_severity", "症狀程度"),
+    ("questions_for_doctor", "想問醫師的問題"),
+)
+
+
+def _patient_review_payload(session: Any) -> dict[str, Any]:
+    """Build a display DTO without making the browser infer intake state.
+
+    Empty fields and explicit uncertainty are kept distinct so the portal can
+    show "尚未提供" versus "待看診確認".  This is a read-only projection;
+    the LINE conversation remains the only path that changes intake data.
+    """
+    from tfda_context_gate.intake.summary import generate_previsit_summary
+
+    snapshot = session.intake_snapshot.model_dump(mode="json")
+    summary = generate_previsit_summary(snapshot, request_id=session.session_id)
+    summary_missing = set(summary.missing_fields)
+    pending_fields: set[str] = set()
+    if session.pending_field:
+        pending_fields.add(session.pending_field)
+
+    def _has_pending_marker(value: Any) -> bool:
+        values = value if isinstance(value, list) else [value]
+        return any(
+            isinstance(item, str)
+            and ("待確認" in item or "待看診確認" in item)
+            for item in values
+        )
+
+    fields: list[dict[str, Any]] = []
+    for field_name, label in _PATIENT_REVIEW_FIELDS:
+        value = snapshot.get(field_name)
+        if field_name in pending_fields or _has_pending_marker(value):
+            state = "PENDING"
+            pending_fields.add(field_name)
+        elif field_name in summary_missing:
+            state = "MISSING"
+        else:
+            state = "PROVIDED"
+        fields.append({"name": field_name, "label": label, "value": value, "state": state})
+
+    status = str(session.status)
+    intake_stage = str(session.intake_stage)
+    if status == "SUBMITTED" and intake_stage == "submitted":
+        confirmation_status = "CONFIRMED"
+    elif status == "AWAITING_CONFIRMATION" or intake_stage == "review":
+        confirmation_status = "AWAITING_CONFIRMATION"
+    else:
+        confirmation_status = "IN_PROGRESS"
+
+    return {
+        "fields": fields,
+        "provided_fields": list(summary.provided_fields),
+        "missing_fields": [field for field in summary.missing_fields if field not in pending_fields],
+        "pending_fields": [field for field, _ in _PATIENT_REVIEW_FIELDS if field in pending_fields],
+        "pending_question": session.pending_question,
+        "confirmation_status": confirmation_status,
+        "can_share": confirmation_status == "CONFIRMED",
+        "disclaimer": summary.disclaimer,
     }
 
 
@@ -1248,6 +1329,7 @@ def patient_session(
     session = orchestrator.session_for_user(line_user_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    review = _patient_review_payload(session)
     return JSONResponse(content={
         "session_id": session.session_id,
         "actor_role": str(session.actor_role),
@@ -1258,6 +1340,7 @@ def patient_session(
         "intake_snapshot": session.intake_snapshot.model_dump(mode="json"),
         "pending_question": session.pending_question,
         "system_risk_classification": session.system_risk_classification,
+        "review": review,
     })
 
 

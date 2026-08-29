@@ -5,20 +5,182 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>看診前資料｜糖尿病照護 Demo</title>
   <style>
-    :root{font-family:system-ui,-apple-system,sans-serif;color:#17352f;background:#f4f8f6}body{margin:0}.wrap{max-width:720px;margin:auto;padding:24px}.card{background:#fff;border:1px solid #d9e6e1;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 6px 20px #17352f0b}h1{font-size:1.55rem}h2{font-size:1.05rem}button,input{font:inherit;border-radius:10px;padding:12px}input{box-sizing:border-box;width:100%;border:1px solid #a9beb7}button{border:0;background:#087f67;color:#fff;font-weight:700;cursor:pointer}.muted{color:#5f746d;font-size:.9rem}.warning{border-left:5px solid #d97706}pre{white-space:pre-wrap;word-break:break-word;background:#eef5f2;padding:12px;border-radius:10px}</style>
+    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17352f;background:#f4f8f6;line-height:1.55}
+    *{box-sizing:border-box}body{margin:0}.wrap{max-width:760px;margin:auto;padding:20px 16px 40px}
+    .card{background:#fff;border:1px solid #d9e6e1;border-radius:16px;padding:18px;margin:14px 0;box-shadow:0 6px 20px #17352f0b}
+    h1{font-size:1.5rem;margin:0 0 6px}h2{font-size:1.08rem;margin:0 0 10px}h3{font-size:.98rem;margin:0}
+    .muted{color:#5f746d;font-size:.92rem}.notice{border-left:5px solid #087f67}.warning{border-left-color:#d97706}
+    .status{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 10px;font-weight:700;font-size:.87rem;background:#e7f4ef;color:#08634f}
+    .badge.pending{background:#fff4dc;color:#8a4b00}.badge.missing{background:#f2f4f3;color:#5f746d}.badge.error{background:#fde8e8;color:#9b1c1c}
+    .field-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}.field{border:1px solid #dce9e4;border-radius:12px;padding:12px;min-width:0}
+    .field dt{font-weight:700}.field dd{margin:5px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}.field.pending{border-color:#eabf71;background:#fffaf0}.field.missing{background:#f8faf9;color:#5f746d}
+    .field-state{display:block;margin-top:6px;font-size:.8rem;font-weight:700;color:#087f67}.field.pending .field-state{color:#9a5b00}.field.missing .field-state{color:#66756f}
+    .meta{font-size:.88rem;color:#5f746d;margin:0}.meta code{overflow-wrap:anywhere}.summary-list{margin:8px 0;padding-left:1.2rem}.summary-list li{margin:3px 0}
+    label{display:block;margin-top:12px;font-weight:650}input,button{width:100%;font:inherit;border-radius:10px;padding:11px;margin-top:6px}input{border:1px solid #a9beb7;background:#fff}button{border:0;background:#087f67;color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#e7f1ee;color:#08634f}button.danger{background:#9b3a28}button:disabled{opacity:.5;cursor:not-allowed}
+    .button-row{display:grid;grid-template-columns:1fr 1fr;gap:9px}.error{color:#9b1c1c;background:#fff0f0;border-radius:10px;padding:10px;margin:10px 0}.success{color:#08634f;background:#e7f4ef;border-radius:10px;padding:10px;margin:10px 0}
+    .share-token{font-size:1.15rem;letter-spacing:.04em;background:#eef5f2;padding:12px;border-radius:10px;overflow-wrap:anywhere;user-select:all}.hidden{display:none!important}
+    @media (max-width:560px){.wrap{padding:16px 12px 32px}.card{padding:15px}.field-list{grid-template-columns:1fr}.button-row{grid-template-columns:1fr}}
+  </style>
 </head>
-<body><main class="wrap">
-  <h1>看診前資料</h1>
-  <p class="muted">這是 Demo 入口。正式 LIFF 版須以 LINE Login 驗證身分；頁面不提供診斷或急診服務。</p>
-  <section class="card warning"><strong>緊急狀況</strong><p>若有意識不清、呼吸困難等危急症狀，請立即聯絡當地緊急醫療服務。</p></section>
-  <section class="card"><h2>1. 在 LINE 完成資料整理</h2><p>回到聊天輸入「我要準備看診」，選擇為自己或代家人整理，依序填寫用藥病史、症狀及想問醫師的問題，最後確認。</p></section>
-  <section class="card"><h2>2. 查詢與分享</h2><div id="demo"><label for="uid">本機測試用 LINE user ID</label><input id="uid" autocomplete="off" placeholder="例如 U-demo"></div><p><button id="load">載入看診資料</button></p><label for="clinician">指定 Demo 醫護 ID（可留空）</label><input id="clinician" autocomplete="off"><p><button id="share">建立 10 分鐘一次性分享碼</button></p><p><button id="revoke">撤銷剛建立的分享碼</button></p><pre id="result" aria-live="polite">尚未載入</pre></section>
+<body>
+<main class="wrap">
+  <header>
+    <h1>看診前資料</h1>
+    <p class="muted">這是病患自己的 Review 入口。正式版會用 LINE LIFF 驗證身分；此頁只能查看與分享，不會修改看診資料。</p>
+  </header>
+
+  <section class="card notice warning" aria-label="安全提醒">
+    <strong>安全提醒</strong>
+    <p>若有意識不清、呼吸困難、昏厥等危急症狀，請立即聯絡當地緊急醫療服務。本頁不提供診斷或急診服務。</p>
+  </section>
+
+  <section class="card" aria-labelledby="status-title">
+    <div class="status"><h2 id="status-title">資料狀態</h2><span id="page-status" class="badge">尚未載入</span></div>
+    <p id="session-meta" class="meta">請先載入看診前資料。</p>
+    <p id="page-message" class="muted" aria-live="polite"></p>
+    <div id="error" class="error hidden" role="alert"></div>
+  </section>
+
+  <section class="card" aria-labelledby="review-title">
+    <h2 id="review-title">Review：8 項看診前資料</h2>
+    <p class="muted">「待看診確認」代表你曾表示不確定；「尚未提供」代表這一欄還沒有資料。資料只呈現對話中提供的內容，不會替你猜測。</p>
+    <dl id="fields" class="field-list"><div class="field missing"><dt>尚未載入</dt><dd>—</dd></div></dl>
+    <div id="pending-box" class="hidden"><h3>待確認</h3><ul id="pending-fields" class="summary-list"></ul><p id="pending-question" class="muted"></p></div>
+    <div id="missing-box" class="hidden"><h3>尚未提供</h3><ul id="missing-fields" class="summary-list"></ul></div>
+    <p id="disclaimer" class="muted"></p>
+  </section>
+
+  <section class="card" aria-labelledby="load-title">
+    <h2 id="load-title">載入資料</h2>
+    <div id="demo-identity">
+      <label for="uid">本機 Demo LINE user ID</label>
+      <input id="uid" autocomplete="off" placeholder="例如 U-demo">
+      <p class="muted">只在伺服器明確開啟 Demo identity header 時顯示；正式環境請從 LINE LIFF 開啟。</p>
+    </div>
+    <button id="load" type="button">載入看診資料</button>
+  </section>
+
+  <section id="share-panel" class="card" aria-labelledby="share-title">
+    <h2 id="share-title">分享給醫護（一次性、10 分鐘有效）</h2>
+    <p id="share-help" class="muted">只有完成 Review 確認的資料可以分享。分享碼只顯示一次，請直接交給指定醫護。</p>
+    <label for="clinician">指定 Demo 醫護 ID（可留空）</label>
+    <input id="clinician" autocomplete="off" placeholder="例如 doctor-demo">
+    <button id="share" type="button" disabled>建立短效分享碼</button>
+    <div id="grant-box" class="success hidden" aria-live="polite">
+      <strong>分享碼已建立</strong>
+      <p id="grant-token" class="share-token"></p>
+      <p id="grant-expiry" class="muted"></p>
+      <div class="button-row"><button id="copy" class="secondary" type="button">複製分享碼</button><button id="revoke" class="danger" type="button">立即撤銷</button></div>
+      <p id="grant-status" class="muted"></p>
+    </div>
+  </section>
+
+  <p id="startup-message" class="muted" aria-live="polite"></p>
 </main>
-<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script><script>
-const out=document.querySelector('#result'),uid=document.querySelector('#uid');let config={},idToken='',sessionId='',grantId='';
-const headers=()=>idToken?{'Authorization':'Bearer '+idToken}:{'X-Line-User-Id':uid.value};
-(async()=>{config=await fetch('/api/line/client-config').then(r=>r.json());document.querySelector('#demo').hidden=!config.demo_identity_headers;if(config.liff_id){await liff.init({liffId:config.liff_id});if(!liff.isLoggedIn()){liff.login();return}idToken=liff.getIDToken()||''}})().catch(e=>out.textContent='LINE 登入初始化失敗：'+e.message);
-document.querySelector('#load').onclick=async()=>{out.textContent='載入中…';const r=await fetch('/api/patient/session',{headers:headers()});const data=await r.json();sessionId=data.session_id||'';out.textContent=JSON.stringify(data,null,2)};
-document.querySelector('#share').onclick=async()=>{if(!sessionId){out.textContent='請先載入已確認的資料';return}const r=await fetch(`/api/patient/sessions/${sessionId}/share`,{method:'POST',headers:{...headers(),'content-type':'application/json'},body:JSON.stringify({allowed_clinician_id:document.querySelector('#clinician').value||null})});const data=await r.json();grantId=data.grant_id||'';out.textContent=JSON.stringify(data,null,2)};
-document.querySelector('#revoke').onclick=async()=>{if(!grantId){out.textContent='目前沒有可撤銷的分享碼';return}const r=await fetch(`/api/patient/share/${grantId}/revoke`,{method:'POST',headers:headers()});out.textContent=JSON.stringify(await r.json(),null,2)};
-</script></body></html>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script>
+(() => {
+  const $ = (selector) => document.querySelector(selector);
+  const state = {config:{}, idToken:'', sessionId:'', grantId:'', grantToken:'', session:null};
+  const labels = {PROVIDED:'已提供', PENDING:'待看診確認', MISSING:'尚未提供'};
+  const statusLabels = {CONFIRMED:'已確認，可分享', AWAITING_CONFIRMATION:'等待你確認', IN_PROGRESS:'整理中'};
+  const errorText = (status, detail) => {
+    const text = typeof detail === 'string' ? detail : '';
+    if (status === 401) return '身分驗證失敗。請從 LINE LIFF 開啟，或確認本機 Demo ID 與伺服器設定一致。';
+    if (status === 403) return '你沒有權限查看或操作這份看診資料。';
+    if (status === 404) return '找不到看診資料；可能尚未開始整理，或資料已過期。';
+    if (status === 409 || text.includes('confirmed')) return '資料尚未完成確認，請回到 LINE 對話完成 Review 後再分享。';
+    if (status === 503) return '目前服務或 Demo 身分驗證尚未啟用，請稍後再試。';
+    return text || '操作失敗，請稍後再試。';
+  };
+  const showError = (message) => { $('#error').textContent = message; $('#error').classList.toggle('hidden', !message); };
+  const setBusy = (button, busy, label, enabledAfter = true) => { button.disabled = busy ? true : !enabledAfter; if (busy) button.dataset.oldLabel = button.textContent; button.textContent = busy ? label : (button.dataset.oldLabel || button.textContent); };
+  const authHeaders = () => state.idToken ? {'Authorization':'Bearer ' + state.idToken} : {'X-Line-User-Id': $('#uid').value.trim()};
+  const api = async (url, options = {}) => {
+    const response = await fetch(url, options);
+    let data = {};
+    try { data = await response.json(); } catch (_) {}
+    if (!response.ok) { const error = new Error(errorText(response.status, data.detail)); error.status = response.status; throw error; }
+    return data;
+  };
+  const formatValue = (value) => {
+    if (Array.isArray(value)) return value.length ? value.join('、') : '—';
+    if (value === null || value === undefined || value === '') return '—';
+    return String(value);
+  };
+  const renderReview = (data) => {
+    const review = data.review || {};
+    const fields = $('#fields'); fields.replaceChildren();
+    (review.fields || []).forEach((item) => {
+      const wrapper = document.createElement('div'); wrapper.className = 'field ' + String(item.state || 'MISSING').toLowerCase();
+      const dt = document.createElement('dt'); dt.textContent = item.label || item.name;
+      const dd = document.createElement('dd'); dd.textContent = formatValue(item.value);
+      const state = document.createElement('span'); state.className = 'field-state'; state.textContent = labels[item.state] || '—';
+      wrapper.append(dt, dd, state); fields.append(wrapper);
+    });
+    if (!fields.children.length) { const empty = document.createElement('div'); empty.className = 'field missing'; empty.textContent = '尚未載入'; fields.append(empty); }
+    const pending = review.pending_fields || []; const missing = review.missing_fields || []; const fieldNames = Object.fromEntries((review.fields || []).map((item) => [item.name, item.label || item.name]));
+    $('#pending-box').classList.toggle('hidden', pending.length === 0);
+    $('#missing-box').classList.toggle('hidden', missing.length === 0);
+    $('#pending-fields').replaceChildren(...pending.map((item) => { const li = document.createElement('li'); li.textContent = fieldNames[item] || item; return li; }));
+    $('#missing-fields').replaceChildren(...missing.map((item) => { const li = document.createElement('li'); li.textContent = fieldNames[item] || item; return li; }));
+    $('#pending-question').textContent = review.pending_question ? '目前對話提示：' + review.pending_question : '';
+    $('#disclaimer').textContent = review.disclaimer || '本資料僅供看診前整理，需由醫師確認，不是診斷或治療建議。';
+    const confirmation = review.confirmation_status || 'IN_PROGRESS';
+    $('#page-status').textContent = statusLabels[confirmation] || confirmation;
+    $('#page-status').className = 'badge ' + (confirmation === 'CONFIRMED' ? '' : 'pending');
+    $('#share').disabled = !review.can_share;
+    $('#share-help').textContent = review.can_share ? '資料已確認。建立後分享碼只顯示一次，10 分鐘內可由指定醫護使用一次。' : '只有完成 Review 確認的資料可以分享；請回到 LINE 對話回覆「確認完成」。';
+  };
+  const renderSession = (data) => {
+    state.session = data; state.sessionId = data.session_id || '';
+    $('#session-meta').textContent = `目前階段：${data.intake_stage || '—'}｜保存狀態：${data.status || '—'}`;
+    $('#page-message').textContent = data.status === 'SUBMITTED' ? '你已確認這份資料；若內容有變動，請回 LINE 修改後重新確認。' : '你可以先檢查以下內容；要修改資料請回到 LINE 對話。';
+    renderReview(data); showError('');
+  };
+  const loadSession = async () => {
+    const button = $('#load'); showError(''); setBusy(button, true, '載入中…');
+    try { renderSession(await api('/api/patient/session', {headers: authHeaders()})); }
+    catch (error) { showError(error.message); $('#page-status').textContent = '載入失敗'; $('#page-status').className = 'badge error'; }
+    finally { setBusy(button, false, '載入看診資料'); }
+  };
+  const createShare = async () => {
+    if (!state.sessionId || !state.session || !state.session.review || !state.session.review.can_share) { showError('資料尚未完成確認，請先回 LINE 完成 Review。'); return; }
+    const button = $('#share'); showError(''); setBusy(button, true, '建立中…');
+    try {
+      const data = await api(`/api/patient/sessions/${encodeURIComponent(state.sessionId)}/share`, {method:'POST', headers:{...authHeaders(),'content-type':'application/json'}, body:JSON.stringify({allowed_clinician_id:$('#clinician').value.trim() || null})});
+      state.grantId = data.grant_id || ''; state.grantToken = data.token || '';
+      $('#grant-token').textContent = state.grantToken || '伺服器未回傳分享碼'; $('#grant-expiry').textContent = data.expires_at ? '有效期限：' + new Date(data.expires_at).toLocaleString() : '';
+      $('#grant-status').textContent = '狀態：ACTIVE｜單次使用。若不再分享，請立即撤銷。'; $('#grant-box').classList.remove('hidden');
+    } catch (error) { showError(error.message); }
+    finally { setBusy(button, false, '建立短效分享碼', Boolean(state.session && state.session.review && state.session.review.can_share)); }
+  };
+  const revokeShare = async () => {
+    if (!state.grantId) { showError('目前沒有可撤銷的分享碼。'); return; }
+    const button = $('#revoke'); showError(''); setBusy(button, true, '撤銷中…');
+    let revoked = false;
+    try { const data = await api(`/api/patient/share/${encodeURIComponent(state.grantId)}/revoke`, {method:'POST', headers:authHeaders()}); $('#grant-status').textContent = data.status === 'REVOKED' ? '狀態：已撤銷，醫護無法再使用。' : '狀態：' + (data.status || '已更新'); revoked = data.status === 'REVOKED'; $('#grant-box').classList.remove('success'); $('#grant-box').classList.add('notice'); }
+    catch (error) { showError(error.message); }
+    finally { setBusy(button, false, '立即撤銷', !revoked); }
+  };
+  $('#load').addEventListener('click', loadSession); $('#share').addEventListener('click', createShare); $('#revoke').addEventListener('click', revokeShare);
+  $('#copy').addEventListener('click', async () => { if (!state.grantToken) return; try { await navigator.clipboard.writeText(state.grantToken); $('#grant-status').textContent = '已複製分享碼；請用安全方式交給指定醫護。'; } catch (_) { $('#grant-status').textContent = '無法自動複製，請長按上方分享碼手動複製。'; } });
+  (async () => {
+    try {
+      state.config = await api('/api/line/client-config'); $('#demo-identity').classList.toggle('hidden', !state.config.demo_identity_headers);
+      if (state.config.liff_id) {
+        if (typeof liff === 'undefined') throw new Error('LINE LIFF SDK 載入失敗');
+        await liff.init({liffId: state.config.liff_id});
+        if (!liff.isLoggedIn()) { $('#startup-message').textContent = '請在 LINE 完成登入後再載入資料。'; liff.login(); return; }
+        state.idToken = liff.getIDToken() || ''; if (!state.idToken) throw new Error('LINE 沒有提供有效身分憑證');
+      } else if (!state.config.demo_identity_headers) {
+        $('#startup-message').textContent = '尚未設定 LIFF；正式環境請由 LINE LIFF 開啟，本機 Demo header 目前也未啟用。';
+      }
+    } catch (error) { $('#startup-message').textContent = error.message || 'LINE 登入初始化失敗。'; }
+  })();
+})();
+</script>
+</body>
+</html>
