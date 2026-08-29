@@ -14,11 +14,8 @@ from typing import Any
 from tfda_context_gate.clinical_safety import RiskSignalPolicy
 
 WELCOME_MESSAGE = (
-    "您好！我是糖尿病衛教小幫手，可以幫您：\n"
-    "1. 🥗 糖尿病飲食/運動衛教\n"
-    "2. 💊 藥物資訊查詢\n"
-    "3. 📋 看診前資料整理（幫您整理用藥、症狀、想問醫師的問題）\n"
-    "請問需要什麼協助？"
+    "您好！我是糖尿病衛教小幫手。今天想先做衛教、查藥袋，還是整理看診資料？"
+    "直接告訴我就好。"
 )
 
 WELCOME_QUICK_REPLIES = ["我要準備看診", "飲食衛教", "藥物查詢"]

@@ -21,6 +21,17 @@ from tfda_context_gate.line_orchestration.deadline import (
     deadline_scope,
     run_with_deadline,
 )
+from tfda_context_gate.line_orchestration.response_composer import (
+    compose_correction,
+    compose_implicit_confirmation,
+    compose_intake_question,
+    compose_multi_confirmation,
+    compose_none_answer,
+    compose_question_added,
+    compose_side_answer,
+    compose_single_confirmation,
+    compose_uncertain,
+)
 
 # Task C honest evaluation: interpreter is serial bottleneck before branches; after interpreter,
 # candidate_validation (~1ms) vs education RAG+C (2-45s) could parallelize but gain negligible.
@@ -1465,7 +1476,10 @@ class ConversationOrchestrator:
         if self._is_identity_question(text):
             ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
             session = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
-            reply = "這是 AI 糖尿病衛教／看診前整理助理，不是真人客服，也不提供診斷。緊急狀況如呼吸困難、胸痛、意識不清等，請立即尋求緊急醫療協助（例如撥打 119）。"
+            # P2B changes phrasing only.  The identity pool keeps the same
+            # non-diagnostic/urgent boundaries and rotates within a session;
+            # this path remains before interpreter and never writes intake.
+            reply = fallback_response("IDENTITY", session_id=session.session_id)
             session = self._sync_clinical_context(session)
             ctx_assistant = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
             ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
@@ -1679,9 +1693,7 @@ class ConversationOrchestrator:
                     session.pending_field or self._next_pending_field(session.intake_snapshot)
                 )
                 if pending_question:
-                    reply = (
-                        f"{reply}\n\n資料已保留，想繼續可點「繼續整理」：\n{pending_question}"
-                    )
+                    reply = compose_side_answer(reply, pending_question)
                 context = self.context_manager.append_turn(
                     session.conversation_context, role="assistant", content=reply
                 )
@@ -2286,10 +2298,7 @@ class ConversationOrchestrator:
 
     @staticmethod
     def _question_for_field(field: str | None) -> str | None:
-        if field is None:
-            return None
-        from tfda_context_gate.intake.schemas import INTAKE_FIELD_QUESTIONS
-        return INTAKE_FIELD_QUESTIONS.get(field)
+        return compose_intake_question(field)
 
     @staticmethod
     def _field_stage(field: str | None) -> str:
@@ -2347,7 +2356,7 @@ class ConversationOrchestrator:
             if tgt_field == "allergies" and tgt_val:
                 intake = session.intake_snapshot.model_copy(deep=True)
                 intake.allergies = [tgt_val[:20]]
-                confirm = f"已更新為「{tgt_val}」，其他已填資料保留。"
+                confirm = compose_correction(tgt_val)
                 if _was_truncated and _trunc_marker not in confirm:
                     confirm = f"{confirm} {_trunc_marker}"
                 new_session = session.model_copy(update={"intake_snapshot": intake}, deep=True)
@@ -2357,7 +2366,7 @@ class ConversationOrchestrator:
             if is_correction and "盤尼西林" in text:
                 intake = session.intake_snapshot.model_copy(deep=True)
                 intake.allergies = ["盤尼西林"]
-                confirm = f"已更新為「盤尼西林」，其他已填資料保留。"
+                confirm = compose_correction("盤尼西林")
                 if _was_truncated and _trunc_marker not in confirm:
                     confirm = f"{confirm} {_trunc_marker}"
                 new_session = session.model_copy(update={"intake_snapshot": intake}, deep=True)
@@ -2374,7 +2383,7 @@ class ConversationOrchestrator:
                 else:
                     if proposal and proposal not in intake.questions_for_doctor and len(intake.questions_for_doctor) < 10:
                         intake.questions_for_doctor = [*intake.questions_for_doctor, proposal]
-                        confirm = f"你說的「{text.strip()[:30]}」我已幫你加到「想問醫師的問題」，其他資料保留。"
+                        confirm = compose_question_added(text)
                         if _was_truncated and _trunc_marker not in confirm:
                             confirm = f"{confirm} {_trunc_marker}"
                         return session.model_copy(update={"intake_snapshot": intake, "pending_action": None}, deep=True), confirm
@@ -2402,7 +2411,7 @@ class ConversationOrchestrator:
                     intake.symptom_severity = mapped
                     new_sess = session.model_copy(update={"intake_snapshot": intake, "pending_action": None, "pending_severity_raw": None}, deep=True)
                     from tfda_context_gate.intake.tool import build_implicit_confirm
-                    confirm = build_implicit_confirm(text, mapped)
+                    confirm = compose_implicit_confirmation(build_implicit_confirm(text, mapped))
                     if _was_truncated and _trunc_marker not in confirm:
                         confirm = f"{confirm} {_trunc_marker}"
                     return new_sess, confirm
@@ -2562,7 +2571,7 @@ class ConversationOrchestrator:
                     else:
                         parts.append(str(vv))
                 norm_joined = "；".join(parts)
-                confirm = f"已更新為「{norm_joined}」（{labels}），其他已填資料保留。"
+                confirm = compose_correction(norm_joined, labels)
                 if _was_truncated and _trunc_marker not in confirm:
                     confirm = f"{confirm} {_trunc_marker}"
                 new_sess = session.model_copy(update={"intake_snapshot": intake}, deep=True)
@@ -2573,12 +2582,12 @@ class ConversationOrchestrator:
                 if len(valid) == 1:
                     f = next(iter(valid))
                     label = label_map.get(f, f)
-                    confirm = f"你說的「{raw_snip}」我記在「{label}」"
+                    confirm = compose_single_confirmation(raw_snip, label)
                 else:
                     base = build_implicit_confirm_for_fields(valid, raw_text=text)
                     labels = "、".join(label_map.get(k, k) for k in valid)
                     if base:
-                        confirm = f"{base}（已分別記在「{labels}」）"
+                        confirm = compose_multi_confirmation(base, labels)
                     else:
                         norm_parts = []
                         for vv in valid.values():
@@ -2586,13 +2595,14 @@ class ConversationOrchestrator:
                                 norm_parts.append("、".join(str(x) for x in vv))
                             else:
                                 norm_parts.append(str(vv))
-                        confirm = build_implicit_confirm(text, "；".join(norm_parts))
+                        confirm = compose_implicit_confirmation(build_implicit_confirm(text, "；".join(norm_parts)))
             else:
-                confirm = build_implicit_confirm_for_fields(valid, raw_text=text)
-                if confirm is None:
+                base = build_implicit_confirm_for_fields(valid, raw_text=text)
+                if base is None:
                     first_val = next(iter(valid.values()))
                     norm = "、".join(str(x) for x in first_val) if isinstance(first_val, list) else str(first_val)
-                    confirm = build_implicit_confirm(text, norm)
+                    base = build_implicit_confirm(text, norm)
+                confirm = compose_implicit_confirmation(base)
             if _was_truncated and _trunc_marker not in confirm:
                 confirm = f"{confirm} {_trunc_marker}"
             new_sess = session.model_copy(update={"intake_snapshot": intake}, deep=True)
@@ -2612,7 +2622,7 @@ class ConversationOrchestrator:
                             elif isinstance(v, str) and len(v) > limit:
                                 v = v[:limit]
                             setattr(intake, k, v)
-                            confirm = f"已更新為「{str(v)[:30]}」，其他已填資料保留。"
+                            confirm = compose_correction(str(v)[:30])
                             return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
             pending_q = session.pending_question or cls._question_for_field(field)
             if pending_q:
@@ -2649,16 +2659,14 @@ class ConversationOrchestrator:
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
             } else "不清楚（待看診確認）"
             setattr(intake, field, value)
-            return session.model_copy(update={"intake_snapshot": intake}, deep=True), (
-                "沒關係，我先把這一項標成「待看診確認」，不會替你猜。"
-            )
+            return session.model_copy(update={"intake_snapshot": intake}, deep=True), compose_uncertain(symptom=False)
 
         if none_answer:
             value = ["無"] if field in {
                 "known_medications", "allergies", "chronic_conditions", "family_history"
             } else (["目前沒有特別想問的問題"] if field == "questions_for_doctor" else "目前沒有")
             setattr(intake, field, value)
-            return session.model_copy(update={"intake_snapshot": intake}, deep=True), "好，已記下目前沒有。"
+            return session.model_copy(update={"intake_snapshot": intake}, deep=True), compose_none_answer()
 
         if text.strip():
             stripped = text.strip()
@@ -2705,7 +2713,7 @@ class ConversationOrchestrator:
                                 intake.symptom_onset = _ext2["symptom_onset"]
                             from tfda_context_gate.intake.tool import build_implicit_confirm as _bic
 
-                            _conf = _bic(text, _desc)
+                            _conf = compose_implicit_confirmation(_bic(text, _desc))
                             if _was_truncated and _trunc_marker not in _conf:
                                 _conf = f"{_conf} {_trunc_marker}"
                             return session.model_copy(update={"intake_snapshot": intake}, deep=True), _conf
@@ -2713,7 +2721,7 @@ class ConversationOrchestrator:
                         intake.symptom_description = stripped[:2000]
                         from tfda_context_gate.intake.tool import build_implicit_confirm as _bic2
 
-                        _conf2 = _bic2(text, stripped[:25])
+                        _conf2 = compose_implicit_confirmation(_bic2(text, stripped[:25]))
                         if _was_truncated and _trunc_marker not in _conf2:
                             _conf2 = f"{_conf2} {_trunc_marker}"
                         return session.model_copy(update={"intake_snapshot": intake}, deep=True), _conf2
@@ -2745,7 +2753,7 @@ class ConversationOrchestrator:
             else:
                 norm_str = str(direct)
             from tfda_context_gate.intake.tool import build_implicit_confirm
-            confirm = build_implicit_confirm(text, norm_str)
+            confirm = compose_implicit_confirmation(build_implicit_confirm(text, norm_str))
             if _was_truncated and _trunc_marker not in confirm:
                 confirm = f"{confirm} {_trunc_marker}"
             return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
