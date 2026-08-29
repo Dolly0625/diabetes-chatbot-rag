@@ -564,6 +564,13 @@ def _push_text(
     *,
     deadline_guard: Any | None = None,
 ) -> bool:
+    if deadline_guard is None:
+        try:
+            from tfda_context_gate.e_observability.deadline import current_deadline_guard
+
+            deadline_guard = current_deadline_guard()
+        except Exception:
+            deadline_guard = None
     if not line_user_id or not text:
         return False
     if deadline_guard is not None and deadline_guard.should_abort():
@@ -646,6 +653,13 @@ def _maybe_record_question_for_doctor(
     deadline_guard: Any | None = None,
 ) -> None:
     try:
+        if deadline_guard is None:
+            try:
+                from tfda_context_gate.e_observability.deadline import current_deadline_guard
+
+                deadline_guard = current_deadline_guard()
+            except Exception:
+                deadline_guard = None
         if deadline_guard is not None and deadline_guard.should_abort():
             return
         status = getattr(workflow, "status", None) or (workflow.get("status") if isinstance(workflow, dict) else None)

@@ -693,6 +693,7 @@ class ConversationOrchestrator:
         push_sender: PushSender | None = None,
         deadline_guard: DeadlineGuard | None = None,
     ) -> bool:
+        deadline_guard = deadline_guard or current_deadline_guard()
         if event_id and self._is_duplicate_push(event_id):
             return False
         if event_id and not self._begin_push(event_id):
