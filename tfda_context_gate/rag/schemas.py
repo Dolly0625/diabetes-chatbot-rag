@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from tfda_context_gate.b_context_gate.schemas import CanonicalEvidence
@@ -34,6 +36,14 @@ class RAGResult(StrictModel):
     retrieval_queries: list[str] = Field(min_length=1)  # 檢索查詢列表（至少 1 筆）
     evidence: list[CanonicalEvidence] = Field(default_factory=list)  # 檢索證據清單
     retrieval_latency_ms: float | None = Field(default=None, ge=0)  # 檢索耗時（毫秒）
+    # External RetrievalResponse envelope.  Optional defaults preserve every
+    # existing in-process retriever while allowing the cross-team adapter to
+    # carry status and warnings into Context Gate B.
+    retrieval_status: Literal["SUCCESS", "EMPTY", "PARTIAL", "STALE", "CONFLICT", "ERROR"] | None = None
+    retrieval_route: Literal["VECTOR", "GRAPH", "HYBRID"] | None = None
+    graph_path_status: Literal["COMPLETE", "PARTIAL"] | None = None
+    rerun_suggested: bool = False
+    warnings: list[str] = Field(default_factory=list)
 
 
 def rag_to_b_input(rag_result: RAGResult):
@@ -50,9 +60,21 @@ def rag_to_b_input(rag_result: RAGResult):
 
     from tfda_context_gate.b_context_gate.schemas import CanonicalBInput
 
+    tool_context = {
+        key: value
+        for key, value in {
+            "retrieval_status": rag_result.retrieval_status,
+            "retrieval_route": rag_result.retrieval_route,
+            "graph_path_status": rag_result.graph_path_status,
+            "rerun_suggested": rag_result.rerun_suggested,
+            "warnings": list(rag_result.warnings),
+        }.items()
+        if value not in (None, [], False)
+    }
     return CanonicalBInput(
         request_id=rag_result.request_id,
         original_query=rag_result.original_query,
         retrieval_queries=rag_result.retrieval_queries,
         evidence=rag_result.evidence,
+        tool_context=tool_context,
     )

@@ -13,6 +13,7 @@ langgraph
 langchain-community
 langchain-classic
 langchain-huggingface
+langchain-openai
 langchain-openrouter==0.1.0
 langchain-ollama
 sentence-transformers

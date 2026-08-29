@@ -445,7 +445,7 @@ class ConversationInterpreterFactory:
         from tfda_context_gate.run_config import env_value
 
         # 保存 LINE 相關 env 以免 load_dotenv override 破壞測試 hermetic
-        _line_keys = ["LINE_CHANNEL_SECRET", "LINE_ALLOW_UNSIGNED_WEBHOOK", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_ACCESS_TOKEN", "LINE_CHANNEL_TOKEN", "LINE_IDENTITY_HASH_KEY", "LINE_SESSION_DB_PATH"]
+        _line_keys = ["LINE_CHANNEL_SECRET", "LINE_ALLOW_UNSIGNED_WEBHOOK", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_ACCESS_TOKEN", "LINE_CHANNEL_TOKEN", "LINE_IDENTITY_HASH_KEY", "LINE_SESSION_DB_PATH", "LINE_USE_FORMAL", "LINE_CALLBACK_URL"]
         _saved = {k: os.getenv(k) for k in _line_keys}
         try:
             conv_model = (env_value("CONVERSATION_LLM_MODEL", "") or "").strip()
@@ -487,7 +487,7 @@ class FormalConversationInterpreter:
         from tfda_context_gate.run_config import env_value, PROJECT_ROOT
 
         # 保存 LINE env
-        _line_keys = ["LINE_CHANNEL_SECRET", "LINE_ALLOW_UNSIGNED_WEBHOOK", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_IDENTITY_HASH_KEY", "LINE_SESSION_DB_PATH"]
+        _line_keys = ["LINE_CHANNEL_SECRET", "LINE_ALLOW_UNSIGNED_WEBHOOK", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_IDENTITY_HASH_KEY", "LINE_SESSION_DB_PATH", "LINE_USE_FORMAL", "LINE_CALLBACK_URL"]
         _saved = {k: os.getenv(k) for k in _line_keys}
         try:
             from dotenv import load_dotenv

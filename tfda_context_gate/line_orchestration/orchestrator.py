@@ -594,10 +594,14 @@ class ConversationOrchestrator:
         self._last_envelope: Any | None = None
         if use_formal is None:
             env_val = os.getenv("LINE_USE_FORMAL")
-            if env_val is not None:
-                self.use_formal = env_val.lower() in ("1", "true", "yes")
-            elif os.getenv("PYTEST_CURRENT_TEST") is not None:
+            # Pytest must remain hermetic even when a developer's project
+            # .env enables the live formal path.  A test that intentionally
+            # exercises formal construction passes use_formal=True or removes
+            # PYTEST_CURRENT_TEST explicitly.
+            if os.getenv("PYTEST_CURRENT_TEST") is not None:
                 self.use_formal = False
+            elif env_val is not None:
+                self.use_formal = env_val.lower() in ("1", "true", "yes")
             else:
                 self.use_formal = LINE_USE_FORMAL_DEFAULT
         else:

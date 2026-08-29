@@ -58,6 +58,8 @@ def env_value(name: str, default: str | None = None) -> str | None:
         "LINE_LIFF_ID",
         "LINE_DEMO_MODE",
         "DEMO_CLINICIAN_IDS",
+        "LINE_USE_FORMAL",
+        "LINE_CALLBACK_URL",
     )
     _saved = {k: os.getenv(k) for k in _preserve_keys}
     try:
