@@ -50,6 +50,8 @@ _pushed_events: set[str] = set()
 # failed transport so a later retry can safely attempt the same event again;
 # successful sends move to ``_pushed_events`` permanently for this process.
 _pushing_events: set[str] = set()
+_marker_pending_events: set[str] = set()
+_marker_retrying_events: set[str] = set()
 _pushed_lock = threading.Lock()
 _async_jobs: set[str] = set()
 _async_jobs_lock = threading.Lock()
@@ -516,17 +518,28 @@ def _format_formal_push_text(workflow: Any, original_text: str = "") -> str:
 def _is_duplicate_push(event_id: str | None, repository: Any | None = None) -> bool:
     if not event_id:
         return False
+    marker_retry_needed = False
     with _pushed_lock:
         if event_id in _pushed_events:
-            return True
+            marker_retry_needed = event_id in _marker_pending_events
+    if marker_retry_needed:
+        # The external transport already acknowledged this event.  Repairing
+        # its durable marker must never send the LINE message a second time.
+        _mark_event_pushed(repository, event_id)
+        return True
     if repository is not None:
         try:
             record = repository.get_webhook_event(event_id)
-            return bool(
+            durable = bool(
                 record is not None
                 and isinstance(record.result, dict)
                 and record.result.get("pushed") is True
             )
+            if durable:
+                with _pushed_lock:
+                    _pushed_events.add(event_id)
+                    _marker_pending_events.discard(event_id)
+            return durable
         except Exception:
             pass
     return False
@@ -633,18 +646,37 @@ def _push_text(
     return False
 
 
-def _mark_event_pushed(orchestrator: Any | None, event_id: str | None) -> None:
+def _mark_event_pushed(orchestrator: Any | None, event_id: str | None) -> bool:
     """Persist the post-transport push marker when the repository supports it."""
 
     if orchestrator is None or not event_id:
-        return
+        return False
     try:
         repository = getattr(orchestrator, "repository", None)
+        if repository is None and callable(getattr(orchestrator, "mark_webhook_event_pushed", None)):
+            repository = orchestrator
         marker = getattr(repository, "mark_webhook_event_pushed", None)
-        if callable(marker):
-            marker(event_id)
+        if not callable(marker):
+            return True
+        with _pushed_lock:
+            if event_id in _marker_retrying_events:
+                return False
+            _marker_retrying_events.add(event_id)
+        try:
+            record = marker(event_id)
+            if record is None:
+                raise RuntimeError("webhook event marker returned no record")
+            with _pushed_lock:
+                _marker_pending_events.discard(event_id)
+            return True
+        finally:
+            with _pushed_lock:
+                _marker_retrying_events.discard(event_id)
     except Exception:
+        with _pushed_lock:
+            _marker_pending_events.add(event_id)
         logger.warning("could not persist push marker for %s", event_id)
+        return False
 
 
 def _maybe_record_question_for_doctor(
@@ -912,12 +944,10 @@ def _schedule_formal_push(
     if not _FORMAL_SEMAPHORE.acquire(blocking=False):
         with _async_jobs_lock:
             _async_jobs.discard(event_id)
-        if not job_guard.should_abort() and not _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
-            try:
-                if _push_text(line_user_id, ASYNC_ADMISSION_FALLBACK_TEXT, event_id=event_id):
-                    _mark_event_pushed(orchestrator, event_id)
-            except Exception:
-                pass
+        # Fail closed at admission.  Never synchronously call LINE from the
+        # webhook caller when the async workers are saturated; the pending
+        # event remains replayable and a later webhook can retry admission.
+        logger.warning("async formal admission rejected for %s", event_id[:8])
         return
 
     def _bg() -> None:

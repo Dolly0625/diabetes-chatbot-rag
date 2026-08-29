@@ -188,6 +188,127 @@ def test_orchestrator_push_replay_is_exactly_once_and_durable(tmp_path: Path):
     assert record is not None and record.result and record.result.get("pushed") is True
 
 
+def test_orchestrator_marker_failure_retries_marker_without_transport_retry(
+    tmp_path: Path, monkeypatch
+):
+    repo = SQLiteProductSessionRepository(tmp_path / "orchestrator-marker-retry.sqlite3")
+    orch = ConversationOrchestrator(
+        repo,
+        identity_hash_key=_KEY,
+        interpreter=DeterministicConversationInterpreter(),
+        use_formal=False,
+    )
+    claim = repo.claim_webhook_event("orchestrator-marker-event", orch._hash("U-marker-orch"))
+    assert claim
+    repo.complete_webhook_event(
+        "orchestrator-marker-event",
+        {
+            "event_id": "orchestrator-marker-event",
+            "session_id": "s",
+            "reply": "placeholder",
+            "status": "ASYNC_PENDING",
+        },
+        claim_token=claim,
+    )
+    original_marker = repo.mark_webhook_event_pushed
+    marker_calls = 0
+
+    def flaky_marker(event_id: str):
+        nonlocal marker_calls
+        marker_calls += 1
+        if marker_calls == 1:
+            raise RuntimeError("temporary database failure")
+        return original_marker(event_id)
+
+    monkeypatch.setattr(repo, "mark_webhook_event_pushed", flaky_marker)
+    from tfda_context_gate.line_orchestration import orchestrator as orchestrator_module
+
+    orchestrator_module._pushed_events.clear()
+    orchestrator_module._pushing_events.clear()
+    orchestrator_module._marker_pending_events.clear()
+    orchestrator_module._marker_retrying_events.clear()
+    transport_calls: list[str] = []
+    wf = _workflow({"request_id": "orchestrator-marker-event", "user_raw_input": "answer"}, "answer")
+
+    assert orch.push_formal_result(
+        line_user_id="U-marker-orch",
+        event_id="orchestrator-marker-event",
+        workflow=wf,
+        original_text="answer",
+        push_sender=lambda _uid, text: transport_calls.append(text) or True,
+    ) is True
+    assert transport_calls == ["answer"]
+    assert marker_calls == 1
+    record = repo.get_webhook_event("orchestrator-marker-event")
+    assert record is not None and record.result and record.result.get("pushed") is not True
+
+    # The local delivered marker suppresses a second transport call, while
+    # _is_duplicate_push retries only the durable marker.
+    assert orch.push_formal_result(
+        line_user_id="U-marker-orch",
+        event_id="orchestrator-marker-event",
+        workflow=wf,
+        original_text="answer",
+        push_sender=lambda _uid, text: transport_calls.append(text) or True,
+    ) is False
+    assert marker_calls == 2
+    assert transport_calls == ["answer"]
+    record = repo.get_webhook_event("orchestrator-marker-event")
+    assert record is not None and record.result and record.result.get("pushed") is True
+
+
+def test_line_marker_failure_retries_marker_without_transport_retry(tmp_path: Path, monkeypatch):
+    import line_bot.app as line_app
+
+    repo = SQLiteProductSessionRepository(tmp_path / "line-marker-retry.sqlite3")
+    orch = ConversationOrchestrator(
+        repo,
+        identity_hash_key=_KEY,
+        interpreter=DeterministicConversationInterpreter(),
+        use_formal=False,
+    )
+    claim = repo.claim_webhook_event("line-marker-event", orch._hash("U-marker-line"))
+    assert claim
+    repo.complete_webhook_event(
+        "line-marker-event",
+        {"event_id": "line-marker-event", "session_id": "s", "reply": "placeholder", "status": "ASYNC_PENDING"},
+        claim_token=claim,
+    )
+    original_marker = repo.mark_webhook_event_pushed
+    marker_calls = 0
+
+    def flaky_marker(event_id: str):
+        nonlocal marker_calls
+        marker_calls += 1
+        if marker_calls == 1:
+            raise RuntimeError("temporary database failure")
+        return original_marker(event_id)
+
+    monkeypatch.setattr(repo, "mark_webhook_event_pushed", flaky_marker)
+    line_app._pushed_events.clear()
+    line_app._pushing_events.clear()
+    line_app._marker_pending_events.clear()
+    line_app._marker_retrying_events.clear()
+    transport_calls: list[str] = []
+
+    class FakeApi:
+        def push_message(self, request, **kwargs):
+            transport_calls.append(request.messages[0].text)
+
+    monkeypatch.setattr(line_app, "_get_messaging_api", lambda: FakeApi())
+    assert line_app._push_text("U-marker-line", "answer", event_id="line-marker-event") is True
+    assert line_app._mark_event_pushed(orch, "line-marker-event") is False
+    assert marker_calls == 1
+    assert transport_calls == ["answer"]
+
+    assert line_app._is_duplicate_push("line-marker-event", repo) is True
+    assert marker_calls == 2
+    assert line_app._push_text("U-marker-line", "answer", event_id="line-marker-event") is False
+    assert transport_calls == ["answer"]
+    record = repo.get_webhook_event("line-marker-event")
+    assert record is not None and record.result and record.result.get("pushed") is True
+
+
 def test_async_spawn_guard_reaches_nested_workflow_and_push(tmp_path: Path):
     """The manually-created async thread must propagate its job guard."""
 
@@ -232,7 +353,7 @@ def test_async_spawn_guard_reaches_nested_workflow_and_push(tmp_path: Path):
 
 
 def test_orchestrator_saturated_admission_creates_no_delayed_threads(tmp_path: Path, monkeypatch):
-    """Thirty rejected jobs fail closed without thirty delayed daemon threads."""
+    """Thirty rejected jobs fail closed without push blocking or threads."""
 
     import tfda_context_gate.line_orchestration.orchestrator as orchestrator_module
 
@@ -257,16 +378,24 @@ def test_orchestrator_saturated_admission_creates_no_delayed_threads(tmp_path: P
     )
     session = orch._load_or_create("U-orch-saturation")
     pushes: list[str] = []
+
+    def slow_push(_user: str, text: str) -> bool:
+        time.sleep(0.2)
+        pushes.append(text)
+        return True
+
+    started = time.monotonic()
     for index in range(30):
         orch._spawn_async_formal(
             event_id=f"orch-saturated-{index}",
             line_user_id="U-orch-saturation",
             text="糖尿病可以吃水果嗎？",
             session_id=session.session_id,
-            push_sender=lambda _user, text: pushes.append(text) or True,
+            push_sender=slow_push,
         )
     assert created == 0
-    assert len(pushes) == 30
+    assert pushes == []
+    assert time.monotonic() - started < 0.5
 
 
 def test_line_saturated_admission_creates_no_delayed_threads(tmp_path: Path, monkeypatch):
@@ -287,7 +416,12 @@ def test_line_saturated_admission_creates_no_delayed_threads(tmp_path: Path, mon
         raise AssertionError("saturated admission must not create a delayed thread")
 
     monkeypatch.setattr(line_app.threading, "Thread", forbidden_thread)
-    monkeypatch.setattr(line_app, "_push_text", lambda _user, text, event_id=None, **_kwargs: scheduled.append(text) or True)
+    def slow_push(_user, text, event_id=None, **_kwargs):
+        time.sleep(0.2)
+        scheduled.append(text)
+        return True
+
+    monkeypatch.setattr(line_app, "_push_text", slow_push)
     line_app._text_dedup.clear()
     line_app._async_jobs.clear()
     repo = SQLiteProductSessionRepository(tmp_path / "line-saturation.sqlite3")
@@ -297,6 +431,7 @@ def test_line_saturated_admission_creates_no_delayed_threads(tmp_path: Path, mon
         interpreter=DeterministicConversationInterpreter(),
         use_formal=True,
     )
+    started = time.monotonic()
     for index in range(30):
         line_app._schedule_formal_push(
             orch,
@@ -305,7 +440,8 @@ def test_line_saturated_admission_creates_no_delayed_threads(tmp_path: Path, mon
             f"糖尿病可以吃水果嗎？第{index}次",
         )
     assert created == 0
-    assert len(scheduled) == 30
+    assert scheduled == []
+    assert time.monotonic() - started < 0.5
 
 
 def test_pending_async_replay_reschedules_without_duplicate_turns(tmp_path: Path):

@@ -53,6 +53,8 @@ ASYNC_FORMAL_TIMEOUT_S_ALIAS = ASYNC_FORMAL_TIMEOUT_S
 # provides cross-process durability; this set prevents duplicate push within same process.
 _pushed_events: set[str] = set()
 _pushing_events: set[str] = set()
+_marker_pending_events: set[str] = set()
+_marker_retrying_events: set[str] = set()
 _pushed_lock = threading.Lock()
 _async_jobs: set[str] = set()
 _async_jobs_lock = threading.Lock()
@@ -675,12 +677,21 @@ class ConversationOrchestrator:
         return _timeout_workflow_result(request_id, current_query)
 
     def _is_duplicate_push(self, event_id: str) -> bool:
+        marker_retry_needed = False
         with _pushed_lock:
             if event_id in _pushed_events:
-                return True
+                marker_retry_needed = event_id in _marker_pending_events
+        if marker_retry_needed:
+            # Transport already acknowledged this event.  A marker retry may
+            # repair durability, but it must never call the transport again.
+            self._mark_event_pushed(event_id)
+            return True
         try:
             rec = self.repository.get_webhook_event(event_id)
             if rec is not None and rec.status == "COMPLETED" and isinstance(rec.result, dict) and rec.result.get("pushed"):
+                with _pushed_lock:
+                    _pushed_events.add(event_id)
+                    _marker_pending_events.discard(event_id)
                 return True
         except Exception:
             pass
@@ -760,13 +771,29 @@ class ConversationOrchestrator:
             if success:
                 _pushed_events.add(event_id)
 
-    def _mark_event_pushed(self, event_id: str) -> None:
+    def _mark_event_pushed(self, event_id: str) -> bool:
+        marker = getattr(self.repository, "mark_webhook_event_pushed", None)
+        if not callable(marker):
+            return True
+        with _pushed_lock:
+            if event_id in _marker_retrying_events:
+                return False
+            _marker_retrying_events.add(event_id)
         try:
-            marker = getattr(self.repository, "mark_webhook_event_pushed", None)
-            if callable(marker):
-                marker(event_id)
+            record = marker(event_id)
+            if record is None:
+                raise RuntimeError("webhook event marker returned no record")
+            with _pushed_lock:
+                _marker_pending_events.discard(event_id)
+            return True
         except Exception:
+            with _pushed_lock:
+                _marker_pending_events.add(event_id)
             logger.warning("could not persist push marker for %s", event_id)
+            return False
+        finally:
+            with _pushed_lock:
+                _marker_retrying_events.discard(event_id)
 
     def _push_with_retry(
         self,
@@ -1126,18 +1153,12 @@ class ConversationOrchestrator:
         if not _FORMAL_SEMAPHORE.acquire(blocking=False):
             with _async_jobs_lock:
                 _async_jobs.discard(event_id)
-            if not self._is_duplicate_push(event_id):
-                try:
-                    ok = self._push_with_retry(
-                        line_user_id,
-                        ASYNC_ADMISSION_FALLBACK_TEXT,
-                        event_id=event_id,
-                        push_sender=push_sender,
-                    )
-                    if ok:
-                        return
-                except Exception:
-                    pass
+            # Fail closed at admission.  In particular, do not synchronously
+            # call a custom sender from the webhook thread: a slow sender
+            # would defeat the async timeout and scale one blocked request per
+            # saturated event.  The durable ASYNC_PENDING event remains
+            # replayable; a later webhook replay can retry admission.
+            logger.warning("async formal admission rejected for %s", event_id[:8])
             return
 
         def _background() -> None:
