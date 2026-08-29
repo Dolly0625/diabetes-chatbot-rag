@@ -1188,7 +1188,26 @@ async def callback(
                     _send(reply_token, reply, quick_actions=quick_actions)
                     _mark_text_dedup(str(user_id), text)
                 else:
-                    if _should_use_async_formal(text, None) and not _is_duplicate_push(str(webhook_event_id) if webhook_event_id else None):
+                    # P0.5 fail-closed: no ProductSession → pre-visit must not start, general education may degrade; red flag remains priority
+                    try:
+                        from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _RB2
+                        from tfda_context_gate.clinical_safety import RiskSignalPolicy as _RSP2
+                        is_red = _RSP2().classify(text).level == "RED_FLAG"
+                    except Exception:
+                        is_red = False
+                    try:
+                        from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _RBPre2
+                        is_pre_visit2 = _RBPre2.is_pre_visit_intake_text(text)
+                    except Exception:
+                        is_pre_visit2 = any(kw in text for kw in ["準備看診", "我要.*看診", "看醫生", "回診"])
+                    if is_red:
+                        from tfda_context_gate.workflow.fallbacks import fallback_response as _fb
+                        _send(reply_token, _fb("A_EMERGENCY"))
+                        _mark_text_dedup(str(user_id), text)
+                    elif is_pre_visit2:
+                        _send(reply_token, "目前無法安全開始整理，請先完成身分與授權設定後再試。")
+                        _mark_text_dedup(str(user_id), text)
+                    elif _should_use_async_formal(text, None) and not _is_duplicate_push(str(webhook_event_id) if webhook_event_id else None):
                         if _is_text_duplicate(str(user_id), text):
                             _send(reply_token, _dedup_reply_for(text))
                         else:
@@ -1231,13 +1250,8 @@ async def callback(
                         pass
                     quick_actions = _quick_actions_for_status(product_result.status, reply)
                 else:
-                    # OCR + 單輪相容工作流（raw image 永不存入 state）
-                    result = handle_image_message(
-                        image_bytes,
-                        text_fallback="請幫我辨識藥袋上的藥品",
-                        request_id=f"line-img-{user_id[:8]}-{uuid.uuid4().hex[:4]}",
-                    )
-                    reply = getattr(result, "final_response", str(result))
+                    # P0.5 fail-closed: no ProductSession → image/OCR must not start intake
+                    reply = "目前無法安全開始整理，請先完成身分與授權設定後再試。"
                     quick_actions = None
                 # Optionally include OCR hint if available in trace
                 _send(reply_token, reply, quick_actions=quick_actions)
