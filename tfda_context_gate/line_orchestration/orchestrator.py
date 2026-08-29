@@ -15,7 +15,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tfda_context_gate.line_orchestration.latency import StagedLatencyRecorder
-from tfda_context_gate.line_orchestration.deadline import DeadlineGuard, current_deadline_guard, run_with_deadline
+from tfda_context_gate.line_orchestration.deadline import (
+    DeadlineGuard,
+    current_deadline_guard,
+    deadline_scope,
+    run_with_deadline,
+)
 
 # Task C honest evaluation: interpreter is serial bottleneck before branches; after interpreter,
 # candidate_validation (~1ms) vs education RAG+C (2-45s) could parallelize but gain negligible.
@@ -32,6 +37,7 @@ LINE_USE_FORMAL_DEFAULT = os.getenv("LINE_USE_FORMAL", "true").lower() in ("1", 
 # ── Async formal push: honest fallback + idempotency ─────────────────────────
 HONEST_FALLBACK_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
+ASYNC_ADMISSION_FALLBACK_TEXT = "目前同時查詢較多，這次無法完成查詢，請稍後再試。"
 # Canonical async boundary classification.  Legacy FORMAL_TIMEOUT and
 # SYSTEM_DEPENDENCY remain accepted for stored v0.1 records.
 DEPENDENCY_OR_TIMEOUT_REASON = "DEPENDENCY_OR_TIMEOUT"
@@ -48,9 +54,11 @@ ASYNC_FORMAL_TIMEOUT_S_ALIAS = ASYNC_FORMAL_TIMEOUT_S
 _pushed_events: set[str] = set()
 _pushing_events: set[str] = set()
 _pushed_lock = threading.Lock()
+_async_jobs: set[str] = set()
+_async_jobs_lock = threading.Lock()
 # P3-R4 bounded concurrency for async formal: global semaphore limits concurrent
-# formal background executions to 5; excess tasks block inside thread (FIFO queue)
-# while placeholder reply returns immediately (<1s).
+# formal background executions to 5; excess tasks fail closed before a thread
+# is created while placeholder reply returns immediately (<1s).
 _FORMAL_SEMAPHORE = threading.Semaphore(5)
 logger = logging.getLogger(__name__)
 
@@ -509,6 +517,24 @@ def _timeout_workflow_result(
     )
 
 
+def _replayable_orchestrator_result(event_id: str, payload: dict[str, Any]) -> OrchestratorResult:
+    """Validate only the public result fields from a durable event payload.
+
+    Async replay metadata (the original text and session id) deliberately
+    lives beside the public result.  It must never leak into the strict
+    ``OrchestratorResult`` response model.
+    """
+
+    allowed = set(OrchestratorResult.model_fields)
+    data = {key: value for key, value in payload.items() if key in allowed}
+    data.setdefault("event_id", event_id)
+    data.setdefault("session_id", "unknown-session")
+    data.setdefault("reply", "此訊息正在處理中，請稍候。")
+    data.setdefault("status", "PROCESSING")
+    data["replayed"] = True
+    return OrchestratorResult.model_validate(data)
+
+
 class ConversationOrchestrator:
     """LINE 產品狀態編排；醫療決策仍完全交給固定 workflow。"""
 
@@ -659,6 +685,63 @@ class ConversationOrchestrator:
         except Exception:
             pass
         return False
+
+    def _recover_pending_async_text(self, session_id: str) -> str | None:
+        """Recover a pending event's original user text after a restart.
+
+        New records persist ``async_original_text`` beside the public result.
+        The context fallback keeps old records recoverable without treating a
+        replay's possibly different request body as the original event.
+        """
+
+        try:
+            session = self.repository.get(session_id)
+            if session is None:
+                return None
+            turns = session.conversation_context.recent_turns
+            for index in range(len(turns) - 1, -1, -1):
+                turn = turns[index]
+                if turn.role != "assistant":
+                    continue
+                if (
+                    "查詢中" not in turn.content
+                    and "查詢" not in turn.content
+                    and "衛教資料中" not in turn.content
+                ):
+                    continue
+                for previous in reversed(turns[:index]):
+                    if previous.role == "user":
+                        return previous.content
+        except Exception:
+            return None
+        return None
+
+    def _reschedule_pending_async_event(
+        self,
+        *,
+        event_id: str,
+        line_user_id: str,
+        payload: dict[str, Any],
+        push_sender: PushSender | None = None,
+    ) -> None:
+        """Re-admit an unfinished async event without appending turns."""
+
+        if payload.get("pushed") is True or payload.get("status") not in {"ASYNC_PENDING", "ASYNC_PLACEHOLDER"}:
+            return
+        session_id = str(payload.get("session_id") or self._session_id(line_user_id))
+        original_text = payload.get("async_original_text")
+        if not isinstance(original_text, str) or not original_text.strip():
+            original_text = self._recover_pending_async_text(session_id)
+        if not original_text:
+            logger.warning("cannot reschedule async event %s: original text unavailable", event_id[:8])
+            return
+        self._spawn_async_formal(
+            event_id=event_id,
+            line_user_id=line_user_id,
+            text=original_text,
+            session_id=session_id,
+            push_sender=push_sender,
+        )
 
     def _mark_pushed(self, event_id: str) -> None:
         with _pushed_lock:
@@ -883,6 +966,14 @@ class ConversationOrchestrator:
     ) -> None:
         if self._is_duplicate_push(event_id):
             return
+        # A replay in the same process must not start a second formal job
+        # while the first one is still running.  This set is only an admission
+        # guard; the durable ``pushed`` marker remains the replay authority
+        # across process restarts.
+        with _async_jobs_lock:
+            if event_id in _async_jobs:
+                return
+            _async_jobs.add(event_id)
         # One job-wide guard owns the complete background task.  A timed-out
         # dependency is abandoned; its eventual result must not be converted
         # into a late push or ProductSession write.
@@ -929,6 +1020,10 @@ class ConversationOrchestrator:
                         self.prepare_formal_push_text(timeout_workflow, text),
                         event_id=event_id,
                         push_sender=push_sender,
+                        # The abandoned workflow guard must not suppress the
+                        # safe timeout notice.  This is a fresh, short guard;
+                        # it is not allowed to persist the abandoned result.
+                        deadline_guard=DeadlineGuard(5.0),
                     )
                     return
                 except Exception as exc:  # noqa: BLE001
@@ -1025,38 +1120,47 @@ class ConversationOrchestrator:
                 if _should_push_honest_fallback(workflow):
                     self._maybe_record_question_for_doctor(line_user_id, text, workflow, deadline_guard=spawn_guard)
 
+        # Admission happens before creating a thread.  When all five workers
+        # are occupied we fail closed with one event-owned safe notice; there
+        # is no unbounded per-request delayed-thread queue.
+        if not _FORMAL_SEMAPHORE.acquire(blocking=False):
+            with _async_jobs_lock:
+                _async_jobs.discard(event_id)
+            if not self._is_duplicate_push(event_id):
+                try:
+                    ok = self._push_with_retry(
+                        line_user_id,
+                        ASYNC_ADMISSION_FALLBACK_TEXT,
+                        event_id=event_id,
+                        push_sender=push_sender,
+                    )
+                    if ok:
+                        return
+                except Exception:
+                    pass
+            return
+
         def _background() -> None:
-            acquired = _FORMAL_SEMAPHORE.acquire(blocking=False)
-            if not acquired:
-                if self._is_duplicate_push(event_id):
-                    return
+            with deadline_scope(spawn_guard):
                 try:
-                    self._push_with_retry(line_user_id, QUEUED_FALLBACK_TEXT, event_id=None, push_sender=push_sender)
-                except Exception:
-                    pass
+                    if self._is_duplicate_push(event_id):
+                        return
+                    _execute_and_push()
+                finally:
+                    try:
+                        _FORMAL_SEMAPHORE.release()
+                    except Exception:
+                        pass
+                    with _async_jobs_lock:
+                        _async_jobs.discard(event_id)
 
-                def _delayed() -> None:
-                    with _FORMAL_SEMAPHORE:
-                        if self._is_duplicate_push(event_id):
-                            return
-                        _execute_and_push()
-
-                try:
-                    threading.Thread(target=_delayed, daemon=True).start()
-                except Exception:
-                    pass
-                return
-            try:
-                if self._is_duplicate_push(event_id):
-                    return
-                _execute_and_push()
-            finally:
-                try:
-                    _FORMAL_SEMAPHORE.release()
-                except Exception:
-                    pass
-
-        threading.Thread(target=_background, daemon=True).start()
+        try:
+            threading.Thread(target=_background, daemon=True).start()
+        except Exception:
+            _FORMAL_SEMAPHORE.release()
+            with _async_jobs_lock:
+                _async_jobs.discard(event_id)
+            raise
 
     def handle_text_async_push(
         self,
@@ -1081,7 +1185,13 @@ class ConversationOrchestrator:
         if existing_event is not None and existing_event.status == "COMPLETED" and existing_event.result:
             if existing_event.principal_id_hash != principal_hash:
                 raise WebhookEventIdentityMismatch("webhook event belongs to another principal")
-            return OrchestratorResult.model_validate({**existing_event.result, "replayed": True})
+            self._reschedule_pending_async_event(
+                event_id=event_id,
+                line_user_id=line_user_id,
+                payload=existing_event.result,
+                push_sender=push_sender,
+            )
+            return _replayable_orchestrator_result(event_id, existing_event.result)
         claim_token = self.repository.claim_webhook_event(event_id, principal_hash)
         if claim_token is None:
             return OrchestratorResult(
@@ -1141,7 +1251,11 @@ class ConversationOrchestrator:
                         event_id=event_id,
                         session_id=session.session_id,
                         reply=_dedup_reply_for(clean_text),
-                        status="ASYNC_PENDING",
+                        # This event owns no background job; only the first
+                        # turn owns ASYNC_PENDING.  Marking a text-level
+                        # duplicate as pending would make replay schedule the
+                        # first event a second time after a restart.
+                        status="BLOCKED",
                         intake_stage=session.intake_stage,
                         replayed=False,
                     )
@@ -1178,7 +1292,12 @@ class ConversationOrchestrator:
                     intake_stage=saved.intake_stage,
                 )
                 self.repository.complete_webhook_event(
-                    event_id, result_placeholder.model_dump(mode="json"), claim_token=claim_token
+                    event_id,
+                    {
+                        **result_placeholder.model_dump(mode="json"),
+                        "async_original_text": clean_text,
+                    },
+                    claim_token=claim_token,
                 )
                 self._spawn_async_formal(
                     event_id=event_id,
@@ -1217,7 +1336,7 @@ class ConversationOrchestrator:
         if existing_event is not None and existing_event.status == "COMPLETED" and existing_event.result:
             if existing_event.principal_id_hash != principal_hash:
                 raise WebhookEventIdentityMismatch("webhook event belongs to another principal")
-            return OrchestratorResult.model_validate({**existing_event.result, "replayed": True})
+            return _replayable_orchestrator_result(event_id, existing_event.result)
         claim_token = self.repository.claim_webhook_event(event_id, principal_hash)
         if claim_token is None:
             return OrchestratorResult(event_id=event_id, session_id=self._session_id(line_user_id), reply="此圖片正在處理中，請稍候。", status="PROCESSING", replayed=True)

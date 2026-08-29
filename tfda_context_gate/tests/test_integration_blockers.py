@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from pathlib import Path
 
 from tfda_context_gate.conversation.interpreter import DeterministicConversationInterpreter
@@ -185,3 +186,256 @@ def test_orchestrator_push_replay_is_exactly_once_and_durable(tmp_path: Path):
     assert len(calls) == 1
     record = repo.get_webhook_event("push-replay-event")
     assert record is not None and record.result and record.result.get("pushed") is True
+
+
+def test_async_spawn_guard_reaches_nested_workflow_and_push(tmp_path: Path):
+    """The manually-created async thread must propagate its job guard."""
+
+    observed: list[object] = []
+    pushed = threading.Event()
+
+    def guarded_runner(request, **_kwargs):
+        from tfda_context_gate.e_observability.deadline import current_deadline_guard
+
+        observed.append(current_deadline_guard())
+        return _workflow(request, "guarded answer")
+
+    def guarded_push(_user: str, _text: str) -> bool:
+        from tfda_context_gate.e_observability.deadline import current_deadline_guard
+
+        observed.append(current_deadline_guard())
+        pushed.set()
+        return True
+
+    repo = SQLiteProductSessionRepository(tmp_path / "guard-propagation.sqlite3")
+    orch = ConversationOrchestrator(
+        repo,
+        identity_hash_key=_KEY,
+        workflow_runner=guarded_runner,
+        interpreter=DeterministicConversationInterpreter(),
+        use_formal=True,
+        async_formal_timeout_s=1.0,
+    )
+    session = orch._load_or_create("U-guard-propagation")
+    orch._spawn_async_formal(
+        event_id="guard-propagation-event",
+        line_user_id="U-guard-propagation",
+        text="糖尿病可以吃水果嗎？",
+        session_id=session.session_id,
+        push_sender=guarded_push,
+    )
+
+    assert pushed.wait(timeout=2.0)
+    assert len(observed) == 2
+    assert all(value is not None for value in observed)
+    assert all(hasattr(value, "should_abort") for value in observed)
+
+
+def test_orchestrator_saturated_admission_creates_no_delayed_threads(tmp_path: Path, monkeypatch):
+    """Thirty rejected jobs fail closed without thirty delayed daemon threads."""
+
+    import tfda_context_gate.line_orchestration.orchestrator as orchestrator_module
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and orchestrator_module._async_jobs:
+        time.sleep(0.01)
+    monkeypatch.setattr(orchestrator_module, "_FORMAL_SEMAPHORE", threading.Semaphore(0))
+    created = 0
+
+    def forbidden_thread(*_args, **_kwargs):
+        nonlocal created
+        created += 1
+        raise AssertionError("saturated admission must not create a delayed thread")
+
+    monkeypatch.setattr(orchestrator_module.threading, "Thread", forbidden_thread)
+    repo = SQLiteProductSessionRepository(tmp_path / "orch-saturation.sqlite3")
+    orch = ConversationOrchestrator(
+        repo,
+        identity_hash_key=_KEY,
+        interpreter=DeterministicConversationInterpreter(),
+        use_formal=True,
+    )
+    session = orch._load_or_create("U-orch-saturation")
+    pushes: list[str] = []
+    for index in range(30):
+        orch._spawn_async_formal(
+            event_id=f"orch-saturated-{index}",
+            line_user_id="U-orch-saturation",
+            text="糖尿病可以吃水果嗎？",
+            session_id=session.session_id,
+            push_sender=lambda _user, text: pushes.append(text) or True,
+        )
+    assert created == 0
+    assert len(pushes) == 30
+
+
+def test_line_saturated_admission_creates_no_delayed_threads(tmp_path: Path, monkeypatch):
+    """LINE's adapter has the same bounded fail-closed admission contract."""
+
+    import line_bot.app as line_app
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and line_app._async_jobs:
+        time.sleep(0.01)
+    monkeypatch.setattr(line_app, "_FORMAL_SEMAPHORE", threading.Semaphore(0))
+    created = 0
+    scheduled: list[str] = []
+
+    def forbidden_thread(*_args, **_kwargs):
+        nonlocal created
+        created += 1
+        raise AssertionError("saturated admission must not create a delayed thread")
+
+    monkeypatch.setattr(line_app.threading, "Thread", forbidden_thread)
+    monkeypatch.setattr(line_app, "_push_text", lambda _user, text, event_id=None, **_kwargs: scheduled.append(text) or True)
+    line_app._text_dedup.clear()
+    line_app._async_jobs.clear()
+    repo = SQLiteProductSessionRepository(tmp_path / "line-saturation.sqlite3")
+    orch = ConversationOrchestrator(
+        repo,
+        identity_hash_key=_KEY,
+        interpreter=DeterministicConversationInterpreter(),
+        use_formal=True,
+    )
+    for index in range(30):
+        line_app._schedule_formal_push(
+            orch,
+            "U-line-saturation",
+            f"line-saturated-{index}",
+            f"糖尿病可以吃水果嗎？第{index}次",
+        )
+    assert created == 0
+    assert len(scheduled) == 30
+
+
+def test_pending_async_replay_reschedules_without_duplicate_turns(tmp_path: Path):
+    """A restart-style replay resumes pending work and keeps one turn pair."""
+
+    repo = SQLiteProductSessionRepository(tmp_path / "pending-replay.sqlite3")
+
+    def successful_runner(request, **_kwargs):
+        return _workflow(request, "replayed answer")
+
+    orch = ConversationOrchestrator(
+        repo,
+        identity_hash_key=_KEY,
+        workflow_runner=successful_runner,
+        interpreter=DeterministicConversationInterpreter(),
+        use_formal=True,
+        async_formal_timeout_s=1.0,
+    )
+    session = orch._load_or_create("U-pending-replay")
+    context = orch.context_manager.append_turn(
+        session.conversation_context,
+        role="user",
+        content="糖尿病可以吃水果嗎？",
+    )
+    context = orch.context_manager.append_turn(
+        context,
+        role="assistant",
+        content="查詢中，請稍候，資料整理完成後會推送給你 📋",
+    )
+    saved = repo.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=session.version)
+    claim = repo.claim_webhook_event("pending-replay-event", orch._hash("U-pending-replay"))
+    assert claim
+    repo.complete_webhook_event(
+        "pending-replay-event",
+        {
+            "event_id": "pending-replay-event",
+            "session_id": saved.session_id,
+            "reply": "查詢中，請稍候，資料整理完成後會推送給你 📋",
+            "status": "ASYNC_PENDING",
+            "intake_stage": saved.intake_stage,
+            "async_original_text": "糖尿病可以吃水果嗎？",
+        },
+        claim_token=claim,
+    )
+
+    pushes: list[str] = []
+    replay = orch.handle_text(
+        event_id="pending-replay-event",
+        line_user_id="U-pending-replay",
+        text="這是重送時不可信的不同內容",
+        push_sender=lambda _user, text: pushes.append(text) or True,
+    )
+    assert replay.replayed is True
+    assert replay.status == "ASYNC_PENDING"
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not pushes:
+        time.sleep(0.01)
+    assert pushes == ["replayed answer"]
+    latest = repo.get(saved.session_id)
+    assert latest is not None
+    turns = latest.conversation_context.recent_turns
+    assert [turn.content for turn in turns].count("糖尿病可以吃水果嗎？") == 1
+    assert sum(1 for turn in turns if "查詢中" in turn.content) == 1
+    event = repo.get_webhook_event("pending-replay-event")
+    assert event is not None and event.result and event.result.get("pushed") is True
+
+
+def test_line_callback_pending_replay_does_not_append_placeholder_again(tmp_path: Path, monkeypatch):
+    """The LINE adapter resumes durable pending work before its write path."""
+
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    line_app = importlib.import_module("line_bot.app")
+    monkeypatch.setenv("LINE_SESSION_DB_PATH", str(tmp_path / "callback-pending.sqlite3"))
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", "")
+    monkeypatch.setenv("LINE_ALLOW_UNSIGNED_WEBHOOK", "true")
+    monkeypatch.setenv("LINE_DEMO_MODE", "true")
+    monkeypatch.setenv("LINE_USE_FORMAL", "false")
+    monkeypatch.setenv("LINE_IDENTITY_HASH_KEY", _KEY)
+    monkeypatch.setattr(line_app, "LINE_CHANNEL_SECRET", "")
+    monkeypatch.setattr(line_app, "_conversation_orchestrator", None)
+    replies: list[str] = []
+    scheduled: list[tuple[object, ...]] = []
+    monkeypatch.setattr(line_app, "_reply_text", lambda _token, text, **_kwargs: replies.append(text) or True)
+    monkeypatch.setattr(line_app, "_schedule_formal_push", lambda *args, **_kwargs: scheduled.append(args))
+
+    orch = line_app._get_conversation_orchestrator()
+    assert orch is not None
+    session = orch._load_or_create("U-callback-pending")
+    original = "糖尿病可以吃水果嗎？"
+    placeholder = line_app.ASYNC_PLACEHOLDER_REPLY
+    context = orch.context_manager.append_turn(session.conversation_context, role="user", content=original)
+    context = orch.context_manager.append_turn(context, role="assistant", content=placeholder)
+    saved = orch.repository.save(
+        session.model_copy(update={"conversation_context": context}, deep=True),
+        expected_version=session.version,
+    )
+    claim = orch.repository.claim_webhook_event("callback-pending-event", orch._hash("U-callback-pending"))
+    assert claim
+    orch.repository.complete_webhook_event(
+        "callback-pending-event",
+        {
+            "event_id": "callback-pending-event",
+            "session_id": saved.session_id,
+            "reply": placeholder,
+            "status": "ASYNC_PENDING",
+            "intake_stage": saved.intake_stage,
+            "async_original_text": original,
+        },
+        claim_token=claim,
+    )
+
+    payload = {
+        "events": [{
+            "type": "message",
+            "webhookEventId": "callback-pending-event",
+            "replyToken": "reply-callback-pending",
+            "source": {"type": "user", "userId": "U-callback-pending"},
+            "message": {"type": "text", "id": "message-callback-pending", "text": "重送時的不同內容"},
+        }],
+    }
+    response = TestClient(line_app.app).post("/callback", json=payload)
+    assert response.status_code == 200
+    assert replies == [placeholder]
+    assert len(scheduled) == 1
+    assert scheduled[0][3] == original
+    latest = orch.repository.get(saved.session_id)
+    assert latest is not None
+    turns = latest.conversation_context.recent_turns
+    assert [turn.content for turn in turns].count(original) == 1
+    assert sum(1 for turn in turns if turn.content == placeholder) == 1

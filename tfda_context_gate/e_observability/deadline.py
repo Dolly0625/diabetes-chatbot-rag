@@ -22,6 +22,7 @@ import contextvars
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from contextlib import contextmanager
 from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
@@ -98,6 +99,23 @@ def current_deadline_guard() -> DeadlineGuard | None:
     """Return the guard active in the current deadline worker, if any."""
 
     return _ACTIVE_GUARD.get()
+
+
+@contextmanager
+def deadline_scope(guard: DeadlineGuard):
+    """Make ``guard`` visible to code running in an async job.
+
+    ``contextvars`` do not cross a manually-created ``threading.Thread``.
+    Async orchestration therefore needs an explicit scope around the whole
+    job; otherwise downstream transport helpers cannot see the job deadline
+    and may continue past an abandoned workflow.
+    """
+
+    token = _ACTIVE_GUARD.set(guard)
+    try:
+        yield guard
+    finally:
+        _ACTIVE_GUARD.reset(token)
 
 
 def deadline_scope_active() -> bool:
@@ -295,6 +313,7 @@ __all__ = [
     "MAX_DEADLINE_WORKERS",
     "current_deadline_guard",
     "deadline_scope_active",
+    "deadline_scope",
     "fire_and_forget_with_deadline",
     "run_with_deadline",
 ]

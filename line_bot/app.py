@@ -51,7 +51,10 @@ _pushed_events: set[str] = set()
 # successful sends move to ``_pushed_events`` permanently for this process.
 _pushing_events: set[str] = set()
 _pushed_lock = threading.Lock()
+_async_jobs: set[str] = set()
+_async_jobs_lock = threading.Lock()
 _FORMAL_SEMAPHORE = threading.Semaphore(5)
+ASYNC_ADMISSION_FALLBACK_TEXT = "目前同時查詢較多，這次無法完成查詢，請稍後再試。"
 
 TEXT_DEDUP_TTL_S = 120
 TEXT_DEDUP_TTL_SHORT_S = 10
@@ -713,7 +716,10 @@ def _schedule_formal_push(
     event_id: str,
     text: str,
 ) -> None:
-    from tfda_context_gate.e_observability.deadline import DeadlineGuard
+    from tfda_context_gate.e_observability.deadline import DeadlineGuard, deadline_scope
+
+    if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
+        return
 
     # Start the deadline at admission, so semaphore queue time is part of the
     # user-facing budget rather than an unbounded prelude.
@@ -721,15 +727,39 @@ def _schedule_formal_push(
     now = time.time()
     norm = _normalize_text(text)
     key = (line_user_id, norm)
-    with _text_dedup_lock:
-        expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
-        for k in expired:
-            _text_dedup.pop(k, None)
-        ts = _text_dedup.get(key)
-        if ts is not None and now - ts < TEXT_DEDUP_TTL_S:
+    # Durable pending replay is event-scoped and must bypass the text-level
+    # dedup cache.  A failed transport may leave the event pending while the
+    # cache still contains the original turn; replay must be able to retry it.
+    pending_replay = False
+    try:
+        record = orchestrator.repository.get_webhook_event(event_id)
+        pending_replay = bool(
+            record is not None
+            and record.status == "COMPLETED"
+            and isinstance(record.result, dict)
+            and record.result.get("status") in {"ASYNC_PENDING", "ASYNC_PLACEHOLDER"}
+            and record.result.get("pushed") is not True
+        )
+    except Exception:
+        pending_replay = False
+    if not pending_replay:
+        with _text_dedup_lock:
+            expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
+            for k in expired:
+                _text_dedup.pop(k, None)
+            ts = _text_dedup.get(key)
+            if ts is not None and now - ts < TEXT_DEDUP_TTL_S:
+                return
+            if norm:
+                _text_dedup[key] = now
+
+    # A replay in the same process must not start a second job for the same
+    # webhook event.  The durable ``pushed`` marker remains authoritative
+    # after a process restart.
+    with _async_jobs_lock:
+        if event_id in _async_jobs:
             return
-        if norm:
-            _text_dedup[key] = now
+        _async_jobs.add(event_id)
 
     def _execute_formal_and_push() -> None:
         from tfda_context_gate.e_observability.deadline import run_with_deadline
@@ -824,7 +854,14 @@ def _schedule_formal_push(
                         # the abandoned workflow result; it is never persisted
                         # into ProductSession.
                         timeout_text = _format_formal_push_text(safe_fallback, text)
-                        if _push_text(line_user_id, timeout_text, event_id=event_id):
+                        if _push_text(
+                            line_user_id,
+                            timeout_text,
+                            event_id=event_id,
+                            # The abandoned job guard must not block the
+                            # deterministic timeout notice itself.
+                            deadline_guard=DeadlineGuard(5.0),
+                        ):
                             _mark_event_pushed(orchestrator, event_id)
                         return
                     if attempt == 0 and not job_guard.should_abort():
@@ -869,47 +906,41 @@ def _schedule_formal_push(
         except Exception as exc:  # noqa: BLE001
             logger.warning("schedule formal push crashed %s: %s", event_id, exc)
 
+    # Admission happens synchronously before creating a thread.  Saturated
+    # requests fail closed with an event-owned safe notice; they never create
+    # one delayed daemon thread each.
+    if not _FORMAL_SEMAPHORE.acquire(blocking=False):
+        with _async_jobs_lock:
+            _async_jobs.discard(event_id)
+        if not job_guard.should_abort() and not _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
+            try:
+                if _push_text(line_user_id, ASYNC_ADMISSION_FALLBACK_TEXT, event_id=event_id):
+                    _mark_event_pushed(orchestrator, event_id)
+            except Exception:
+                pass
+        return
+
     def _bg() -> None:
-        acquired = _FORMAL_SEMAPHORE.acquire(blocking=False)
-        if not acquired:
-            if job_guard.should_abort():
-                job_guard.mark_abandoned()
-                return
-            if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
-                return
+        with deadline_scope(job_guard):
             try:
-                _push_text(line_user_id, QUEUED_FALLBACK_TEXT, event_id=None)
-            except Exception:
-                pass
-
-            def _delayed() -> None:
-                remaining = job_guard.remaining_s()
-                if remaining is None or remaining <= 0 or not _FORMAL_SEMAPHORE.acquire(timeout=remaining):
-                    job_guard.mark_abandoned()
+                if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
                     return
+                _execute_formal_and_push()
+            finally:
                 try:
-                    if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
-                        return
-                    _execute_formal_and_push()
-                finally:
                     _FORMAL_SEMAPHORE.release()
+                except Exception:
+                    pass
+                with _async_jobs_lock:
+                    _async_jobs.discard(event_id)
 
-            try:
-                threading.Thread(target=_delayed, daemon=True).start()
-            except Exception:
-                pass
-            return
-        try:
-            if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
-                return
-            _execute_formal_and_push()
-        finally:
-            try:
-                _FORMAL_SEMAPHORE.release()
-            except Exception:
-                pass
-
-    threading.Thread(target=_bg, daemon=True).start()
+    try:
+        threading.Thread(target=_bg, daemon=True).start()
+    except Exception:
+        _FORMAL_SEMAPHORE.release()
+        with _async_jobs_lock:
+            _async_jobs.discard(event_id)
+        raise
 
 
 # ── LINE Messaging API helpers ──────────────────────────────────────────────
@@ -1333,6 +1364,52 @@ async def callback(
                 orchestrator = _get_conversation_orchestrator()
                 webhook_event_id = ev.get("webhookEventId") or message.get("id")
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":
+                    # Crash recovery: the first process may have committed
+                    # the placeholder and durable ASYNC_PENDING record before
+                    # it reached the background scheduler.  Resume that job
+                    # directly and never append the user/placeholder turns a
+                    # second time.  The original text is persisted as event
+                    # metadata; a replay body is not trusted as a substitute.
+                    try:
+                        pending_event = orchestrator.repository.get_webhook_event(str(webhook_event_id))
+                    except Exception:
+                        pending_event = None
+                    if (
+                        pending_event is not None
+                        and pending_event.status == "COMPLETED"
+                        and isinstance(pending_event.result, dict)
+                        and pending_event.result.get("status") in {"ASYNC_PENDING", "ASYNC_PLACEHOLDER"}
+                        and pending_event.result.get("pushed") is not True
+                    ):
+                        try:
+                            if pending_event.principal_id_hash != orchestrator._hash(str(user_id)):
+                                _send(reply_token, "此訊息已在處理中，請稍候。")
+                                continue
+                            pending_payload = pending_event.result
+                            pending_reply = str(pending_payload.get("reply") or ASYNC_PLACEHOLDER_REPLY)
+                            pending_session_id = str(
+                                pending_payload.get("session_id") or orchestrator._session_id(str(user_id))
+                            )
+                            pending_text = pending_payload.get("async_original_text")
+                            if not isinstance(pending_text, str) or not pending_text.strip():
+                                recover = getattr(orchestrator, "_recover_pending_async_text", None)
+                                pending_text = recover(pending_session_id) if callable(recover) else None
+                            if isinstance(pending_text, str) and pending_text.strip():
+                                _send(reply_token, pending_reply)
+                                _schedule_formal_push(
+                                    orchestrator,
+                                    str(user_id),
+                                    str(webhook_event_id),
+                                    pending_text,
+                                )
+                                continue
+                            _send(reply_token, "此訊息正在處理中，稍候再試。")
+                            continue
+                        except Exception:
+                            # Return a processing response; never write a
+                            # second turn when recovery cannot be completed.
+                            _send(reply_token, "此訊息正在處理中，稍候再試。")
+                            continue
                     if _is_duplicate_push(str(webhook_event_id), getattr(orchestrator, "repository", None)):
                         try:
                             existing = orchestrator.repository.get_webhook_event(str(webhook_event_id))
@@ -1368,6 +1445,26 @@ async def callback(
                                 claim_token = orchestrator.repository.claim_webhook_event(str(webhook_event_id), orchestrator._hash(str(user_id)))
                             except Exception:
                                 claim_token = None
+                            if not claim_token:
+                                # Another callback owns this event.  Never
+                                # append a second user/placeholder pair while
+                                # that owner is committing the durable record.
+                                current = orchestrator.repository.get_webhook_event(str(webhook_event_id))
+                                if current is not None and current.principal_id_hash != orchestrator._hash(str(user_id)):
+                                    _send(reply_token, "此訊息正在處理中，請稍候。")
+                                    continue
+                                if current is not None and isinstance(current.result, dict) and current.result.get("status") in {"ASYNC_PENDING", "ASYNC_PLACEHOLDER"} and current.result.get("pushed") is not True:
+                                    pending_text = current.result.get("async_original_text")
+                                    pending_session_id = str(current.result.get("session_id") or orchestrator._session_id(str(user_id)))
+                                    if not isinstance(pending_text, str) or not pending_text.strip():
+                                        recover = getattr(orchestrator, "_recover_pending_async_text", None)
+                                        pending_text = recover(pending_session_id) if callable(recover) else None
+                                    _send(reply_token, str(current.result.get("reply") or ASYNC_PLACEHOLDER_REPLY))
+                                    if isinstance(pending_text, str) and pending_text.strip():
+                                        _schedule_formal_push(orchestrator, str(user_id), str(webhook_event_id), pending_text)
+                                else:
+                                    _send(reply_token, "此訊息正在處理中，請稍候。")
+                                continue
                             # Load or create session and write user turn + placeholder
                             sess_async = orchestrator._load_or_create(str(user_id))
                             prev_ver = sess_async.version
@@ -1380,7 +1477,18 @@ async def callback(
                                 saved_async = orchestrator.repository.save(sess_async, expected_version=prev_ver)
                                 if claim_token:
                                     try:
-                                        orchestrator.repository.complete_webhook_event(str(webhook_event_id), {"reply": ASYNC_PLACEHOLDER_REPLY, "status": "ASYNC_PLACEHOLDER"}, claim_token=claim_token)
+                                        orchestrator.repository.complete_webhook_event(
+                                            str(webhook_event_id),
+                                            {
+                                                "event_id": str(webhook_event_id),
+                                                "session_id": saved_async.session_id,
+                                                "reply": ASYNC_PLACEHOLDER_REPLY,
+                                                "status": "ASYNC_PENDING",
+                                                "intake_stage": saved_async.intake_stage,
+                                                "async_original_text": text.strip(),
+                                            },
+                                            claim_token=claim_token,
+                                        )
                                     except Exception:
                                         pass
                             except Exception:
