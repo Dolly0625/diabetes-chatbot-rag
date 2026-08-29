@@ -18,3 +18,8 @@ Future cleanup may move these scripts here after compatibility wrappers and
 tests are added. Do not delete historical `runs/`, `results/` or deliverables
 without a provenance decision.
 
+## Conversation optimization notes
+
+- [`docs/reviews/conversation_intelligence_challenges_20260829.md`](../../docs/reviews/conversation_intelligence_challenges_20260829.md)
+  records the P1.1–P2A conversation-understanding, multi-intent, data-quality,
+  latency, timeout and semantic-routing challenges for later reports.
