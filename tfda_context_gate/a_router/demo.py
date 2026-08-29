@@ -36,7 +36,7 @@ def main() -> None:
         default="opencode",
         help="Signal extractor: opencode=正式版(預設,走 .env 的 mimo), none=MVP純規則",
     )
-    parser.add_argument("--llm-model", help="覆蓋 ROUTER_LLM_MODEL，例如 opencode/qwen3-14b-opencode")
+    parser.add_argument("--llm-model", help="覆蓋 ROUTER_LLM_MODEL，例如 opencode/<model-name>")
     parser.add_argument("--input", help="Run one input instead of the built-in demo cases.")
     parser.add_argument("--role", default="PATIENT", choices=("PATIENT", "CAREGIVER", "HEALTHCARE_PROFESSIONAL"))
     parser.add_argument("--request-id", default="a-demo-001")
