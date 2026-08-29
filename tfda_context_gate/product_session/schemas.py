@@ -29,6 +29,18 @@ IntakeField = Literal[
     "questions_for_doctor",
 ]
 
+PendingActionType = Literal["PENDING_CONFIRM_QUESTION", "PENDING_SEVERITY_CLARIFY", "PENDING_FIELD_CORRECTION", "PENDING_STAGE_TRANSITION"]
+
+
+class PendingAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: PendingActionType
+    proposal: str | None = None
+    target_field: IntakeField | None = None
+    raw_provenance: str | None = None
+    created_at: datetime | None = None
+
 
 class ProductSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -46,6 +58,10 @@ class ProductSession(BaseModel):
     intake_stage: Literal["stage1", "stage2", "stage3", "review", "submitted"] = "stage1"
     pending_field: IntakeField | None = None
     pending_question: str | None = Field(default=None, max_length=5_000)
+    pending_action: PendingAction | None = None
+    stage_transition_flag: str | None = None  # e.g. "stage2->stage3"
+    pending_severity_raw: str | None = None  # hedge 原句 provenance
+    pending_question_proposal: str | None = None  # HONEST_FALLBACK 待同意提案，去重用
     system_risk_classification: dict[str, Any] | None = None
     status: SessionStatus = "ACTIVE"
     version: int = Field(default=0, ge=0)

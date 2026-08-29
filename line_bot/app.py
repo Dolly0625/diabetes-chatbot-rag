@@ -47,9 +47,45 @@ _pushed_lock = threading.Lock()
 _FORMAL_SEMAPHORE = threading.Semaphore(5)
 
 TEXT_DEDUP_TTL_S = 120
+TEXT_DEDUP_TTL_SHORT_S = 10
 TEXT_DEDUP_REPLY = "這題正在幫你查了，稍候"
+TEXT_DEDUP_REPLY_WELCOME = "又見面了～有什麼想繼續的？"
 _text_dedup: dict[tuple[str, str], float] = {}
 _text_dedup_lock = threading.Lock()
+import re as _re_dup
+_EMPATHY_DUP_RE = _re_dup.compile(r"不人性化|好笨|很怪|無言|敷衍|不友善|冷淡|機械", _re_dup.IGNORECASE)
+
+
+def _is_short_ttl_text(text: str) -> bool:
+    try:
+        from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _R
+        from tfda_context_gate.workflow.intake_router import is_welcome_trigger as _is_w
+        if _is_w(text):
+            return True
+        if _R.is_chit_chat_text(text):
+            return True
+        if _R.is_identity_text(text):
+            return True
+        if _EMPATHY_DUP_RE.search(text):
+            return True
+    except Exception:
+        pass
+    try:
+        import unicodedata as _ud2
+        n = _ud2.normalize("NFKC", text).strip()
+        if n in ("你好", "您好", "哈囉", "嗨", "hi", "hello"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _dedup_ttl_for(text: str) -> int:
+    return TEXT_DEDUP_TTL_SHORT_S if _is_short_ttl_text(text) else TEXT_DEDUP_TTL_S
+
+
+def _dedup_reply_for(text: str) -> str:
+    return TEXT_DEDUP_REPLY_WELCOME if _is_short_ttl_text(text) else TEXT_DEDUP_REPLY
 
 
 def _normalize_text(text: str) -> str:
@@ -65,12 +101,13 @@ def _is_text_duplicate(user_id: str, text: str) -> bool:
         return False
     key = (user_id, norm)
     now = time.time()
+    ttl = _dedup_ttl_for(text)
     with _text_dedup_lock:
         expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
         for k in expired:
             _text_dedup.pop(k, None)
         ts = _text_dedup.get(key)
-        return ts is not None and now - ts < TEXT_DEDUP_TTL_S
+        return ts is not None and now - ts < ttl
 
 
 def _mark_text_dedup(user_id: str, text: str) -> None:
@@ -532,9 +569,12 @@ def _maybe_record_question_for_doctor(orchestrator: Any, line_user_id: str, orig
             return
         if len(session.intake_snapshot.questions_for_doctor) >= 10:
             return
-        updated = session.intake_snapshot.model_copy(update={"questions_for_doctor": [*session.intake_snapshot.questions_for_doctor, q]}, deep=True)
+        # converge to single service method: only set pending, not direct append
         try:
-            orchestrator.repository.save(session.model_copy(update={"intake_snapshot": updated}, deep=True), expected_version=session.version)
+            from tfda_context_gate.product_session.schemas import PendingAction
+            import datetime
+            pending = PendingAction(type="PENDING_CONFIRM_QUESTION", proposal=q, created_at=datetime.datetime.now(datetime.timezone.utc))
+            orchestrator.repository.save(session.model_copy(update={"pending_action": pending, "pending_question_proposal": q}, deep=True), expected_version=session.version)
         except Exception:
             pass
     except Exception:
@@ -1124,10 +1164,13 @@ async def callback(
                         continue
                     if orchestrator.use_formal and _should_use_async_formal(text, None):
                         if _is_text_duplicate(str(user_id), text):
-                            _send(reply_token, TEXT_DEDUP_REPLY)
+                            _send(reply_token, _dedup_reply_for(text))
                             continue
                         _send(reply_token, ASYNC_PLACEHOLDER_REPLY)
                         _schedule_formal_push(orchestrator, str(user_id), str(webhook_event_id), text)
+                        continue
+                    if _is_text_duplicate(str(user_id), text) and _is_short_ttl_text(text):
+                        _send(reply_token, _dedup_reply_for(text))
                         continue
                     product_result = orchestrator.handle_text(
                         event_id=str(webhook_event_id),
@@ -1143,18 +1186,24 @@ async def callback(
                         pass
                     quick_actions = _quick_actions_for_status(product_result.status, reply)
                     _send(reply_token, reply, quick_actions=quick_actions)
+                    _mark_text_dedup(str(user_id), text)
                 else:
                     if _should_use_async_formal(text, None) and not _is_duplicate_push(str(webhook_event_id) if webhook_event_id else None):
                         if _is_text_duplicate(str(user_id), text):
-                            _send(reply_token, TEXT_DEDUP_REPLY)
+                            _send(reply_token, _dedup_reply_for(text))
                         else:
                             _send(reply_token, ASYNC_PLACEHOLDER_REPLY)
                             _schedule_formal_push(None, str(user_id), str(webhook_event_id) if webhook_event_id else f"compat-{uuid.uuid4().hex[:8]}", text)
                     else:
-                        result = handle_text_message(text, request_id=f"line-{user_id[:8]}-{uuid.uuid4().hex[:4]}")
-                        reply = getattr(result, "final_response", str(result))
-                        quick_actions = None
-                        _send(reply_token, reply, quick_actions=quick_actions)
+                        if _is_text_duplicate(str(user_id), text) and _is_short_ttl_text(text):
+                            _send(reply_token, _dedup_reply_for(text))
+                            _mark_text_dedup(str(user_id), text)
+                        else:
+                            result = handle_text_message(text, request_id=f"line-{user_id[:8]}-{uuid.uuid4().hex[:4]}")
+                            reply = getattr(result, "final_response", str(result))
+                            quick_actions = None
+                            _send(reply_token, reply, quick_actions=quick_actions)
+                            _mark_text_dedup(str(user_id), text)
 
             elif msg_type == "image":
                 message_id = message.get("id", "")

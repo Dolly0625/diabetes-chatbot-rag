@@ -22,32 +22,41 @@ def generate_previsit_summary(intake: PreVisitIntake | dict, *, request_id: str)
 
     timeline = build_timeline(intake)
 
+    def _is_sentinel(v) -> bool:
+        if isinstance(v, list):
+            if v == ["不清楚（待看診確認）"] or v == ["待確認"] or v == ["目前沒有特別想問的問題"]:
+                return True
+        elif isinstance(v, str):
+            if v in ("待確認", "不清楚（待看診確認）"):
+                return True
+        return False
+
     provided: list[str] = []
     missing: list[str] = []
     for field in ["known_medications", "allergies", "chronic_conditions", "family_history",
                   "symptom_onset", "symptom_description", "symptom_severity", "questions_for_doctor"]:
         val = getattr(intake, field)
-        if val:
+        if val and not _is_sentinel(val):
             provided.append(field)
         else:
             missing.append(field)
 
     parts: list[str] = []
-    if intake.known_medications:
+    if intake.known_medications and not _is_sentinel(intake.known_medications):
         parts.append(f"已知用藥：{', '.join(intake.known_medications)}")
-    if intake.allergies:
+    if intake.allergies and not _is_sentinel(intake.allergies):
         parts.append(f"過敏史：{', '.join(intake.allergies)}")
-    if intake.chronic_conditions:
+    if intake.chronic_conditions and not _is_sentinel(intake.chronic_conditions):
         parts.append(f"慢性病史：{', '.join(intake.chronic_conditions)}")
-    if intake.family_history:
+    if intake.family_history and not _is_sentinel(intake.family_history):
         parts.append(f"家族史：{', '.join(intake.family_history)}")
-    if intake.symptom_onset:
+    if intake.symptom_onset and not _is_sentinel(intake.symptom_onset):
         parts.append(f"症狀起始：{intake.symptom_onset}")
-    if intake.symptom_description:
+    if intake.symptom_description and not _is_sentinel(intake.symptom_description):
         parts.append(f"症狀描述：{intake.symptom_description}")
-    if intake.symptom_severity:
+    if intake.symptom_severity and not _is_sentinel(intake.symptom_severity):
         parts.append(f"症狀程度：{intake.symptom_severity}")
-    if intake.questions_for_doctor:
+    if intake.questions_for_doctor and not _is_sentinel(intake.questions_for_doctor):
         parts.append(f"想問醫師的問題：{'；'.join(intake.questions_for_doctor)}")
     if intake.time_frame:
         tf = intake.time_frame.value if hasattr(intake.time_frame, "value") else str(intake.time_frame)

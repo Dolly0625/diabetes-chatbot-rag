@@ -356,34 +356,43 @@ class PreVisitIntakeTool:
 
         timeline = self.build_timeline(intake)
 
-        # Determine provided vs missing — 8 core fields
+        # Determine provided vs missing — 8 core fields (sentinel filtered)
+        def _is_sentinel(v: Any) -> bool:
+            if isinstance(v, list):
+                if v == ["不清楚（待看診確認）"] or v == ["待確認"] or v == ["目前沒有特別想問的問題"]:
+                    return True
+            elif isinstance(v, str):
+                if v in ("待確認", "不清楚（待看診確認）"):
+                    return True
+            return False
+
         provided: list[str] = []
         missing: list[str] = []
         for field in ["known_medications", "allergies", "chronic_conditions", "family_history",
                       "symptom_onset", "symptom_description", "symptom_severity", "questions_for_doctor"]:
             val = getattr(intake, field)
-            if val:  # list non-empty or str non-empty
+            if val and not _is_sentinel(val):
                 provided.append(field)
             else:
                 missing.append(field)
 
-        # Build summary_text only from provided facts, no diagnosis/treatment
+        # Build summary_text only from provided facts, no diagnosis/treatment (sentinel excluded)
         parts: list[str] = []
-        if intake.known_medications:
+        if intake.known_medications and not _is_sentinel(intake.known_medications):
             parts.append(f"已知用藥：{', '.join(intake.known_medications)}")
-        if intake.allergies:
+        if intake.allergies and not _is_sentinel(intake.allergies):
             parts.append(f"過敏史：{', '.join(intake.allergies)}")
-        if intake.chronic_conditions:
+        if intake.chronic_conditions and not _is_sentinel(intake.chronic_conditions):
             parts.append(f"慢性病史：{', '.join(intake.chronic_conditions)}")
-        if intake.family_history:
+        if intake.family_history and not _is_sentinel(intake.family_history):
             parts.append(f"家族史：{', '.join(intake.family_history)}")
-        if intake.symptom_onset:
+        if intake.symptom_onset and not _is_sentinel(intake.symptom_onset):
             parts.append(f"症狀起始：{intake.symptom_onset}")
-        if intake.symptom_description:
+        if intake.symptom_description and not _is_sentinel(intake.symptom_description):
             parts.append(f"症狀描述：{intake.symptom_description}")
-        if intake.symptom_severity:
+        if intake.symptom_severity and not _is_sentinel(intake.symptom_severity):
             parts.append(f"症狀程度：{intake.symptom_severity}")
-        if intake.questions_for_doctor:
+        if intake.questions_for_doctor and not _is_sentinel(intake.questions_for_doctor):
             parts.append(f"想問醫師的問題：{'；'.join(intake.questions_for_doctor)}")
         if intake.time_frame:
             tf = intake.time_frame.value if hasattr(intake.time_frame, "value") else str(intake.time_frame)
@@ -730,23 +739,29 @@ class PreVisitIntakeTool:
         return None
 
     def _extract_description(self, text: str) -> str | None:
-        # Look for symptom descriptions
-        symptom_keywords = ["血糖", "頭暈", "口渴", "頻尿", "疲倦", "不舒服", "疼痛", "麻", "視力", "傷口", "感染", "血壓"]
-        for kw in symptom_keywords:
-            if kw in text:
-                # Return the relevant fragment
-                # Find sentence containing keyword
-                sentences = re.split(r"[。；;，,]", text)
-                for s in sentences:
-                    if kw in s:
-                        return s.strip()[:200]
-                return text.strip()[:200]
+        # Look for symptom descriptions - collect all matching sentences
+        symptom_keywords = ["血糖", "頭暈", "口渴", "頻尿", "疲倦", "不舒服", "疼痛", "麻", "視力", "傷口", "感染", "血壓", "尿尿", "夜尿", "起夜", "多尿"]
+        sentences = re.split(r"[。；;，,]", text)
+        found: list[str] = []
+        for s in sentences:
+            if any(kw in s for kw in symptom_keywords):
+                if s.strip():
+                    found.append(s.strip())
+        if found:
+            return "；".join(found)[:2000]
         # If text is long and contains symptom-like content, return it
         if len(text) > 5 and re.search(r"症狀|不適|感覺|血糖|血壓", text):
             return text.strip()[:200]
         return None
 
     def _extract_severity(self, text: str) -> str | None:
+        HEDGE_RE = re.compile(r"有點|稍微|好像|吧|大概|有點嚴重")
+        if HEDGE_RE.search(text):
+            if text.strip() in ("有點嚴重吧", "有點嚴重", "稍微嚴重"):
+                return None
+            cleaned = text.replace("有點嚴重吧", "").replace("有點嚴重", "").replace("稍微嚴重", "")
+            if not re.search(r"\d+分|輕度|中度|重度|\d+/\d+", cleaned):
+                return None
         if re.search(r"輕度|輕微|還好|不嚴重", text):
             return "輕度"
         if re.search(r"中度|中等|普通", text):
@@ -762,9 +777,9 @@ class PreVisitIntakeTool:
         return None
 
     def _extract_questions(self, text: str) -> list[str] | None:
-        # Look for question patterns
+        if not re.search(r"想問|想請問|？|\?|嗎|如何|怎麼|為何|為什麼|多少|是否", text):
+            return None
         if re.search(r"想問|想請問|想了解|問題是|疑問", text):
-            # Split by question marks or semicolons
             parts = re.split(r"[？?；;]", text)
             questions = [p.strip() for p in parts if p.strip() and len(p.strip()) > 3]
             if questions:
@@ -775,8 +790,7 @@ class PreVisitIntakeTool:
             questions = [p.strip() for p in parts if p.strip()]
             if questions:
                 return questions[:5]
-        # If text looks like a question list
-        if len(text) > 5:
+        if len(text.strip()) > 5:
             return [text.strip()[:200]]
         return None
 

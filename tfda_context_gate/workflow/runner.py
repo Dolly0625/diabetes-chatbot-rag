@@ -55,6 +55,11 @@ def _is_formal_eligible(request_context: Any, task_type: str | None) -> bool:
             return False
         if RuleBasedSignalExtractor.is_chit_chat_text(raw):
             return False
+        if RuleBasedSignalExtractor.is_identity_text(raw):
+            return False
+        import re as _re_emp
+        if _re_emp.search(r"不人性化|好笨|很怪|無言|敷衍", raw):
+            return False
     except Exception:
         pass
     try:

@@ -42,6 +42,9 @@ STAGE_QUESTIONS: dict[str, str] = {
 
 _CHIT_CHAT_RE = re.compile(r"想睡|睡覺|晚安|無聊|累了|好累|想休息|你好嗎|早安|午安", re.IGNORECASE)
 _CAPABILITY_RE = re.compile(r"可以跟我說什麼|可以說什麼|能做什麼|會做什麼|能幫什麼|我能幫什麼|介紹一下|你會什麼|功能有哪些", re.IGNORECASE)
+_IDENTITY_RE = re.compile(r"你是誰|你是AI|你是機器人|叫什麼|什麼名字|怎麼稱呼", re.IGNORECASE)
+_EMPATHY_RE = re.compile(r"不人性化|好笨|很怪|無言|敷衍|不友善|冷淡|機械", re.IGNORECASE)
+_SEVERE_EMPATHY_RE = re.compile(r"想死|不想活|活不下去|自殺|輕生|結束生命", re.IGNORECASE)
 
 
 def _is_chit_chat(text: str) -> bool:
@@ -50,6 +53,26 @@ def _is_chit_chat(text: str) -> bool:
     except Exception:
         n = text or ""
     return bool(_CHIT_CHAT_RE.search(n))
+
+
+def _is_identity(text: str) -> bool:
+    try:
+        n = unicodedata.normalize("NFKC", text).strip()
+    except Exception:
+        n = text or ""
+    if _IDENTITY_RE.search(n):
+        return True
+    if n.strip().strip("？?。.!！") == "是誰":
+        return True
+    return False
+
+
+def _is_empathy(text: str) -> bool:
+    try:
+        n = unicodedata.normalize("NFKC", text).strip()
+    except Exception:
+        n = text or ""
+    return bool(_EMPATHY_RE.search(n))
 
 
 def _is_capability_query(text: str) -> bool:
@@ -198,8 +221,32 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
             except Exception:
                 is_intake_welcome = False
             if not is_intake_welcome:
+                try:
+                    from tfda_context_gate.workflow.fallbacks import WELCOME_VARIANTS, _fallback_seen, _fallback_lock
+                    _w_key = f"global:WELCOME"
+                    with _fallback_lock:
+                        _seen = _fallback_seen.get(_w_key, set())
+                        if not _seen:
+                            _welcome_variant = WELCOME_VARIANTS[0]
+                            _seen.add(_welcome_variant)
+                        else:
+                            _remaining = [v for v in WELCOME_VARIANTS if v not in _seen]
+                            if _remaining:
+                                _welcome_variant = _remaining[0]
+                                if "又見面了" in _welcome_variant:
+                                    for v in _remaining:
+                                        if "又見面了" in v:
+                                            _welcome_variant = v
+                                            break
+                            else:
+                                _welcome_variant = WELCOME_VARIANTS[1]
+                                _seen = set()
+                            _seen.add(_welcome_variant)
+                        _fallback_seen[_w_key] = _seen
+                except Exception:
+                    _welcome_variant = WELCOME_MESSAGE
                 with trace.span("A", "welcome_message") as span:
-                    span.set(status="COMPLETED", reason_codes=["WELCOME_MESSAGE"], question=WELCOME_MESSAGE)
+                    span.set(status="COMPLETED", reason_codes=["WELCOME_MESSAGE"], question=_welcome_variant)
                 try:
                     from tfda_context_gate.a_router.labels import DeclaredRole, LanguageCode, RouterStatus, PolicyReasonCode
                     from tfda_context_gate.a_router.schemas import AResult, ContextModifiers
@@ -216,7 +263,7 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
                     from tfda_context_gate.a_router.labels import DeclaredRole, LanguageCode, RouterStatus, PolicyReasonCode
                     from tfda_context_gate.a_router.schemas import AResult, ContextModifiers
                     result = AResult(request_id=state.get("request_id", "unknown"), schema_version="a.v0.1", user_raw_input=raw_input, declared_role=DeclaredRole.PATIENT, language=LanguageCode.ZH_TW, intent_tags=[], risk_flags=[], context_modifiers=ContextModifiers(language=LanguageCode.ZH_TW), router_status=RouterStatus.G_GENERAL_EDUCATION, reason_codes=[PolicyReasonCode.INQUIRY_GENERAL_EDUCATION], rag_allowed=True, task_type=None)
-                return {"a_result": result, "status": "COMPLETED", "final_response": WELCOME_MESSAGE, "fallback_reason": None, "termination_reason": "WELCOME_MESSAGE"}
+                return {"a_result": result, "status": "COMPLETED", "final_response": _welcome_variant, "fallback_reason": None, "termination_reason": "WELCOME_MESSAGE"}
         if _is_red_flag(raw_input):
             from tfda_context_gate.a_router.labels import RiskFlag, RouterStatus, PolicyReasonCode
             from tfda_context_gate.a_router.schemas import AResult, RouterSignals, ContextModifiers
@@ -236,6 +283,70 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
                 span.set(status="BLOCKED", router_status=result.router_status.value, intent_tags=[item.value for item in result.intent_tags], risk_flags=[item.value for item in result.risk_flags], reason_codes=[item.value for item in result.reason_codes], rag_allowed=result.rag_allowed, prompt_guard_result="BLOCKED", termination_reason="RED_FLAG_DETERMINISTIC_ABORT")
             emergency_reason = "A_EMERGENCY" if result.router_status.value == "E_EMERGENCY" else "A_URGENT_HUMAN"
             return {"a_result": result, "status": "FALLBACK", "final_response": fallback_response(emergency_reason), "fallback_reason": emergency_reason, "termination_reason": "RED_FLAG_DETERMINISTIC_ABORT"}
+        # P5-1 IDENTITY short-circuit: after red-flag, before G2 whitelist
+        try:
+            from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _IdExtractor
+            _is_ident = _IdExtractor.is_identity_text(raw_input)
+        except Exception:
+            _is_ident = _is_identity(raw_input)
+        if _is_ident:
+            try:
+                from tfda_context_gate.a_router.labels import DeclaredRole as _IdDR, LanguageCode as _IdLC, RouterStatus as _IdRS, PolicyReasonCode as _IdPRC, IntentTag as _IdIT
+                from tfda_context_gate.a_router.schemas import AResult as _IdAR, ContextModifiers as _IdCM
+                _id_req_id = request.request_id if hasattr(request, "request_id") else state.get("request_id", "unknown")
+                _id_schema_ver = request.schema_version if hasattr(request, "schema_version") else "a.v0.1"
+                _id_decl_role = request.declared_role if hasattr(request, "declared_role") else _IdDR.PATIENT
+                if isinstance(_id_decl_role, str):
+                    try:
+                        _id_decl_role = _IdDR(_id_decl_role)
+                    except Exception:
+                        _id_decl_role = _IdDR.PATIENT
+                _id_lang = request.language if hasattr(request, "language") else _IdLC.ZH_TW
+                if isinstance(_id_lang, str):
+                    try:
+                        _id_lang = _IdLC(_id_lang)
+                    except Exception:
+                        _id_lang = _IdLC.ZH_TW
+                _id_result = _IdAR(request_id=_id_req_id, schema_version=_id_schema_ver, user_raw_input=raw_input, declared_role=_id_decl_role, language=_id_lang, intent_tags=[_IdIT.IDENTITY], risk_flags=[], context_modifiers=_IdCM(language=_id_lang), router_status=_IdRS.O_OUT_OF_SCOPE, reason_codes=[_IdPRC.REASON_OUT_OF_SCOPE], rag_allowed=False, task_type=None)
+            except Exception:
+                from tfda_context_gate.a_router.labels import DeclaredRole as _IdDR2, LanguageCode as _IdLC2, RouterStatus as _IdRS2, PolicyReasonCode as _IdPRC2, IntentTag as _IdIT2
+                from tfda_context_gate.a_router.schemas import AResult as _IdAR2, ContextModifiers as _IdCM2
+                _id_result = _IdAR2(request_id=state.get("request_id", "unknown"), schema_version="a.v0.1", user_raw_input=raw_input, declared_role=_IdDR2.PATIENT, language=_IdLC2.ZH_TW, intent_tags=[_IdIT2.IDENTITY], risk_flags=[], context_modifiers=_IdCM2(language=_IdLC2.ZH_TW), router_status=_IdRS2.O_OUT_OF_SCOPE, reason_codes=[_IdPRC2.REASON_OUT_OF_SCOPE], rag_allowed=False, task_type=None)
+            with trace.span("A", "input_router") as span:
+                span.set(status="BLOCKED", router_status=_id_result.router_status.value, intent_tags=[item.value for item in _id_result.intent_tags], risk_flags=[], reason_codes=[item.value for item in _id_result.reason_codes], rag_allowed=False, termination_reason="IDENTITY_SHORT_CIRCUIT", fallback_reason="IDENTITY")
+            return {"a_result": _id_result, "status": "BLOCKED", "final_response": fallback_response("IDENTITY"), "fallback_reason": "IDENTITY", "termination_reason": "IDENTITY_SHORT_CIRCUIT"}
+        if _is_empathy(raw_input):
+            try:
+                from tfda_context_gate.a_router.labels import DeclaredRole as _EmDR, LanguageCode as _EmLC, RouterStatus as _EmRS, PolicyReasonCode as _EmPRC, IntentTag as _EmIT
+                from tfda_context_gate.a_router.schemas import AResult as _EmAR, ContextModifiers as _EmCM
+                from tfda_context_gate.workflow.fallbacks import empathy_response
+                _em_req_id = request.request_id if hasattr(request, "request_id") else state.get("request_id", "unknown")
+                _em_schema_ver = request.schema_version if hasattr(request, "schema_version") else "a.v0.1"
+                _em_decl_role = request.declared_role if hasattr(request, "declared_role") else _EmDR.PATIENT
+                if isinstance(_em_decl_role, str):
+                    try:
+                        _em_decl_role = _EmDR(_em_decl_role)
+                    except Exception:
+                        _em_decl_role = _EmDR.PATIENT
+                _em_lang = request.language if hasattr(request, "language") else _EmLC.ZH_TW
+                if isinstance(_em_lang, str):
+                    try:
+                        _em_lang = _EmLC(_em_lang)
+                    except Exception:
+                        _em_lang = _EmLC.ZH_TW
+                _em_result = _EmAR(request_id=_em_req_id, schema_version=_em_schema_ver, user_raw_input=raw_input, declared_role=_em_decl_role, language=_em_lang, intent_tags=[_EmIT.NON_MEDICAL], risk_flags=[], context_modifiers=_EmCM(language=_em_lang), router_status=_EmRS.O_OUT_OF_SCOPE, reason_codes=[_EmPRC.REASON_OUT_OF_SCOPE], rag_allowed=False, task_type=None)
+            except Exception:
+                from tfda_context_gate.a_router.labels import DeclaredRole as _EmDR2, LanguageCode as _EmLC2, RouterStatus as _EmRS2, PolicyReasonCode as _EmPRC2, IntentTag as _EmIT2
+                from tfda_context_gate.a_router.schemas import AResult as _EmAR2, ContextModifiers as _EmCM2
+                _em_result = _EmAR2(request_id=state.get("request_id", "unknown"), schema_version="a.v0.1", user_raw_input=raw_input, declared_role=_EmDR2.PATIENT, language=_EmLC2.ZH_TW, intent_tags=[_EmIT2.NON_MEDICAL], risk_flags=[], context_modifiers=_EmCM2(language=_EmLC2.ZH_TW), router_status=_EmRS2.O_OUT_OF_SCOPE, reason_codes=[_EmPRC2.REASON_OUT_OF_SCOPE], rag_allowed=False, task_type=None)
+            with trace.span("A", "input_router") as span:
+                span.set(status="BLOCKED", router_status=_em_result.router_status.value, intent_tags=[item.value for item in _em_result.intent_tags], risk_flags=[], reason_codes=[item.value for item in _em_result.reason_codes], rag_allowed=False, termination_reason="EMPATHY_SHORT_CIRCUIT", fallback_reason="EMPATHY")
+            try:
+                from tfda_context_gate.workflow.fallbacks import empathy_response as _er
+                _empathy_text = _er(raw_input)
+            except Exception:
+                _empathy_text = fallback_response("EMPATHY")
+            return {"a_result": _em_result, "status": "BLOCKED", "final_response": _empathy_text, "fallback_reason": "EMPATHY", "termination_reason": "EMPATHY_SHORT_CIRCUIT"}
         # G2 whitelist short-circuit (P3 latency fix): chit-chat before LLM, after red-flag invariant
         try:
             from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _G2Extractor

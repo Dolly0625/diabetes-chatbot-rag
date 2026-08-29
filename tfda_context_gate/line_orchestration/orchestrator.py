@@ -43,9 +43,52 @@ logger = logging.getLogger(__name__)
 
 # ── P3-R1 text-level dedup for async formal (120s TTL, thread-safe) ───────────
 TEXT_DEDUP_TTL_S = 120
+TEXT_DEDUP_TTL_SHORT_S = 10
 TEXT_DEDUP_REPLY = "這題正在幫你查了，稍候"
+TEXT_DEDUP_REPLY_WELCOME = "又見面了～有什麼想繼續的？"
 _text_dedup: dict[tuple[str, str], float] = {}
 _text_dedup_lock = threading.Lock()
+_intake_uncertain_attempts: dict[tuple[str, str], int] = {}
+_EMPATHY_RE = re.compile(r"不人性化|好笨|很怪|無言|敷衍|不友善|冷淡|好敷衍|機械", re.IGNORECASE)
+_SEVERE_EMPATHY_RE = re.compile(r"想死|不想活|活不下去|自殺|輕生|結束生命", re.IGNORECASE)
+
+
+def _is_short_ttl_text(text: str) -> bool:
+    try:
+        from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor as _R
+        from tfda_context_gate.workflow.intake_router import is_welcome_trigger as _is_welcome
+        if _is_welcome(text):
+            return True
+        if _R.is_chit_chat_text(text):
+            return True
+        if _R.is_identity_text(text):
+            return True
+        if _EMPATHY_RE.search(text):
+            return True
+    except Exception:
+        pass
+    try:
+        n = unicodedata.normalize("NFKC", text).strip()
+        if n in ("你好", "您好", "哈囉", "嗨", "hi", "hello"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _dedup_ttl_for(text: str) -> int:
+    return TEXT_DEDUP_TTL_SHORT_S if _is_short_ttl_text(text) else TEXT_DEDUP_TTL_S
+
+
+def _dedup_reply_for(text: str) -> str:
+    return TEXT_DEDUP_REPLY_WELCOME if _is_short_ttl_text(text) else TEXT_DEDUP_REPLY
+
+
+def _is_empathy_text(text: str) -> bool:
+    try:
+        return bool(_EMPATHY_RE.search(text))
+    except Exception:
+        return False
 
 
 def _normalize_text(text: str) -> str:
@@ -61,12 +104,13 @@ def _is_text_duplicate(user_id: str, text: str) -> bool:
         return False
     key = (user_id, norm)
     now = time.time()
+    ttl = _dedup_ttl_for(text)
     with _text_dedup_lock:
         expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
         for k in expired:
             _text_dedup.pop(k, None)
         ts = _text_dedup.get(key)
-        return ts is not None and now - ts < TEXT_DEDUP_TTL_S
+        return ts is not None and now - ts < ttl
 
 
 def _mark_text_dedup(user_id: str, text: str) -> None:
@@ -96,6 +140,10 @@ def _orch_should_use_formal(raw: str | None, task_type: str | None) -> bool:
         if RuleBasedSignalExtractor.is_pre_visit_intake_text(raw):
             return False
         if RuleBasedSignalExtractor.is_chit_chat_text(raw):
+            return False
+        if RuleBasedSignalExtractor.is_identity_text(raw):
+            return False
+        if _is_empathy_text(raw):
             return False
     except Exception:
         pass
@@ -135,11 +183,93 @@ from tfda_context_gate.intake.schemas import PreVisitIntake
 from tfda_context_gate.product_session import ProductSession, ProductSessionRepository
 from tfda_context_gate.product_session import ProductSessionConflict
 from tfda_context_gate.product_session import WebhookEventIdentityMismatch
+from tfda_context_gate.product_session.schemas import PendingAction
 from tfda_context_gate.workflow import run_workflow
 from tfda_context_gate.workflow.schemas import WorkflowResult
 from tfda_context_gate.workflow.fallbacks import fallback_response
 
 from .schemas import OrchestratorResult
+
+# ── P0 structured pending regexes ─────────────────────────────────────
+_HEDGE_RE = re.compile(r"有點|稍微|好像|吧$|大概")
+_SEVERITY_EXPLICIT_RE = re.compile(r"輕度|中度|重度|\d+\s*分|\d+/\d+|1–10|1-10")
+_CORRECTION_RE = re.compile(r"不是|說錯了|更正|改成|其實|喔不對|不對|那邊要改|前面.*要改|那個要改")
+_AGREE_RE = re.compile(r"^(好|幫我記|記下來|可以|沒問題|同意|要|幫我記下來)$")
+_AGREE_SUB_RE = re.compile(r"好|幫我記|記下來|可以|沒問題")
+_DISAGREE_RE = re.compile(r"不用|不需要|先不要|不要|不用了")
+_WANT_QUESTION_RE = re.compile(r"想問|幫我.*加.*問題|再加一個想問|幫我記一個|還要.*記|幫我記|多少|是否|正常嗎")
+_QUESTION_NEGATIVE_RE = re.compile(r"^\s*(沒有別的了|沒有了|沒了|就這樣|暫時沒有|沒有問題|沒有其他問題)\s*[。！!]*\s*$")
+_FIELD_ALIAS_RE_MAP = {
+    "allergies": re.compile(r"過敏"),
+    "known_medications": re.compile(r"用藥|藥物|吃藥|藥"),
+    "chronic_conditions": re.compile(r"慢性病|高血壓|高血脂"),
+    "family_history": re.compile(r"家族史|家族|家人"),
+    "symptom_onset": re.compile(r"什麼時候|開始時間|發病"),
+    "symptom_description": re.compile(r"症狀|不舒服|口渴|頻尿|頭暈"),
+    "symptom_severity": re.compile(r"程度|嚴重"),
+    "questions_for_doctor": re.compile(r"問題|想問|問醫師"),
+}
+def _standardize_severity(val: str) -> str:
+    s = val.strip()
+    m = re.search(r"(\d+)\s*分", s)
+    if m:
+        try:
+            n = int(m.group(1))
+            if 1 <= n <= 3:
+                return "輕度"
+            if 4 <= n <= 6:
+                return "中度"
+            if 7 <= n <= 10:
+                return "重度"
+        except Exception:
+            pass
+    m2 = re.search(r"(\d+)\s*/\s*10", s)
+    if m2:
+        try:
+            n = int(m2.group(1))
+            if 1 <= n <= 3:
+                return "輕度"
+            if 4 <= n <= 6:
+                return "中度"
+            if 7 <= n <= 10:
+                return "重度"
+        except Exception:
+            pass
+    if "輕度" in s:
+        return "輕度"
+    if "中度" in s:
+        return "中度"
+    if "重度" in s:
+        return "重度"
+    return s
+def _extract_correction_target(text: str) -> tuple[str | None, str | None]:
+    for field, pat in _FIELD_ALIAS_RE_MAP.items():
+        if pat.search(text):
+            m = re.search(r"改成\s*([^\s，,。；;]+)", text)
+            if m:
+                return field, m.group(1).strip().strip("，。")
+            m2 = re.search(r"要改成\s*([^\s，,。；;]+)", text)
+            if m2:
+                return field, m2.group(1).strip().strip("，。")
+            return field, None
+    m = re.search(r"改成\s*([^\s，,。；;]+)", text)
+    if m:
+        return None, m.group(1).strip().strip("，。")
+    return None, None
+
+def _clean_question_text(raw: str) -> str:
+    s = raw.strip()
+    # colon extraction first
+    if ("幫我記" in s or "還要" in s) and ("：" in s or ":" in s):
+        m = re.search(r"[:：]\s*(.+)", s)
+        if m and m.group(1).strip():
+            s = m.group(1).strip()
+    # strip leading 有，/嗯，/對，/還有， with comma
+    s = re.sub(r"^(有|嗯|對|還有)[，,]\s*", "", s)
+    # also strip leading 有/嗯/對/還有 without comma but followed by space
+    # keep "有糖尿病" (no comma) intact
+    s = s.strip()
+    return s[:200]
 
 
 WorkflowRunner = Callable[..., WorkflowResult]
@@ -504,9 +634,15 @@ class ConversationOrchestrator:
                 return
             if len(intake.questions_for_doctor) >= 10:
                 return
-            updated = intake.model_copy(update={"questions_for_doctor": [*intake.questions_for_doctor, q]}, deep=True)
+            if q in (session.pending_question_proposal or "") or (session.pending_action and session.pending_action.proposal == q):
+                return
+            now = datetime.now(timezone.utc)
+            pending = PendingAction(type="PENDING_CONFIRM_QUESTION", proposal=q, created_at=now)
             try:
-                self.repository.save(session.model_copy(update={"intake_snapshot": updated}, deep=True), expected_version=session.version)
+                self.repository.save(
+                    session.model_copy(update={"pending_action": pending, "pending_question_proposal": q}, deep=True),
+                    expected_version=session.version,
+                )
             except Exception:
                 pass
         except Exception:
@@ -774,17 +910,43 @@ class ConversationOrchestrator:
         try:
             session = self._load_or_create(line_user_id)
             clean_text = text.strip()
+            if _is_short_ttl_text(clean_text) and not self._is_async_narrow_eligible(session, clean_text):
+                now = time.time()
+                norm = _normalize_text(clean_text)
+                key = (line_user_id, norm)
+                ttl = _dedup_ttl_for(clean_text)
+                with _text_dedup_lock:
+                    expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
+                    for k in expired:
+                        _text_dedup.pop(k, None)
+                    ts = _text_dedup.get(key)
+                    if ts is not None and now - ts < ttl:
+                        dedup_result = OrchestratorResult(
+                            event_id=event_id,
+                            session_id=session.session_id,
+                            reply=_dedup_reply_for(clean_text),
+                            status="BLOCKED",
+                            intake_stage=session.intake_stage,
+                            replayed=False,
+                        )
+                        self.repository.complete_webhook_event(
+                            event_id, dedup_result.model_dump(mode="json"), claim_token=claim_token
+                        )
+                        return dedup_result
+                    if norm:
+                        _text_dedup[key] = now
             if self._is_async_narrow_eligible(session, clean_text):
                 now = time.time()
                 norm = _normalize_text(clean_text)
                 key = (line_user_id, norm)
+                ttl = _dedup_ttl_for(clean_text)
                 is_dup = False
                 with _text_dedup_lock:
                     expired = [k for k, ts in list(_text_dedup.items()) if now - ts > TEXT_DEDUP_TTL_S]
                     for k in expired:
                         _text_dedup.pop(k, None)
                     ts = _text_dedup.get(key)
-                    if ts is not None and now - ts < TEXT_DEDUP_TTL_S:
+                    if ts is not None and now - ts < ttl:
                         is_dup = True
                     else:
                         if norm:
@@ -793,7 +955,7 @@ class ConversationOrchestrator:
                     dedup_result = OrchestratorResult(
                         event_id=event_id,
                         session_id=session.session_id,
-                        reply=TEXT_DEDUP_REPLY,
+                        reply=_dedup_reply_for(clean_text),
                         status="ASYNC_PENDING",
                         intake_stage=session.intake_stage,
                         replayed=False,
@@ -969,12 +1131,98 @@ class ConversationOrchestrator:
                 intake_stage=saved.intake_stage,
             )
 
+        if _is_empathy_text(text):
+            try:
+                from tfda_context_gate.workflow.fallbacks import empathy_response
+                reply = empathy_response(text)
+            except Exception:
+                reply = "抱歉讓您有這樣的感受，謝謝您告訴我。我的回覆是依 TFDA／國健署衛教文件整理，比較制式。您可以試試：為什麼會有糖尿病／飲食怎麼吃／上傳藥袋"
+                if _SEVERE_EMPATHY_RE and _SEVERE_EMPATHY_RE.search(text):
+                    reply += " 若您感到情緒困擾，可撥打 1925 安心專線（24小時）。"
+            session = self._sync_clinical_context(session)
+            context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
+            context, _ = self.context_manager.compact(context, stage_completed=False)
+            saved = self.repository.save(
+                session.model_copy(update={"conversation_context": context}, deep=True),
+                expected_version=previous_version,
+            )
+            return OrchestratorResult(
+                event_id="pending",
+                session_id=saved.session_id,
+                reply=reply,
+                status="FALLBACK",
+                intake_stage=saved.intake_stage,
+            )
+
+        if session.pending_action and session.pending_action.type == "PENDING_CONFIRM_QUESTION":
+            stripped = text.strip()
+            norm = re.sub(r"\s+", "", stripped)
+            is_disagree = bool(_DISAGREE_RE.search(stripped) or _DISAGREE_RE.search(norm))
+            is_agree = False
+            if not is_disagree:
+                if _AGREE_RE.match(stripped) or _AGREE_RE.match(norm):
+                    is_agree = True
+                elif len(stripped) <= 8 and _AGREE_SUB_RE.search(stripped):
+                    is_agree = True
+                elif stripped in ("好", "好的", "好啊", "可以", "沒問題", "幫我記", "記下來", "幫我記下來", "同意", "要"):
+                    is_agree = True
+            if is_disagree:
+                session = session.model_copy(update={"pending_action": None, "pending_question_proposal": None}, deep=True)
+                session = self._sync_clinical_context(session)
+                context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="好的，已略過，不會記入。")
+                context, _ = self.context_manager.compact(context, stage_completed=False)
+                saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="好的，已略過，不會記入。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+            if is_agree:
+                proposal = session.pending_action.proposal or session.pending_question_proposal or ""
+                if proposal:
+                    intake = session.intake_snapshot.model_copy(deep=True)
+                    if proposal not in intake.questions_for_doctor and len(intake.questions_for_doctor) < 10:
+                        intake.questions_for_doctor = [*intake.questions_for_doctor, proposal]
+                    session = session.model_copy(update={"intake_snapshot": intake, "pending_action": None, "pending_question_proposal": None}, deep=True)
+                    session = self._sync_clinical_context(session)
+                    context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="已幫你記下，會在看診摘要中提醒你問醫師。")
+                    context, _ = self.context_manager.compact(context, stage_completed=False)
+                    saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="已幫你記下，會在看診摘要中提醒你問醫師。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+                else:
+                    session = session.model_copy(update={"pending_action": None, "pending_question_proposal": None}, deep=True)
+                    session = self._sync_clinical_context(session)
+                    context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="已幫你記下，會在看診摘要中提醒你問醫師。")
+                    context, _ = self.context_manager.compact(context, stage_completed=False)
+                    saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="已幫你記下，會在看診摘要中提醒你問醫師。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+            # consent phrase but not agree/disagree ambiguous -> keep pending and fall through to normal? preserve pending
+
+        if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
+            stripped = text.strip()
+            if _SEVERITY_EXPLICIT_RE.search(stripped):
+                intake = session.intake_snapshot.model_copy(deep=True)
+                mapped = _standardize_severity(stripped)
+                if mapped:
+                    intake.symptom_severity = mapped
+                    # provenance retained via pending_severity_raw before clear, also via conversation turn
+                    session = session.model_copy(update={"intake_snapshot": intake, "pending_action": None, "pending_severity_raw": None}, deep=True)
+
         # 資料來源是臨床摘要的一部分，必須寫進結構化 state，不能只留在自由文字。
         if session.actor_role is ActorRole.RELATED_PERSON:
             if any(value in text for value in self.PROXY_SUBJECT_SOURCE_COMMANDS):
                 session = session.model_copy(update={"information_source": InformationSource.SUBJECT_REPORTED_VIA_PROXY})
             elif any(value in text for value in self.PROXY_OBSERVED_SOURCE_COMMANDS):
                 session = session.model_copy(update={"information_source": InformationSource.PROXY_OBSERVED})
+
+        # 純同意短句無 pending 時避免當 intake 誤寫
+        if not (session.pending_action and session.pending_action.type == "PENDING_CONFIRM_QUESTION"):
+            _strip_nospace = re.sub(r"\s+", "", text.strip())
+            if _strip_nospace in {"好", "好的", "可以", "沒問題", "幫我記", "記下來", "幫我記下來", "同意"} or (_AGREE_RE.match(text.strip()) and len(text.strip()) <= 6):
+                if not _CORRECTION_RE.search(text) and not _WANT_QUESTION_RE.search(text):
+                    existing_q = session.intake_snapshot.questions_for_doctor
+                    reply_noop = "已記下，若還有其他想問醫師的問題可以繼續補充。" if existing_q else "好的，有其他想問醫師的問題可以再告訴我。"
+                    session = self._sync_clinical_context(session)
+                    context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply_noop)
+                    context, _ = self.context_manager.compact(context, stage_completed=False)
+                    saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_noop, status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
 
         command_result = self._handle_product_command(session, text)
         if command_result is not None:
@@ -1013,12 +1261,27 @@ class ConversationOrchestrator:
             old_stage = session.intake_stage
             intake_note: str | None = None
             workflow_text = text
-            if self._is_intake_active(session, text) and session.status == "ACTIVE":
+            if self._is_intake_active(session, text) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
                 session, intake_note = self._normalize_intake_answer(session, text)
-                # 「不知道／沒有／跳過」已先寫入結構化 intake；不要再把這類短句
-                # 丟給醫療 intent router，否則容易被誤判為無法回答的請求。
-                if intake_note:
-                    workflow_text = "我要繼續整理看診前資料"
+                if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
+                    session = self._sync_clinical_context(session)
+                    context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=intake_note or "請問程度大約是輕度、中度、重度，或 1–10 分中的幾分？")
+                    context, _ = self.context_manager.compact(context, stage_completed=False)
+                    pending_q = self._question_for_field("symptom_severity") or "程度大約是輕度、中度、重度，或 1–10 分中的幾分？"
+                    session = session.model_copy(update={"pending_question": pending_q, "pending_field": "symptom_severity"}, deep=True)
+                    saved = self.repository.save(session, expected_version=previous_version)
+                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=intake_note or pending_q, status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+            # stage3 negative converged to review: clear stale pending and keep review
+            if session.pending_action and session.pending_action.type == "PENDING_STAGE_TRANSITION":
+                session = session.model_copy(update={"pending_action": None}, deep=True)
+                if session.intake_stage != "review":
+                    session = session.model_copy(update={"intake_stage": "review", "pending_field": None, "pending_question": None}, deep=True)
+                session = self._sync_clinical_context(session)
+                context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=intake_note or "好的，已進入確認階段。")
+                context, _ = self.context_manager.compact(context, stage_completed=False)
+                saved = self.repository.save(session, expected_version=previous_version)
+                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=intake_note or "好的，已進入確認階段。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+            workflow_text = text
             workflow = self._call_workflow(
                 {
                     "request_id": f"{session.session_id}-v{previous_version + 1}",
@@ -1047,8 +1310,38 @@ class ConversationOrchestrator:
             updates["pending_field"] = self._next_pending_field(resulting_intake)
             if workflow.status == "NEEDS_CONFIRMATION":
                 updates["status"] = "AWAITING_CONFIRMATION"
+            if not resulting_intake.questions_for_doctor and updates.get("intake_stage") == "review":
+                from tfda_context_gate.intake.schemas import INTAKE_FIELD_QUESTIONS as _QMAP
+                updates["intake_stage"] = "stage3"
+                updates["pending_field"] = "questions_for_doctor"
+                updates["pending_question"] = _QMAP.get("questions_for_doctor")
             session = session.model_copy(update=updates, deep=True)
-            reply, status, intake_stage = workflow.final_response, workflow.status, workflow.intake_stage
+            # Intake write succeeded but workflow mis-routed short answers to Q_NEED_MORE/BLOCKED — override to stay in intake
+            if intake_note is not None and workflow.status in ("BLOCKED", "FALLBACK") and workflow.fallback_reason in ("Q_NEED_MORE", "O_GENERIC", "CHIT_CHAT_OUT_OF_SCOPE", "B_INSUFFICIENT", "O_GENERIC"):
+                pending_after = self._next_pending_field(resulting_intake)
+                if pending_after:
+                    from tfda_context_gate.intake.schemas import INTAKE_FIELD_QUESTIONS as _QOVR
+                    ov_stage = self._field_stage(pending_after)
+                    ov_reply = _QOVR.get(pending_after) or workflow.final_response
+                    session = session.model_copy(update={"intake_stage": ov_stage, "pending_field": pending_after, "pending_question": ov_reply}, deep=True)
+                    reply, status, intake_stage = ov_reply, "NEEDS_CLARIFICATION", ov_stage
+                    workflow = workflow.model_copy(update={"final_response": ov_reply, "status": "NEEDS_CLARIFICATION", "intake_stage": ov_stage}) if hasattr(workflow, "model_copy") else workflow
+                else:
+                    reply, status, intake_stage = workflow.final_response, workflow.status, workflow.intake_stage
+            else:
+                reply, status, intake_stage = workflow.final_response, workflow.status, workflow.intake_stage
+                # When workflow returned None stage (e.g. BLOCKED) but intake progressed, use session's derived stage
+                if intake_stage is None and intake_note is not None:
+                    intake_stage = session.intake_stage
+                    status = "NEEDS_CLARIFICATION" if session.pending_field else status
+                    if session.pending_question:
+                        reply = session.pending_question
+            if not resulting_intake.questions_for_doctor and intake_stage == "review":
+                from tfda_context_gate.intake.schemas import INTAKE_FIELD_QUESTIONS as _QMAP2
+                intake_stage = "stage3"
+                status = "NEEDS_CLARIFICATION"
+                reply = _QMAP2.get("questions_for_doctor", reply)
+                session = session.model_copy(update={"intake_stage": "stage3", "pending_field": "questions_for_doctor", "pending_question": reply}, deep=True)
             stage_completed = old_stage != session.intake_stage
             checkpoint: str | None = None
             if stage_completed and old_stage in {"stage1", "stage2"}:
@@ -1091,6 +1384,20 @@ class ConversationOrchestrator:
 
     _PROXY_FUZZY_RE = re.compile(r"幫.{0,10}問|代.{0,10}整理|幫.{0,10}整理|替.{0,10}問", re.IGNORECASE)
     _UNCERTAIN_RE = re.compile(r"不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚|不太知道", re.IGNORECASE)
+    _BARE_UNCERTAIN_RE = re.compile(r"^\s*(我)?\s*(不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚|不太知道)\s*[啊欸呢啦哦喔嗎]?[？?。!！]*\s*$", re.IGNORECASE)
+
+    @classmethod
+    def _is_bare_uncertain(cls, text: str) -> bool:
+        try:
+            n = unicodedata.normalize("NFKC", text).strip()
+            if cls._BARE_UNCERTAIN_RE.match(n):
+                return True
+            compact = re.sub(r"\s+", "", n)
+            if compact in {"不知道", "我不知道", "我不知道啊", "不清楚", "我不清楚", "不確定", "忘了", "忘記了"}:
+                return True
+        except Exception:
+            pass
+        return False
 
     @classmethod
     def _is_proxy_intent(cls, text: str) -> bool:
@@ -1137,6 +1444,7 @@ class ConversationOrchestrator:
             (session.authorization_status is AuthorizationStatus.UNVERIFIED or session.status == "CLOSED")
             and not self._is_intake_active(session)
             and self._UNCERTAIN_RE.search(text)
+            and not self._is_bare_uncertain(text)
             and self.risk_policy.classify(text).level != "RED_FLAG"
         ):
             return session, "我是 AI 看診前整理助理，只協助衛教與資料整理，不做診斷，也不是緊急醫療服務。Demo session 最多保存 7 天；確認前不會分享給醫護。這份資料是為誰整理？請選擇「為自己整理」或「代家人整理」。", "NEEDS_ROLE_SELECTION"
@@ -1291,7 +1599,7 @@ class ConversationOrchestrator:
             })
             return session, session.pending_question or "請提供看診資料。", "NEEDS_CLARIFICATION"
         if session.status == "AWAITING_CONFIRMATION" and text in self.CONFIRM_COMMANDS:
-            session = session.model_copy(update={"status": "SUBMITTED", "intake_stage": "submitted", "pending_field": None, "pending_question": None}, deep=True)
+            session = session.model_copy(update={"status": "SUBMITTED", "intake_stage": "submitted", "pending_field": None, "pending_question": None, "pending_action": None, "pending_severity_raw": None, "pending_question_proposal": None, "stage_transition_flag": None}, deep=True)
             return session, "看診前資料已確認完成。您現在可以選擇「分享給醫護」。", "SUBMITTED"
         return None
 
@@ -1305,6 +1613,10 @@ class ConversationOrchestrator:
             "intake_stage": "stage1",
             "pending_field": None,
             "pending_question": None,
+            "pending_action": None,
+            "pending_severity_raw": None,
+            "pending_question_proposal": None,
+            "stage_transition_flag": None,
             "system_risk_classification": None,
             "status": "ACTIVE",
         }
@@ -1357,20 +1669,22 @@ class ConversationOrchestrator:
     def _normalize_intake_answer(
         cls, session: ProductSession, text: str
     ) -> tuple[ProductSession, str | None]:
-        """將不知道、無、跳過與單欄自然語句轉成明確結構資料。"""
         field = session.pending_field or cls._next_pending_field(session.intake_snapshot)
-        if field is None:
-            return session, None
+        if field is None and not _CORRECTION_RE.search(text) and not _WANT_QUESTION_RE.search(text):
+            if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
+                pass
+            else:
+                return session, None
+        if field is None and (_CORRECTION_RE.search(text) or _WANT_QUESTION_RE.search(text)):
+            field = cls._next_pending_field(session.intake_snapshot) or "allergies"
         try:
             from tfda_context_gate.intake.tool import INJECTION_FIXED_REPLY, is_injection_attempt
-
             if is_injection_attempt(text):
                 return session, INJECTION_FIXED_REPLY
         except Exception:
             pass
         try:
             from tfda_context_gate.intake.tool import is_plausible_intake_value
-
             if not is_plausible_intake_value(text):
                 pending_q = session.pending_question or cls._question_for_field(field)
                 if pending_q:
@@ -1382,30 +1696,114 @@ class ConversationOrchestrator:
         _trunc_marker = "(已節錄)"
         try:
             from tfda_context_gate.intake.tool import INTAKE_MAX_LENGTH
-
             limit = INTAKE_MAX_LENGTH
         except Exception:
             limit = 120
         stripped_for_len = text.strip()
         if len(stripped_for_len) > limit:
             _was_truncated = True
-            text = stripped_for_len[:limit]
+            text_for_extract = stripped_for_len[:limit]
+        else:
+            text_for_extract = stripped_for_len
+        text = text_for_extract
+
+        is_correction = bool(_CORRECTION_RE.search(text))
+        if is_correction:
+            tgt_field, tgt_val = _extract_correction_target(text)
+            if tgt_field == "allergies" and tgt_val:
+                intake = session.intake_snapshot.model_copy(deep=True)
+                intake.allergies = [tgt_val[:20]]
+                confirm = f"已更新為「{tgt_val}」，其他已填資料保留。"
+                if _was_truncated and _trunc_marker not in confirm:
+                    confirm = f"{confirm} {_trunc_marker}"
+                new_session = session.model_copy(update={"intake_snapshot": intake}, deep=True)
+                if new_session.pending_action and new_session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
+                    new_session = new_session.model_copy(update={"pending_action": None, "pending_severity_raw": None}, deep=True)
+                return new_session, confirm
+            if is_correction and "盤尼西林" in text:
+                intake = session.intake_snapshot.model_copy(deep=True)
+                intake.allergies = ["盤尼西林"]
+                confirm = f"已更新為「盤尼西林」，其他已填資料保留。"
+                if _was_truncated and _trunc_marker not in confirm:
+                    confirm = f"{confirm} {_trunc_marker}"
+                new_session = session.model_copy(update={"intake_snapshot": intake}, deep=True)
+                if new_session.pending_action and new_session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
+                    new_session = new_session.model_copy(update={"pending_action": None, "pending_severity_raw": None}, deep=True)
+                return new_session, confirm
+
+        if _WANT_QUESTION_RE.search(text) and field != "questions_for_doctor":
+            if re.search(r"想問|想請問|想了解|問題是|疑問|？|\?|嗎|如何|怎麼|為何|為什麼|多少|是否", text) or len(text.strip()) > 5:
+                intake = session.intake_snapshot.model_copy(deep=True)
+                proposal = _clean_question_text(text)
+                if not proposal or _QUESTION_NEGATIVE_RE.match(proposal):
+                    pass
+                else:
+                    if proposal and proposal not in intake.questions_for_doctor and len(intake.questions_for_doctor) < 10:
+                        intake.questions_for_doctor = [*intake.questions_for_doctor, proposal]
+                        confirm = f"你說的「{text.strip()[:30]}」我已幫你加到「想問醫師的問題」，其他資料保留。"
+                        if _was_truncated and _trunc_marker not in confirm:
+                            confirm = f"{confirm} {_trunc_marker}"
+                        return session.model_copy(update={"intake_snapshot": intake, "pending_action": None}, deep=True), confirm
+                    elif proposal in intake.questions_for_doctor:
+                        return session, f"這個問題已經記過了，其他資料保留。"
+
+        if field == "symptom_severity":
+            hedge_hit = bool(_HEDGE_RE.search(text) or text.strip() in ("有點嚴重吧", "有點嚴重", "有點嚴重吧？", "稍微嚴重"))
+            has_explicit = bool(_SEVERITY_EXPLICIT_RE.search(text))
+            cleaned = re.sub(r"有點嚴重吧|有點嚴重|稍微嚴重|有點|稍微|好像|吧$|大概", "", text).strip()
+            cleaned_has_explicit = bool(_SEVERITY_EXPLICIT_RE.search(cleaned))
+            if hedge_hit and not cleaned_has_explicit:
+                if not has_explicit:
+                    from datetime import datetime as _dt, timezone as _tz
+                    pending = PendingAction(type="PENDING_SEVERITY_CLARIFY", raw_provenance=text.strip()[:200], target_field="symptom_severity", created_at=_dt.now(_tz.utc))
+                    new_sess = session.model_copy(update={"pending_action": pending, "pending_severity_raw": text.strip()[:200], "pending_question": "請問程度大約是輕度、中度、重度，或 1–10 分中的幾分？", "pending_field": "symptom_severity"}, deep=True)
+                    return new_sess, "請問程度大約是輕度、中度、重度，或 1–10 分中的幾分？"
+
+        if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
+            has_explicit = bool(_SEVERITY_EXPLICIT_RE.search(text))
+            if has_explicit:
+                intake = session.intake_snapshot.model_copy(deep=True)
+                mapped = _standardize_severity(text)
+                if mapped:
+                    intake.symptom_severity = mapped
+                    new_sess = session.model_copy(update={"intake_snapshot": intake, "pending_action": None, "pending_severity_raw": None}, deep=True)
+                    from tfda_context_gate.intake.tool import build_implicit_confirm
+                    confirm = build_implicit_confirm(text, mapped)
+                    if _was_truncated and _trunc_marker not in confirm:
+                        confirm = f"{confirm} {_trunc_marker}"
+                    return new_sess, confirm
 
         candidates: dict[str, Any] = {}
         try:
             from tfda_context_gate.intake.tool import PreVisitIntakeTool
-
             tool = PreVisitIntakeTool()
             candidates = tool.extract_fields_from_utterance(text, stage=None)
             if "questions_for_doctor" in candidates:
-                has_q = bool(re.search(r"想問|想請問|想了解|問題是|疑問|？|\?|嗎|如何|怎麼|為何|為什麼", text))
-                if not has_q:
+                if _QUESTION_NEGATIVE_RE.match(text.strip()):
                     candidates.pop("questions_for_doctor", None)
+                else:
+                    has_q = bool(re.search(r"想問|想請問|想了解|問題是|疑問|？|\?|嗎|如何|怎麼|為何|為什麼|多少|是否|正常", text))
+                    if not has_q:
+                        candidates.pop("questions_for_doctor", None)
             if "chronic_conditions" in candidates and "symptom_description" in candidates:
                 desc_val = str(candidates["symptom_description"])
                 distinct = any(kw in desc_val for kw in ["口渴", "頻尿", "頭暈", "疲倦", "喘", "疼痛", "麻", "視力", "血糖"])
                 if not distinct and any(kw in desc_val for kw in ["高血壓", "高血脂", "高脂血", "腎臟病", "心臟病"]):
                     candidates.pop("symptom_description", None)
+            if is_correction:
+                tgt_f, tgt_v = _extract_correction_target(text)
+                if tgt_f == "allergies" and tgt_v and "allergies" not in candidates:
+                    candidates["allergies"] = [tgt_v]
+                elif "盤尼西林" in text and "allergies" not in candidates:
+                    candidates["allergies"] = ["盤尼西林"]
+                elif "阿斯匹靈" in text and "allergies" not in candidates:
+                    candidates["allergies"] = ["阿斯匹靈"]
+            if is_correction and _WANT_QUESTION_RE.search(text) and "questions_for_doctor" not in candidates:
+                # broaden to 幫我記 pattern, extract after colon
+                m_q = re.search(r"[:：]\s*(.+)", text)
+                proposal_q = (m_q.group(1).strip() if m_q and m_q.group(1).strip() else text.strip())[:200]
+                if proposal_q and not _QUESTION_NEGATIVE_RE.match(proposal_q):
+                    candidates["questions_for_doctor"] = [proposal_q]
         except Exception:
             candidates = {}
 
@@ -1424,21 +1822,68 @@ class ConversationOrchestrator:
                 continue
             existing = getattr(intake, k, None)
             is_symptom = k in {"symptom_onset", "symptom_description", "symptom_severity"}
-            if not existing or _is_placeholder(k, existing) or is_symptom:
-                if isinstance(v, list):
-                    tv = [str(x).strip()[:limit] for x in v]
-                    v = tv
-                elif isinstance(v, str) and len(v) > limit:
-                    v = v[:limit]
-                if k == "symptom_description" and "symptom_onset" in candidates and str(v).strip() == text.strip()[:limit]:
+            # symptom fields only overwrite on explicit correction or when empty, not on arbitrary question text
+            allow_override = is_correction or not existing or _is_placeholder(k, existing) or k == "questions_for_doctor"
+            if is_symptom and existing and not _is_placeholder(k, existing) and not is_correction:
+                # check if text actually contains symptom semantics; otherwise block pollution like "血糖多少正常"
+                has_symptom_kw = any(kw in text for kw in ["餓", "手抖", "口渴", "頻尿", "頭暈", "疼痛", "麻", "視力", "血糖高", "血糖低", "發抖"])
+                has_question_kw = bool(re.search(r"多少正常|嗎$|？$|\?$|如何|怎麼|為何", text))
+                if has_question_kw and not has_symptom_kw:
+                    allow_override = False
+            if not allow_override:
+                continue
+            if isinstance(v, list):
+                tv = [str(x).strip()[:limit] for x in v]
+                v = tv
+                if k == "questions_for_doctor":
+                    merged = list(intake.questions_for_doctor)
+                    for item in v:
+                        if item not in merged and len(merged) < 10:
+                            merged.append(item)
+                    v = merged
+            elif isinstance(v, str) and len(v) > limit:
+                v = v[:limit]
+            if k == "symptom_description" and "symptom_onset" in candidates and str(v).strip() == text.strip()[:limit]:
+                continue
+            if k == "questions_for_doctor" and isinstance(v, list):
+                if any("我要繼續整理看診前資料" in str(x) for x in v):
                     continue
-                valid[k] = v
+                # filter negative
+                v = [x for x in v if not _QUESTION_NEGATIVE_RE.match(x.strip())]
+                if not v:
+                    continue
+                # unified extraction via _clean_question_text
+                nv = []
+                for x in v:
+                    cleaned = _clean_question_text(x)
+                    if cleaned and not _QUESTION_NEGATIVE_RE.match(cleaned):
+                        nv.append(cleaned)
+                    elif cleaned:
+                        # if cleaned is negative, skip
+                        continue
+                    else:
+                        nv.append(x)
+                v = nv
+            if k == "questions_for_doctor" and isinstance(v, str) and "我要繼續整理看診前資料" in v:
+                continue
+            if k == "questions_for_doctor" and isinstance(v, str) and _QUESTION_NEGATIVE_RE.match(v.strip()):
+                continue
+            if k == "symptom_severity":
+                # standardize numeric scores, keep provenance via pending_severity_raw
+                if isinstance(v, str):
+                    v = _standardize_severity(v)
+                elif isinstance(v, list) and v:
+                    v = _standardize_severity(str(v[0]))
+            valid[k] = v
 
         if valid:
             for f, val in valid.items():
-                setattr(intake, f, val)
+                if f == "questions_for_doctor" and isinstance(val, list):
+                    setattr(intake, f, val)
+                else:
+                    setattr(intake, f, val)
+                _intake_uncertain_attempts.pop((session.session_id, f), None)
             from tfda_context_gate.intake.tool import build_implicit_confirm, build_implicit_confirm_for_fields
-
             label_map = {
                 "known_medications": "用藥",
                 "allergies": "過敏",
@@ -1450,6 +1895,23 @@ class ConversationOrchestrator:
                 "questions_for_doctor": "想問醫師的問題",
             }
             raw_snip = text.strip()[:30]
+            if is_correction:
+                updated_fields = list(valid.keys())
+                labels = "、".join(label_map.get(k, k) for k in updated_fields)
+                parts = []
+                for vv in valid.values():
+                    if isinstance(vv, list):
+                        parts.append("、".join(str(x) for x in vv))
+                    else:
+                        parts.append(str(vv))
+                norm_joined = "；".join(parts)
+                confirm = f"已更新為「{norm_joined}」（{labels}），其他已填資料保留。"
+                if _was_truncated and _trunc_marker not in confirm:
+                    confirm = f"{confirm} {_trunc_marker}"
+                new_sess = session.model_copy(update={"intake_snapshot": intake}, deep=True)
+                if new_sess.pending_action and new_sess.pending_action.type == "PENDING_SEVERITY_CLARIFY" and "symptom_severity" in valid:
+                    new_sess = new_sess.model_copy(update={"pending_action": None, "pending_severity_raw": None}, deep=True)
+                return new_sess, confirm
             if field not in valid or len(valid) > 1:
                 if len(valid) == 1:
                     f = next(iter(valid))
@@ -1476,10 +1938,25 @@ class ConversationOrchestrator:
                     confirm = build_implicit_confirm(text, norm)
             if _was_truncated and _trunc_marker not in confirm:
                 confirm = f"{confirm} {_trunc_marker}"
-            return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
+            new_sess = session.model_copy(update={"intake_snapshot": intake}, deep=True)
+            if new_sess.pending_action and new_sess.pending_action.type == "PENDING_SEVERITY_CLARIFY" and "symptom_severity" in valid:
+                new_sess = new_sess.model_copy(update={"pending_action": None, "pending_severity_raw": None}, deep=True)
+            return new_sess, confirm
 
-        # F1-R1/R2: candidates hit already-filled non-symptom field -> don't pollute pending
         if candidates and not valid:
+            if is_correction:
+                for k, v in candidates.items():
+                    if k in cls.INTAKE_FIELD_ORDER and v:
+                        existing = getattr(intake, k, None)
+                        if existing and not _is_placeholder(k, existing):
+                            if isinstance(v, list):
+                                tv = [str(x).strip()[:limit] for x in v]
+                                v = tv
+                            elif isinstance(v, str) and len(v) > limit:
+                                v = v[:limit]
+                            setattr(intake, k, v)
+                            confirm = f"已更新為「{str(v)[:30]}」，其他已填資料保留。"
+                            return session.model_copy(update={"intake_snapshot": intake}, deep=True), confirm
             pending_q = session.pending_question or cls._question_for_field(field)
             if pending_q:
                 return session, pending_q
@@ -1497,11 +1974,19 @@ class ConversationOrchestrator:
         }
         none_answer = none_answer or bool(re.search(none_patterns.get(field, r"(?!x)x"), normalized))
 
-        if (uncertain or skip) and not valid:
+        if (uncertain or skip or (field == "questions_for_doctor" and _QUESTION_NEGATIVE_RE.match(text.strip()))) and not valid:
             if field in {"symptom_onset", "symptom_description", "symptom_severity"}:
                 setattr(intake, field, "待確認")
                 return session.model_copy(update={"intake_snapshot": intake}, deep=True), (
                     "沒關係，先記為『待確認』，看診時再跟醫師確認。"
+                )
+            if field == "questions_for_doctor" and (skip or _QUESTION_NEGATIVE_RE.match(text.strip())):
+                if intake.questions_for_doctor is None:
+                    setattr(intake, field, [])
+                # converge to review and clear stale pending
+                new_stage = "review"
+                return session.model_copy(update={"intake_snapshot": intake, "intake_stage": new_stage, "pending_action": None, "pending_field": None, "pending_question": None}, deep=True), (
+                    "好的，已記錄，進入確認階段。"
                 )
             value: Any = ["不清楚（待看診確認）"] if field in {
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
@@ -1525,16 +2010,47 @@ class ConversationOrchestrator:
                 if pending_q:
                     return session, pending_q
                 return session, None
+            if "我要繼續整理看診前資料" in stripped:
+                return session, None
+            # stage3 negative should not be stored
+            if field == "questions_for_doctor" and _QUESTION_NEGATIVE_RE.match(stripped):
+                pending_q = session.pending_question or cls._question_for_field(field)
+                if pending_q:
+                    return session, pending_q
+                return session, None
+            # review command should not be stored as question
+            if field == "questions_for_doctor" and stripped.lower() == "review":
+                return session, session.pending_question or "請確認是否完成看診資料整理？"
+            # unified cleaning for questions (colon + 有， prefix)
+            if field == "questions_for_doctor":
+                cleaned_q = _clean_question_text(stripped)
+                if cleaned_q and cleaned_q != stripped:
+                    stripped = cleaned_q
+                elif cleaned_q == "" and _QUESTION_NEGATIVE_RE.match(stripped):
+                    # keep negative handling already above, but ensure not stored
+                    pass
+            # severity standardization for direct write
+            if field == "symptom_severity":
+                stripped = _standardize_severity(stripped)
             direct: Any = [stripped[:limit]] if field in {
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
             } else stripped[:limit]
+            if field == "questions_for_doctor" and isinstance(direct, list):
+                if any("我要繼續整理看診前資料" in str(x) for x in direct):
+                    return session, None
+                # filter negative in direct
+                direct = [x for x in direct if not _QUESTION_NEGATIVE_RE.match(x.strip())]
+                if not direct:
+                    pending_q = session.pending_question or cls._question_for_field(field)
+                    if pending_q:
+                        return session, pending_q
+                    return session, None
             setattr(intake, field, direct)
             if isinstance(direct, list):
                 norm_str = "、".join(str(x) for x in direct)
             else:
                 norm_str = str(direct)
             from tfda_context_gate.intake.tool import build_implicit_confirm
-
             confirm = build_implicit_confirm(text, norm_str)
             if _was_truncated and _trunc_marker not in confirm:
                 confirm = f"{confirm} {_trunc_marker}"

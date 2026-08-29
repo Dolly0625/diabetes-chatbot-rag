@@ -62,6 +62,7 @@ class IntentTag(_CodeEnum):
     MEDICATION_CHANGE_REQUEST = "MEDICATION_CHANGE_REQUEST"  # 要求調整用藥／劑量（高風險）
     NON_MEDICAL = "NON_MEDICAL"  # 非醫療範疇（天氣/股票/寫程式等）
     PRE_VISIT_INTAKE = "PRE_VISIT_INTAKE"  # 看診前整理（要看醫生/回診/準備看診等自然觸發）
+    IDENTITY = "IDENTITY"  # 身份問答（你是誰/你是AI/怎麼稱呼等，P5-1 專路）
 
 
 class RiskFlag(_CodeEnum):

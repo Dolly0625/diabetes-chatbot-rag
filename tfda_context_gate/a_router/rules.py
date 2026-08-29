@@ -82,9 +82,12 @@ class RuleBasedSignalExtractor:
     _chit_chat = re.compile(
         r"想睡覺|想睡了|無聊|你好|哈囉|晚安|你好嗎|嗨|"
         r"你可以跟我說什麼|你可以說什麼|你能做什麼|你能幫什麼|"
-        r"可以跟我說什麼|能做什麼|能幫我做什麼|功能介紹|我能問什麼|你會做什麼|系統能做什麼",
+        r"可以跟我說什麼|能做什麼|能幫我做什麼|功能介紹|我能問什麼|你會做什麼|系統能做什麼|"
+        r"你是誰|你是AI|你是機器人|叫什麼|什麼名字|怎麼稱呼",
         re.IGNORECASE,
     )
+    # P5-1 identity: dedicated regex for persona Q&A (Traditional Chinese, NFKC-normalized)
+    _identity_re = re.compile(r"你是誰|你是AI|你是機器人|叫什麼|什麼名字|怎麼稱呼", re.IGNORECASE)
     # MENTAL_HEALTH_CRISIS 窄範圍：僅明確自傷/自殺字眼，絕不含「想睡覺」「想睡」「休息」等睡眠詞
     _mental_health_crisis = re.compile(
         r"想自殺|自殺|不想活|活不下去|想死|輕生|結束生命|自殘|割腕|自傷",
@@ -141,6 +144,19 @@ class RuleBasedSignalExtractor:
             return False
         return bool(RuleBasedSignalExtractor._chit_chat.search(normalized))
 
+    @staticmethod
+    def is_identity_text(text: str) -> bool:
+        try:
+            normalized = normalize_input(text)
+        except InputValidationError:
+            return False
+        if RuleBasedSignalExtractor._identity_re.search(normalized):
+            return True
+        stripped = normalized.strip().strip("？?。.!！")
+        if stripped == "是誰":
+            return True
+        return False
+
     def extract(self, text: str, language: LanguageCode | None = None) -> RouterSignals:
         """萃取訊號；輸入：原始文字與語系，輸出：RouterSignals（意圖+風險+語境）；流程：正規化→逐正則匹配→去重→組裝。"""
         text = normalize_input(text)  # 第 2 步：先正規化（NFKC+空白壓縮）
@@ -153,6 +169,8 @@ class RuleBasedSignalExtractor:
             risks.append(RiskFlag.POSSIBLE_EMERGENCY)
         if self._mental_health_crisis.search(text):
             risks.append(RiskFlag.MENTAL_HEALTH_CRISIS)
+        if self._identity_re.search(text) or text.strip().strip("？?。.!！") == "是誰":
+            intents.append(IntentTag.IDENTITY)
         if self._chit_chat.search(text):
             intents.append(IntentTag.NON_MEDICAL)
         is_intake = self._is_pre_visit_intake(text)
@@ -229,6 +247,19 @@ def is_red_flag(text: str) -> bool:
     except InputValidationError:
         return False
     return RiskSignalPolicy().classify(normalized).level == "RED_FLAG"
+
+
+def is_identity_text(text: str) -> bool:
+    try:
+        normalized = normalize_input(text)
+    except InputValidationError:
+        return False
+    if RuleBasedSignalExtractor._identity_re.search(normalized):
+        return True
+    stripped = normalized.strip().strip("？?。.!！")
+    if stripped == "是誰":
+        return True
+    return False
 
 
 def merge_signals(*signal_sets: RouterSignals) -> RouterSignals:
