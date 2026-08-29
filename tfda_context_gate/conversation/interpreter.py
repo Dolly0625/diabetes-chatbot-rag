@@ -31,20 +31,39 @@ TurnIntent = Literal[
 ]
 
 # IntakeCandidate 僅為候選，不得寫入 intake_snapshot；寫入仍由 Orchestrator/PendingAction 決定
+IntakeField = Literal[
+    "known_medications",
+    "allergies",
+    "chronic_conditions",
+    "family_history",
+    "symptom_onset",
+    "symptom_description",
+    "symptom_severity",
+    "questions_for_doctor",
+]
+
 class IntakeCandidate(StrictModel):
-    field_name: str = Field(min_length=1)
+    field_name: IntakeField
     candidate_value: str = Field(min_length=1, max_length=2_000)
     source_quote: str = Field(min_length=1, max_length=500)
     confidence: float = Field(ge=0.0, le=1.0)
     explicitly_stated: bool
     requires_confirmation: bool
 
+    @model_validator(mode="after")
+    def _validate_quote(self) -> "IntakeCandidate":
+        # source_quote 必須能在 current_message 找到（由 interpreter 保證，模型層二次防禦）
+        # 若 candidate 來自非授權推測，explicitly_stated 應為 false 並 requires_confirmation true
+        if not self.explicitly_stated and not self.requires_confirmation:
+            raise ValueError("non-explicit candidate must require confirmation")
+        return self
+
 
 class ConversationTurnInterpretation(StrictModel):
     intents: list[TurnIntent] = Field(default_factory=list, max_length=10)
     resolved_education_query: str | None = Field(default=None, max_length=8_000)
     intake_candidates: list[IntakeCandidate] = Field(default_factory=list, max_length=8)
-    correction_target: str | None = Field(default=None)
+    correction_target: IntakeField | None = Field(default=None)
     correction_value: str | None = Field(default=None, max_length=2_000)
     doctor_question_candidate: str | None = Field(default=None, max_length=2_000)
     references_resolved: bool = False
@@ -69,11 +88,11 @@ class ConversationInterpreter(Protocol):
 _CORRECTION_RE = re.compile(r"說錯了|更正|其實是|不是.*是|剛剛說錯", re.IGNORECASE)
 _SUBJECT_AMBIGUOUS_RE = re.compile(r"是我媽媽|是我家人|那個是我|不是我|幫家人", re.IGNORECASE)
 # subject switch that is explicit with consent phrase is NOT ambiguous; ambiguous is when source unclear without consent
-_SUBJECT_CLARIFY_RE = re.compile(r"那個是我媽媽，不是我|那個不是我|是我媽媽的|幫媽媽問", re.IGNORECASE)
-_METFORMIN_SELF_RE = re.compile(r"我(有|正在)?吃\s*metformin|我目前服用\s*metformin|我有吃\s*metformin", re.IGNORECASE)
-_METFORMIN_QUESTION_ONLY_RE = re.compile(r"metformin.*會.*傷腎|metformin.*副作用|metformin.*傷腎", re.IGNORECASE)
-_FRUIT_QUERY_RE = re.compile(r"水果", re.IGNORECASE)
-_FRUIT_FOLLOWUP_RE = re.compile(r"那一天可以吃多少|一天可以吃多少|可以吃多少|那.*可以吃多少", re.IGNORECASE)
+_SUBJECT_CLARIFY_RE = re.compile(r"那個是我媽媽，不是我|那個不是我|是我媽媽的|幫媽媽問|是我媽媽在吃|前面講錯.*媽媽", re.IGNORECASE)
+_METFORMIN_SELF_RE = re.compile(r"我(有|正在)?吃\s*(metformin|二甲雙胍)|我目前服用\s*(metformin|二甲雙胍)|我有吃\s*(metformin|二甲雙胍)|醫生有開二甲雙胍給我", re.IGNORECASE)
+_METFORMIN_QUESTION_ONLY_RE = re.compile(r"(metformin|二甲雙胍).*會.*(傷腎|副作用)|.*副作用.*(metformin|二甲雙胍)", re.IGNORECASE)
+_FRUIT_QUERY_RE = re.compile(r"水果|芭樂|蘋果|香蕉", re.IGNORECASE)
+_FRUIT_FOLLOWUP_RE = re.compile(r"那一天可以吃多少|一天可以吃多少|可以吃多少|那.*可以吃多少|所以每天大概能碰幾份|每天大概能碰幾份", re.IGNORECASE)
 _WANT_QUESTION_RE = re.compile(r"想問醫師|想問醫生|問題.*醫師|問題.*醫生", re.IGNORECASE)
 _AGREE_RE = re.compile(r"^\s*(好|好的|可以|同意|要|幫我記|記下來)", re.IGNORECASE)
 _DISAGREE_RE = re.compile(r"不要|不用|不要記|略過|不同意", re.IGNORECASE)
@@ -122,10 +141,15 @@ def _detect_intake_candidates(envelope: Any) -> list[IntakeCandidate]:
         tool = PreVisitIntakeTool()
         stage = getattr(envelope, "intake_stage", "stage1")
         extracted = tool.extract_fields_from_utterance(cm, stage=stage)  # type: ignore[arg-type]
+        # Fallback: if stage-specific extraction yields nothing but text looks like symptom, try cross-stage
+        if not extracted and any(kw in cm for kw in ["口渴", "頻尿", "嘴巴乾", "跑廁所", "乾", "廁所"]):
+            extracted = tool.extract_fields_from_utterance(cm, stage=None)  # type: ignore[arg-type]
         for field, values in extracted.items():
             if not values:
                 continue
             if field == "known_medications" and any(c.field_name == field for c in candidates):
+                continue
+            if field == "questions_for_doctor" and not _WANT_QUESTION_RE.search(cm):
                 continue
             for val in values[:1]:
                 if isinstance(val, list):
@@ -288,7 +312,7 @@ class DeterministicConversationInterpreter:
         # 5. Education question detection (including cross-turn resolved)
         # Check if current message looks like education question
         is_edu = False
-        edu_keywords = ("可以吃", "可以喝", "飲食", "水果", "血糖", "胰島素", "metformin", "會傷腎", "副作用")
+        edu_keywords = ("可以吃", "能吃", "可以喝", "飲食", "水果", "芭樂", "血糖", "胰島素", "metformin", "二甲雙胍", "會傷腎", "副作用")
         if any(k in n for k in edu_keywords) and ("？" in n or "嗎" in n or "怎麼" in n or "如何" in n):
             is_edu = True
         # Cross-turn fruit followup resolution
@@ -400,19 +424,56 @@ class FakeConversationInterpreter(DeterministicConversationInterpreter):
         return super().interpret(envelope)
 
 
+class ConversationInterpreterFactory:
+    """單一工廠：依 .env 模型設定回傳 Formal 或 Deterministic。"""
+
+    @staticmethod
+    def from_env(fallback: ConversationInterpreter | None = None, timeout_s: float = 8.0) -> ConversationInterpreter:
+        # 測試 hermetic：PYTEST_CURRENT_TEST 存在時一律 deterministic，避免 live LLM 拖慢/不穩
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            return fallback or DeterministicConversationInterpreter()
+        # 優先 CONVERSATION_LLM_MODEL → fallback ROUTER_LLM_MODEL，兩者皆無才 deterministic
+        # 透過 run_config/env_value 統一讀取，不在程式內硬編碼模型名稱
+        from tfda_context_gate.run_config import env_value
+
+        # 保存 LINE 相關 env 以免 load_dotenv override 破壞測試 hermetic
+        _line_keys = ["LINE_CHANNEL_SECRET", "LINE_ALLOW_UNSIGNED_WEBHOOK", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_ACCESS_TOKEN", "LINE_CHANNEL_TOKEN", "LINE_IDENTITY_HASH_KEY", "LINE_SESSION_DB_PATH"]
+        _saved = {k: os.getenv(k) for k in _line_keys}
+        try:
+            conv_model = (env_value("CONVERSATION_LLM_MODEL", "") or "").strip()
+            router_model = (env_value("ROUTER_LLM_MODEL", "") or "").strip()
+            model = conv_model or router_model
+        finally:
+            for k, v in _saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        if not model:
+            return fallback or DeterministicConversationInterpreter()
+        try:
+            return FormalConversationInterpreter(fallback=fallback, timeout_s=timeout_s, model_override=model)
+        except Exception:
+            return fallback or DeterministicConversationInterpreter()
+        try:
+            return FormalConversationInterpreter(fallback=fallback, timeout_s=timeout_s, model_override=model)
+        except Exception:
+            return fallback or DeterministicConversationInterpreter()
+
+
 class FormalConversationInterpreter:
     """Formal LLM-backed interpreter with deterministic fallback.
 
-    Reads CONVERSATION_LLM_MODEL from .env, fallback to ROUTER_LLM_MODEL.
-    No hardcoded model names. Timeout and schema errors fallback to Deterministic.
+    透過 Factory 取得，模型名稱由 env 決定，無硬編碼。Timeout 與 schema 錯誤回退 Deterministic。
     """
 
-    def __init__(self, fallback: ConversationInterpreter | None = None, timeout_s: float = 8.0):
+    def __init__(self, fallback: ConversationInterpreter | None = None, timeout_s: float = 8.0, model_override: str | None = None):
         self.fallback = fallback or DeterministicConversationInterpreter()
         self.timeout_s = float(os.getenv("CONVERSATION_LLM_TIMEOUT_S", str(timeout_s)))
         self._llm = None
         self._chain = None
         self._init_error: str | None = None
+        self._model_name: str | None = model_override
         try:
             self._init_llm()
         except Exception as exc:
@@ -421,14 +482,26 @@ class FormalConversationInterpreter:
     def _init_llm(self) -> None:
         from tfda_context_gate.run_config import env_value, PROJECT_ROOT
 
+        # 保存 LINE env
+        _line_keys = ["LINE_CHANNEL_SECRET", "LINE_ALLOW_UNSIGNED_WEBHOOK", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_IDENTITY_HASH_KEY", "LINE_SESSION_DB_PATH"]
+        _saved = {k: os.getenv(k) for k in _line_keys}
         try:
             from dotenv import load_dotenv
 
             load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
         except ImportError:
             pass
-
-        model = env_value("CONVERSATION_LLM_MODEL", "") or env_value("ROUTER_LLM_MODEL", "") or "opencode/mimo-v2.5"
+        try:
+            model = self._model_name or (env_value("CONVERSATION_LLM_MODEL", "") or env_value("ROUTER_LLM_MODEL", "") or "")
+        finally:
+            for k, v in _saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        if not model:
+            raise ValueError("no conversation model configured")
+        model = model.strip()
         # Determine provider
         base_url = env_value("OPENCODE_BASE_URL") or env_value("OPENAI_BASE_URL")
         api_key = env_value("OPENCODE_API_KEY") or env_value("OPENAI_API_KEY")

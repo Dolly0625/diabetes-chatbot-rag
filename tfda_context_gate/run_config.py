@@ -45,13 +45,33 @@ def load_dotenv_file(path: Path | None = None) -> dict[str, str]:
 
 
 def env_value(name: str, default: str | None = None) -> str | None:
-    # 優先讓 .env 覆蓋已存在的環境變數，確保本地 .env 修改即生效
+    # 保留 LINE 測試的 hermetic：load_dotenv 不得覆蓋測試設定的 LINE 相關 env
+    _preserve_keys = (
+        "LINE_CHANNEL_SECRET",
+        "LINE_ALLOW_UNSIGNED_WEBHOOK",
+        "LINE_CHANNEL_ACCESS_TOKEN",
+        "LINE_ACCESS_TOKEN",
+        "LINE_CHANNEL_TOKEN",
+        "LINE_IDENTITY_HASH_KEY",
+        "LINE_SESSION_DB_PATH",
+        "LINE_LOGIN_CHANNEL_ID",
+        "LINE_LIFF_ID",
+        "LINE_DEMO_MODE",
+        "DEMO_CLINICIAN_IDS",
+    )
+    _saved = {k: os.getenv(k) for k in _preserve_keys}
     try:
         from dotenv import load_dotenv
 
         load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
     except ImportError:
         pass
+    finally:
+        for k, v in _saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     values = load_dotenv_file()
     return os.getenv(name) or values.get(name) or default
 

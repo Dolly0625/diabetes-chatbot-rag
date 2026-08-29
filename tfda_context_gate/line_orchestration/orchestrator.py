@@ -339,9 +339,9 @@ class ConversationOrchestrator:
     MODIFY_COMMANDS = {"修改看診資料", "修改資料"}
     PROXY_SUBJECT_SOURCE_COMMANDS = {"家人本人描述", "病患本人描述", "本人描述"}
     PROXY_OBSERVED_SOURCE_COMMANDS = {"我的觀察", "照護者觀察", "家屬觀察"}
-    PAUSE_COMMANDS = {"暫停整理", "先不要填"}
+    PAUSE_COMMANDS = {"暫停整理", "先不要填", "先不要填了", "等一下再填"}
     CANCEL_COMMANDS = {"不填了", "取消整理"}
-    RESUME_COMMANDS = {"繼續整理", "繼續填寫", "回到看診整理"}
+    RESUME_COMMANDS = {"繼續整理", "繼續填寫", "回到看診整理", "接著填"}
     INTAKE_FIELD_ORDER = (
         "known_medications", "allergies", "chronic_conditions", "family_history",
         "symptom_onset", "symptom_description", "symptom_severity", "questions_for_doctor",
@@ -369,19 +369,15 @@ class ConversationOrchestrator:
         self.session_ttl = session_ttl
         self.context_manager = context_manager or ConversationContextManager()
         self.risk_policy = RiskSignalPolicy()
-        # P1 interpreter: deterministic default, formal optionally via env (no dotenv override to keep tests hermetic)
+        # P1.1: 統一經 Factory 取得，優先 CONVERSATION→ROUTER，無則 deterministic，無硬編碼
         if interpreter is not None:
             self.interpreter: ConversationInterpreter = interpreter
         else:
-            conv_model = os.getenv("CONVERSATION_LLM_MODEL", "").strip()
-            if conv_model:
-                try:
-                    from tfda_context_gate.conversation.interpreter import FormalConversationInterpreter
+            try:
+                from tfda_context_gate.conversation.interpreter import ConversationInterpreterFactory
 
-                    self.interpreter = FormalConversationInterpreter()
-                except Exception:
-                    self.interpreter = DeterministicConversationInterpreter()
-            else:
+                self.interpreter = ConversationInterpreterFactory.from_env()
+            except Exception:
                 self.interpreter = DeterministicConversationInterpreter()
         self._last_interpretation: Any | None = None
         self._last_envelope: Any | None = None
@@ -1289,7 +1285,6 @@ class ConversationOrchestrator:
             if interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents:
                 is_side_candidate = False
             if interpretation and interpretation.resolved_education_query and interpretation.references_resolved:
-                # cross-turn followup is side-like but resolved query should be used
                 is_side_candidate = True
             if self._is_intake_active(session, text) and is_side_candidate:
                 side_query = text
@@ -1328,6 +1323,12 @@ class ConversationOrchestrator:
             old_stage = session.intake_stage
             intake_note: str | None = None
             workflow_text = text
+            # P1.1 final defense: 控制/閒聊/sentinel 不得寫入 intake
+            is_control_or_chitchat = False
+            if interpretation and ("CONTROL_COMMAND" in interpretation.intents or "CHITCHAT" in interpretation.intents):
+                is_control_or_chitchat = True
+            if text.strip() in {"謝謝", "謝謝你", "感謝", "感恩", "辛苦了", "不好意思", "您好", "哈囉", "嗨"} or text.strip().startswith("謝謝"):
+                is_control_or_chitchat = True
             # P1 early multi detection for intake: avoid education being added as doctor question
             is_multi_early = interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents
             intake_text_for_normalize = text
@@ -1341,7 +1342,7 @@ class ConversationOrchestrator:
                         intake_text_for_normalize = intake_text_for_normalize.replace(ep, "").strip("，,。 ")
                 if not intake_text_for_normalize.strip():
                     intake_text_for_normalize = text
-            if self._is_intake_active(session, intake_text_for_normalize) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
+            if not is_control_or_chitchat and self._is_intake_active(session, intake_text_for_normalize) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
                 session, intake_note = self._normalize_intake_answer(session, intake_text_for_normalize)
                 if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
                     session = self._sync_clinical_context(session)
@@ -1382,6 +1383,13 @@ class ConversationOrchestrator:
                     intake=None,
                 )
             else:
+                # P1.1: chitchat/control should not be treated as intake even if intake active
+                is_chitchat_control = is_control_or_chitchat or (interpretation and "CHITCHAT" in interpretation.intents)
+                _task_type = None
+                _intake_val = None
+                if not is_chitchat_control and session.status in {"ACTIVE", "AWAITING_CONFIRMATION"} and self._is_intake_active(session, text):
+                    _task_type = "pre_visit_intake"
+                    _intake_val = session.intake_snapshot
                 workflow = self._call_workflow(
                     {
                         "request_id": f"{session.session_id}-v{previous_version + 1}",
@@ -1390,8 +1398,8 @@ class ConversationOrchestrator:
                         "declared_role": self._declared_role(session.actor_role),
                         "language": "zh-TW",
                     },
-                    task_type="pre_visit_intake" if session.status in {"ACTIVE", "AWAITING_CONFIRMATION"} and self._is_intake_active(session, text) else None,
-                    intake=session.intake_snapshot if self._is_intake_active(session, text) else None,
+                    task_type=_task_type,
+                    intake=_intake_val,
                 )
             is_multi_multi = interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents
             pending_q_from_workflow = workflow.question
@@ -1413,10 +1421,14 @@ class ConversationOrchestrator:
             resulting_intake = PreVisitIntake.model_validate(
                 workflow.intake_snapshot or session.intake_snapshot
             )
-            updates["pending_field"] = self._next_pending_field(resulting_intake)
-            # Ensure multi keeps correct pending_question after intake write
-            if is_multi_multi and updates.get("pending_question") is None and updates.get("pending_field"):
-                updates["pending_question"] = self._question_for_field(updates["pending_field"])
+            # P1.1: general education should not create pending intake (active_task should be general_education)
+            if self._is_intake_active(session, text) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
+                updates["pending_field"] = self._next_pending_field(resulting_intake)
+                if is_multi_multi and updates.get("pending_question") is None and updates.get("pending_field"):
+                    updates["pending_question"] = self._question_for_field(updates["pending_field"])
+            else:
+                updates["pending_field"] = None
+                updates["pending_question"] = None
             if workflow.status == "NEEDS_CONFIRMATION":
                 updates["status"] = "AWAITING_CONFIRMATION"
             if not resulting_intake.questions_for_doctor and updates.get("intake_stage") == "review":
@@ -1596,9 +1608,10 @@ class ConversationOrchestrator:
             AuthorizationStatus.PATIENT_SELF,
             AuthorizationStatus.AUTHORIZED_CAREGIVER,
             AuthorizationStatus.LEGAL_GUARDIAN,
-        } and session.status == "PAUSED":
+        } and session.status in ("PAUSED", "ACTIVE") and self._is_intake_active(session):
             pending_field = session.pending_field or self._next_pending_field(session.intake_snapshot)
             question = session.pending_question or self._question_for_field(pending_field)
+            # 若已在 ACTIVE 且 pending_field 存在，仍視為繼續
             session = session.model_copy(update={"status": "ACTIVE", "pending_field": pending_field, "pending_question": question})
             base = question or "看診資料已經整理完成，請查看摘要。"
             try:

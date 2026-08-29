@@ -664,6 +664,31 @@ def _schedule_formal_push(
 
                 wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason="SYSTEM_DEPENDENCY", a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason="SYSTEM_DEPENDENCY", intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
             push_text = _format_formal_push_text(wf, text)
+            # P1.1: write final push answer to same session so next turn sees Q + placeholder + answer
+            if orchestrator is not None:
+                try:
+                    sess_push = orchestrator.session_for_user(line_user_id)
+                    if sess_push is not None:
+                        ctx_push = orchestrator.context_manager.append_turn(sess_push.conversation_context, role="assistant", content=push_text)
+                        ctx_push, _ = orchestrator.context_manager.compact(ctx_push, stage_completed=False)
+                        sess_push = sess_push.model_copy(update={"conversation_context": ctx_push}, deep=True)
+                        sess_push = orchestrator._sync_clinical_context(sess_push)
+                        try:
+                            orchestrator.repository.save(sess_push, expected_version=sess_push.version)
+                        except Exception:
+                            latest = orchestrator.session_for_user(line_user_id)
+                            if latest is not None:
+                                ctx2 = orchestrator.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
+                                ctx2, _ = orchestrator.context_manager.compact(ctx2, stage_completed=False)
+                                latest2 = latest.model_copy(update={"conversation_context": ctx2}, deep=True)
+                                latest2 = orchestrator._sync_clinical_context(latest2)
+                                try:
+                                    orchestrator.repository.save(latest2, expected_version=latest.version)
+                                except Exception:
+                                    pass
+                        _mark_pushed(event_id)
+                except Exception:
+                    pass
             ok = False
             for attempt in range(2):
                 try:
@@ -1166,6 +1191,33 @@ async def callback(
                         if _is_text_duplicate(str(user_id), text):
                             _send(reply_token, _dedup_reply_for(text))
                             continue
+                        # P1.1 unified: claim event + write user turn + placeholder to same session before async push
+                        try:
+                            # Try to claim webhook event for async placeholder (SQLite is source of truth)
+                            claim_token = None
+                            try:
+                                claim_token = orchestrator.repository.claim_webhook_event(str(webhook_event_id), orchestrator._hash(str(user_id)))
+                            except Exception:
+                                claim_token = None
+                            # Load or create session and write user turn + placeholder
+                            sess_async = orchestrator._load_or_create(str(user_id))
+                            prev_ver = sess_async.version
+                            ctx_async = orchestrator.context_manager.append_turn(sess_async.conversation_context, role="user", content=text)
+                            ctx_async = orchestrator.context_manager.append_turn(ctx_async, role="assistant", content=ASYNC_PLACEHOLDER_REPLY)
+                            ctx_async, _ = orchestrator.context_manager.compact(ctx_async, stage_completed=False)
+                            sess_async = sess_async.model_copy(update={"conversation_context": ctx_async}, deep=True)
+                            sess_async = orchestrator._sync_clinical_context(sess_async)
+                            try:
+                                saved_async = orchestrator.repository.save(sess_async, expected_version=prev_ver)
+                                if claim_token:
+                                    try:
+                                        orchestrator.repository.complete_webhook_event(str(webhook_event_id), {"reply": ASYNC_PLACEHOLDER_REPLY, "status": "ASYNC_PLACEHOLDER"}, claim_token=claim_token)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
                         _send(reply_token, ASYNC_PLACEHOLDER_REPLY)
                         _schedule_formal_push(orchestrator, str(user_id), str(webhook_event_id), text)
                         continue

@@ -119,21 +119,22 @@ def _sanitize_envelope_dict(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _active_task_from_session(session: Any) -> ActiveTask:
-    """推導 active_task：依 intake 是否活躍與最近語意。Deterministic。"""
-    # 若 status 非 ACTIVE 且非 AWAITING_CONFIRMATION，視為 idle/chitchat
+    """推導 active_task：僅授權後才視為 pre_visit_intake，避免一般衛教自動變 intake。"""
     status = getattr(session, "status", "ACTIVE")
     intake_stage = getattr(session, "intake_stage", "stage1")
     intake_snapshot = getattr(session, "intake_snapshot", None)
-    # 若 intak 活躍且有 pending_field 或仍在 stage1-3，視為 pre_visit_intake
-    if status in ("ACTIVE", "AWAITING_CONFIRMATION", "PAUSED"):
-        # 檢查是否已提交
+    auth = getattr(session, "authorization_status", None)
+    try:
+        auth_val = auth.value if hasattr(auth, "value") else str(auth) if auth else ""
+    except Exception:
+        auth_val = ""
+    authorized = auth_val in ("PATIENT_SELF", "AUTHORIZED_CAREGIVER", "LEGAL_GUARDIAN")
+    # 僅授權且狀態為 intake 相關才視為 pre_visit_intake
+    if status in ("ACTIVE", "AWAITING_CONFIRMATION", "PAUSED") and authorized:
         if intake_stage == "submitted" and status == "SUBMITTED":
             return "idle"
-        # 若有 intake_snapshot 且尚未完成全部 stage，預設 pre_visit_intake
-        # 透過 ProductSession 的導引：若 pending_field 存在或 intake 未完整，視為 intake 任務
         if getattr(session, "pending_field", None) is not None:
             return "pre_visit_intake"
-        # 檢查 intake 是否仍有缺漏
         try:
             from tfda_context_gate.line_orchestration.orchestrator import ConversationOrchestrator
 
@@ -143,7 +144,9 @@ def _active_task_from_session(session: Any) -> ActiveTask:
                     return "pre_visit_intake"
         except Exception:
             pass
-        # 否則若最近問句是 chitchat 相關，標 chitchat
+        return "general_education"
+    # 未授權或 idle：一般衛教，不自動建立 intake 進度
+    if status in ("ACTIVE", "AWAITING_CONFIRMATION", "PAUSED"):
         return "general_education"
     return "idle"
 
