@@ -1,0 +1,102 @@
+[
+  {
+    "category": "multi_symptom",
+    "raw": "我嘴巴很乾，晚上一直跑廁所",
+    "note": "多症狀：口乾+頻尿，以逗號分隔"
+  },
+  {
+    "category": "multi_symptom",
+    "raw": "最近一直喝水還是很渴，半夜又要起來尿好幾次",
+    "note": "多症狀：口渴+頻尿，口語變體"
+  },
+  {
+    "category": "multi_symptom",
+    "raw": "這幾天頭暈，腳也有點麻",
+    "note": "多症狀：頭暈+麻"
+  },
+  {
+    "category": "multi_symptom",
+    "raw": "最近很累，而且視線偶爾會模糊",
+    "note": "多症狀：以 而且 連接"
+  },
+  {
+    "category": "time_symptom",
+    "raw": "大概上週開始，晚上都要爬起來上廁所",
+    "note": "時間+症狀：上週+夜尿，長句"
+  },
+  {
+    "category": "time_symptom",
+    "raw": "這兩三天突然很渴，尿也變多了",
+    "note": "時間+症狀：這兩三天+口渴頻尿"
+  },
+  {
+    "category": "multi_intent",
+    "raw": "我有吃 metformin，另外最近晚上常跑廁所",
+    "note": "多意圖：自述用藥 + 症狀，以 另外 連接"
+  },
+  {
+    "category": "multi_intent",
+    "raw": "我最近常口渴，糖尿病一天可以吃幾份水果？",
+    "note": "多意圖：症狀自述 + 衛教問句"
+  },
+  {
+    "category": "multi_intent",
+    "raw": "醫生有開二甲雙胍，這個藥常見副作用是什麼？",
+    "note": "多意圖：自述用藥 + 藥物衛教問句"
+  },
+  {
+    "category": "negative",
+    "raw": "二甲雙胍會傷腎嗎？",
+    "note": "反例：純問句不得寫 known_medications"
+  },
+  {
+    "category": "negative",
+    "raw": "晚上常跑廁所會是糖尿病嗎？",
+    "note": "反例：問句不得寫 symptom_description"
+  },
+  {
+    "category": "negative",
+    "raw": "我朋友最近一直口渴",
+    "note": "反例：他人症狀不得寫入"
+  },
+  {
+    "category": "negative",
+    "raw": "如果以後開始頭暈要怎麼辦？",
+    "note": "反例：假設語句不得寫入"
+  },
+  {
+    "category": "negative",
+    "raw": "我媽媽在吃 metformin",
+    "note": "反例：未確認 subject 前他人用藥不可寫入"
+  },
+  {
+    "category": "negative",
+    "raw": "我沒有頭暈，只是想問頭暈是不是低血糖",
+    "note": "反例：否定+好奇不得寫入"
+  },
+  {
+    "category": "correction",
+    "raw": "不是頭暈，是眼睛有點模糊",
+    "note": "修正：否定前值，改為視線模糊"
+  },
+  {
+    "category": "correction",
+    "raw": "我剛才說錯了，不是昨天，是上週開始",
+    "note": "修正：時間修正"
+  },
+  {
+    "category": "correction",
+    "raw": "不是我，是我媽媽最近一直口渴",
+    "note": "修正：主體修正，他人污染"
+  },
+  {
+    "category": "red_flag",
+    "raw": "我媽媽胸口很痛又呼吸困難",
+    "note": "紅旗混合：胸痛+呼吸困難，含他人標記但仍為紅旗"
+  },
+  {
+    "category": "red_flag",
+    "raw": "我本來想問水果，但現在胸口很痛喘不過氣",
+    "note": "紅旗混合：前半衛教意圖，後半紅旗症狀"
+  }
+]

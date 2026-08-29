@@ -1,0 +1,67 @@
+{
+  "_comment": "P2A 自然語意候選合併與 fast-path 驗證案例（22句預期行為）。僅供 smoke/fixtures 參考，不納入 pytest 預設。",
+  "version": "p2a.v1",
+  "description": "deterministic 部分命中＋formal 補齊實際落地，且紅旗仍優先。含多症狀/多意圖/反例/紅旗四類。",
+  "groups": [
+    {
+      "name": "multi-symptom",
+      "texts": [
+        "我嘴巴很乾，晚上一直跑廁所",
+        "最近嘴巴很乾，半夜起來尿好幾次",
+        "口很乾，爬起來上廁所",
+        "嘴巴乾而且夜尿",
+        "我最近一直口渴，晚上頻尿",
+        "晚上一直跑廁所，白天嘴巴也很乾"
+      ],
+      "expect": "symptom_description 落地為口乾與頻尿多子句（以；join，去重），deterministic 部分命中後由 formal 補齊，經 candidate_merge 合併。is_fast_path_eligible=false（多子句），需進 AI。",
+      "should_land": { "symptom_description": "含口乾與頻尿" },
+      "should_not_persist_as_is": ["問句污染"],
+      "is_red_flag": false
+    },
+    {
+      "name": "multi-intent",
+      "texts": [
+        "我最近常口渴，糖尿病一天可以吃幾份水果？",
+        "醫生有開二甲雙胍給我，另外芭樂能吃嗎？",
+        "我有吃 metformin，另外水果可以吃多少？",
+        "最近常口渴，另外想問糖尿病飲食原則",
+        "我常口渴，想問水果份量",
+        "吃二甲雙胍會傷腎嗎？另外我最近口渴"
+      ],
+      "expect": "同句多意圖：INTAKE_ANSWER + EDUCATION_QUESTION。口渴/用藥落地為本人症狀/用藥，教育問句走 RAG 支線，provenance 需通過，問句片段不得寫入病史。",
+      "should_land_if_explicit": { "symptom_description": "口渴" },
+      "should_not_persist": ["問句原文直接當症狀"],
+      "is_red_flag": false
+    },
+    {
+      "name": "counterexample",
+      "texts": [
+        "晚上常跑廁所會是糖尿病嗎？",
+        "口渴會是糖尿病嗎？",
+        "我最近常口渴，是不是糖尿病？",
+        "頻尿是不是糖尿病的前兆？",
+        "只是想問，糖尿病會一直跑廁所嗎？"
+      ],
+      "expect": "問句/假設不得污染病史。is_question_like=true → candidate_merge 標 polluted_question_or_third_party → 不寫入 intake_snapshot。symptom_description 保持空。",
+      "should_land": {},
+      "should_not_land": { "symptom_description": "任何由問句產生的症狀" },
+      "is_red_flag": false
+    },
+    {
+      "name": "red-flag",
+      "texts": [
+        "我胸口很痛喘不過氣",
+        "胸口痛到快昏倒",
+        "呼吸困難胸悶",
+        "我現在胸痛冒冷汗",
+        "喘不過氣胸口很痛"
+      ],
+      "expect": "紅旗必須為 FALLBACK（RiskSignalPolicy RED_FLAG → A_EMERGENCY → fixed U_URGENT_HUMAN），優先於任何 merge，不寫入 intake，reply 含 119/急診指引。",
+      "should_land": {},
+      "status": "FALLBACK",
+      "reply_must_contain": ["119", "急診"],
+      "is_red_flag": true
+    }
+  ],
+  "notes": "共 22 句（6+6+5+5），四組各 5-6 例。live smoke 每次取各組首句執行；完整 22 句可用於 batch 驗證。"
+}

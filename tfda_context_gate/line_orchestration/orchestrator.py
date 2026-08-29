@@ -1171,24 +1171,24 @@ class ConversationOrchestrator:
                 saved = self.repository.save(sess_cmd.model_copy(update={"conversation_context": ctx_assistant}, deep=True), expected_version=previous_version)
                 return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_cmd, status=status_cmd, intake_stage=saved.intake_stage)
 
-        # 7: Intake pending deterministic fast path (before AI) — spec: AI only if deterministic cannot extract
-        # 7: For intake pending, check if deterministic can handle before AI (spec: AI only if deterministic cannot extract)
+        # 7: Intake pending narrow fast-path (before AI) — P2A: only high-precision closed values skip AI
+        # Deterministic may supplement but must NOT block AI on partial multi-clause natural language
         _skip_ai_for_intake = False
+        _fast_path_reason: str | None = None
         if self._is_intake_active(session, text) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
             pending_field = session.pending_field or self._next_pending_field(session.intake_snapshot)
             if pending_field:
-                is_education_like = bool(re.search(r"可以吃|飲食|水果|血糖|副作用|會傷腎|能吃|芭樂", text) and ("？" in text or "嗎" in text))
-                if not is_education_like:
-                    try:
-                        from tfda_context_gate.intake.tool import PreVisitIntakeTool
-                        tool = PreVisitIntakeTool()
-                        extracted = tool.extract_fields_from_utterance(text, stage=session.intake_stage)
-                        if pending_field in extracted and extracted[pending_field]:
-                            _skip_ai_for_intake = True
-                    except Exception:
-                        pass
+                try:
+                    from tfda_context_gate.intake.candidate_merge import is_fast_path_eligible
 
-        # 8-9: 建 ConversationEnvelope → Interpreter (only if not handled deterministically)
+                    if is_fast_path_eligible(text, pending_field):
+                        _skip_ai_for_intake = True
+                        _fast_path_reason = f"fast_path:{pending_field}"
+                except Exception:
+                    # Fail open to AI on helper error
+                    _skip_ai_for_intake = False
+
+        # 8-9: 建 ConversationEnvelope → Interpreter (always unless narrow fast-path)
         envelope = None
         interpretation = None
         if not _skip_ai_for_intake:
@@ -1376,6 +1376,16 @@ class ConversationOrchestrator:
                 is_control_or_chitchat = True
             if text.strip() in {"謝謝", "謝謝你", "感謝", "感恩", "辛苦了", "不好意思", "您好", "哈囉", "嗨"} or text.strip().startswith("謝謝"):
                 is_control_or_chitchat = True
+            if is_control_or_chitchat and self._is_intake_active(session, text) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
+                try:
+                    from tfda_context_gate.intake.candidate_merge import is_multi_clause
+
+                    _pending_for_control = session.pending_field or self._next_pending_field(session.intake_snapshot)
+                    _is_symptom_like = bool(re.search(r"嘴巴|口乾|口渴|廁所|頻尿|頭暈|麻|視線|很累|疲倦|血糖|血壓", text))
+                    if _pending_for_control in ("symptom_description", "symptom_onset", "symptom_severity", "known_medications", "allergies", "chronic_conditions", "family_history") and (_is_symptom_like or is_multi_clause(text)):
+                        is_control_or_chitchat = False
+                except Exception:
+                    pass
             # P1 early multi detection for intake: avoid education being added as doctor question
             is_multi_early = interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents
             intake_text_for_normalize = text
@@ -1390,7 +1400,25 @@ class ConversationOrchestrator:
                 if not intake_text_for_normalize.strip():
                     intake_text_for_normalize = text
             if not is_control_or_chitchat and self._is_intake_active(session, intake_text_for_normalize) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
-                session, intake_note = self._normalize_intake_answer(session, intake_text_for_normalize)
+                _merged_valid: list[Any] | None = None
+                if not _skip_ai_for_intake and interpretation is not None and getattr(interpretation, "intake_candidates", None):
+                    try:
+                        from tfda_context_gate.intake.candidate_merge import (
+                            deterministic_to_candidates,
+                            formal_to_candidates,
+                            merge_candidates,
+                        )
+                        from tfda_context_gate.intake.tool import PreVisitIntakeTool as _P2ATool
+
+                        _tool2 = _P2ATool()
+                        _det_extracted = _tool2.extract_fields_from_utterance(intake_text_for_normalize, stage=None)
+                        _det_cands = deterministic_to_candidates(_det_extracted, intake_text_for_normalize)
+                        _formal_cands = formal_to_candidates(interpretation.intake_candidates, intake_text_for_normalize)
+                        _valid, _need_clarify = merge_candidates(_det_cands, _formal_cands, existing_intake=session.intake_snapshot)
+                        _merged_valid = _valid
+                    except Exception:
+                        _merged_valid = None
+                session, intake_note = self._normalize_intake_answer(session, intake_text_for_normalize, merged_valid=_merged_valid)
                 if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
                     session = self._sync_clinical_context(session)
                     context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=intake_note or "請問程度大約是輕度、中度、重度，或 1–10 分中的幾分？")
@@ -1869,7 +1897,7 @@ class ConversationOrchestrator:
 
     @classmethod
     def _normalize_intake_answer(
-        cls, session: ProductSession, text: str
+        cls, session: ProductSession, text: str, merged_valid: list[Any] | None = None
     ) -> tuple[ProductSession, str | None]:
         field = session.pending_field or cls._next_pending_field(session.intake_snapshot)
         if field is None and not _CORRECTION_RE.search(text) and not _WANT_QUESTION_RE.search(text):
@@ -1976,38 +2004,61 @@ class ConversationOrchestrator:
                     return new_sess, confirm
 
         candidates: dict[str, Any] = {}
-        try:
-            from tfda_context_gate.intake.tool import PreVisitIntakeTool
-            tool = PreVisitIntakeTool()
-            candidates = tool.extract_fields_from_utterance(text, stage=None)
-            if "questions_for_doctor" in candidates:
-                if _QUESTION_NEGATIVE_RE.match(text.strip()):
-                    candidates.pop("questions_for_doctor", None)
-                else:
-                    has_q = bool(re.search(r"想問|想請問|想了解|問題是|疑問|？|\?|嗎|如何|怎麼|為何|為什麼|多少|是否|正常", text))
-                    if not has_q:
+        # P2A: if merged_valid from deterministic+formal is provided, use it directly
+        if merged_valid is not None:
+            try:
+                # merged_valid is list[MergedCandidate] already validated/deduped
+                _by_field: dict[str, list[str]] = {}
+                for _mc in merged_valid:
+                    _fld = getattr(_mc, "target_field", None) or getattr(_mc, "field_name", None)
+                    _val = getattr(_mc, "value", None) or getattr(_mc, "candidate_value", None)
+                    if not _fld or not _val:
+                        continue
+                    _by_field.setdefault(str(_fld), []).append(str(_val).strip())
+                for _fld, _vals in _by_field.items():
+                    if _fld in ("known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"):
+                        candidates[_fld] = _vals
+                    else:
+                        # single-value fields: if multiple, join with ； for symptom_description else take highest
+                        if _fld == "symptom_description" and len(_vals) > 1:
+                            candidates[_fld] = "；".join(_vals)
+                        else:
+                            candidates[_fld] = _vals[0] if len(_vals) == 1 else "；".join(_vals)
+            except Exception:
+                candidates = {}
+        else:
+            try:
+                from tfda_context_gate.intake.tool import PreVisitIntakeTool
+
+                tool = PreVisitIntakeTool()
+                candidates = tool.extract_fields_from_utterance(text, stage=None)
+                if "questions_for_doctor" in candidates:
+                    if _QUESTION_NEGATIVE_RE.match(text.strip()):
                         candidates.pop("questions_for_doctor", None)
-            if "chronic_conditions" in candidates and "symptom_description" in candidates:
-                desc_val = str(candidates["symptom_description"])
-                distinct = any(kw in desc_val for kw in ["口渴", "頻尿", "頭暈", "疲倦", "喘", "疼痛", "麻", "視力", "血糖"])
-                if not distinct and any(kw in desc_val for kw in ["高血壓", "高血脂", "高脂血", "腎臟病", "心臟病"]):
-                    candidates.pop("symptom_description", None)
-            if is_correction:
-                tgt_f, tgt_v = _extract_correction_target(text)
-                if tgt_f == "allergies" and tgt_v and "allergies" not in candidates:
-                    candidates["allergies"] = [tgt_v]
-                elif "盤尼西林" in text and "allergies" not in candidates:
-                    candidates["allergies"] = ["盤尼西林"]
-                elif "阿斯匹靈" in text and "allergies" not in candidates:
-                    candidates["allergies"] = ["阿斯匹靈"]
-            if is_correction and _WANT_QUESTION_RE.search(text) and "questions_for_doctor" not in candidates:
-                # broaden to 幫我記 pattern, extract after colon
-                m_q = re.search(r"[:：]\s*(.+)", text)
-                proposal_q = (m_q.group(1).strip() if m_q and m_q.group(1).strip() else text.strip())[:200]
-                if proposal_q and not _QUESTION_NEGATIVE_RE.match(proposal_q):
-                    candidates["questions_for_doctor"] = [proposal_q]
-        except Exception:
-            candidates = {}
+                    else:
+                        has_q = bool(re.search(r"想問|想請問|想了解|問題是|疑問|？|\?|嗎|如何|怎麼|為何|為什麼|多少|是否|正常", text))
+                        if not has_q:
+                            candidates.pop("questions_for_doctor", None)
+                if "chronic_conditions" in candidates and "symptom_description" in candidates:
+                    desc_val = str(candidates["symptom_description"])
+                    distinct = any(kw in desc_val for kw in ["口渴", "頻尿", "頭暈", "疲倦", "喘", "疼痛", "麻", "視力", "血糖"])
+                    if not distinct and any(kw in desc_val for kw in ["高血壓", "高血脂", "高脂血", "腎臟病", "心臟病"]):
+                        candidates.pop("symptom_description", None)
+                if is_correction:
+                    tgt_f, tgt_v = _extract_correction_target(text)
+                    if tgt_f == "allergies" and tgt_v and "allergies" not in candidates:
+                        candidates["allergies"] = [tgt_v]
+                    elif "盤尼西林" in text and "allergies" not in candidates:
+                        candidates["allergies"] = ["盤尼西林"]
+                    elif "阿斯匹靈" in text and "allergies" not in candidates:
+                        candidates["allergies"] = ["阿斯匹靈"]
+                if is_correction and _WANT_QUESTION_RE.search(text) and "questions_for_doctor" not in candidates:
+                    m_q = re.search(r"[:：]\s*(.+)", text)
+                    proposal_q = (m_q.group(1).strip() if m_q and m_q.group(1).strip() else text.strip())[:200]
+                    if proposal_q and not _QUESTION_NEGATIVE_RE.match(proposal_q):
+                        candidates["questions_for_doctor"] = [proposal_q]
+            except Exception:
+                candidates = {}
 
         intake = session.intake_snapshot.model_copy(deep=True)
 
