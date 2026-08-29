@@ -8,13 +8,14 @@ import re
 import threading
 import time
 import unicodedata
+import uuid
 from collections.abc import Callable
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tfda_context_gate.line_orchestration.latency import StagedLatencyRecorder
-from tfda_context_gate.line_orchestration.deadline import DeadlineGuard, run_with_deadline
+from tfda_context_gate.line_orchestration.deadline import DeadlineGuard, current_deadline_guard, run_with_deadline
 
 # Task C honest evaluation: interpreter is serial bottleneck before branches; after interpreter,
 # candidate_validation (~1ms) vs education RAG+C (2-45s) could parallelize but gain negligible.
@@ -31,7 +32,10 @@ LINE_USE_FORMAL_DEFAULT = os.getenv("LINE_USE_FORMAL", "true").lower() in ("1", 
 # ── Async formal push: honest fallback + idempotency ─────────────────────────
 HONEST_FALLBACK_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
-HONEST_FALLBACK_REASONS = {"B_INSUFFICIENT", "FORMAL_TIMEOUT", "C_FAILURE", "SYSTEM_DEPENDENCY", "B_UNSAFE"}
+# Canonical async boundary classification.  Legacy FORMAL_TIMEOUT and
+# SYSTEM_DEPENDENCY remain accepted for stored v0.1 records.
+DEPENDENCY_OR_TIMEOUT_REASON = "DEPENDENCY_OR_TIMEOUT"
+HONEST_FALLBACK_REASONS = {"B_INSUFFICIENT", "FORMAL_TIMEOUT", "C_FAILURE", "SYSTEM_DEPENDENCY", "B_UNSAFE", DEPENDENCY_OR_TIMEOUT_REASON}
 
 # LINE educational narrow path (G) async: placeholder + background formal (120s + 1 retry)
 # Service restart loss is acceptable (in-memory set only, documented).
@@ -42,6 +46,7 @@ ASYNC_FORMAL_TIMEOUT_S_ALIAS = ASYNC_FORMAL_TIMEOUT_S
 # In-memory idempotency for push per event (process-local). Repository webhook_events
 # provides cross-process durability; this set prevents duplicate push within same process.
 _pushed_events: set[str] = set()
+_pushing_events: set[str] = set()
 _pushed_lock = threading.Lock()
 # P3-R4 bounded concurrency for async formal: global semaphore limits concurrent
 # formal background executions to 5; excess tasks block inside thread (FIFO queue)
@@ -659,6 +664,27 @@ class ConversationOrchestrator:
         with _pushed_lock:
             _pushed_events.add(event_id)
 
+    def _begin_push(self, event_id: str) -> bool:
+        with _pushed_lock:
+            if event_id in _pushed_events or event_id in _pushing_events:
+                return False
+            _pushing_events.add(event_id)
+            return True
+
+    def _finish_push(self, event_id: str, *, success: bool) -> None:
+        with _pushed_lock:
+            _pushing_events.discard(event_id)
+            if success:
+                _pushed_events.add(event_id)
+
+    def _mark_event_pushed(self, event_id: str) -> None:
+        try:
+            marker = getattr(self.repository, "mark_webhook_event_pushed", None)
+            if callable(marker):
+                marker(event_id)
+        except Exception:
+            logger.warning("could not persist push marker for %s", event_id)
+
     def _push_with_retry(
         self,
         line_user_id: str,
@@ -669,37 +695,38 @@ class ConversationOrchestrator:
     ) -> bool:
         if event_id and self._is_duplicate_push(event_id):
             return False
-        for attempt in range(2):
-            try:
-                if deadline_guard is not None and deadline_guard.should_abort():
-                    return False
-                if push_sender is not None:
-                    ok = push_sender(line_user_id, text)
-                else:
-                    ok = self._default_push_sender(line_user_id, text)
-                if ok:
+        if event_id and not self._begin_push(event_id):
+            return False
+        success = False
+        try:
+            for attempt in range(2):
+                try:
                     if deadline_guard is not None and deadline_guard.should_abort():
                         return False
-                    if event_id:
-                        self._mark_pushed(event_id)
-                        try:
-                            rec = self.repository.get_webhook_event(event_id)
-                            if rec is not None and rec.result is not None:
-                                updated = dict(rec.result)
-                                updated["pushed"] = True
-                                pass
-                        except Exception:
-                            pass
-                    return True
-                if attempt == 0:
-                    continue
-                return False
-            except Exception as exc:
-                logger.warning("push failed attempt %s: %s", attempt + 1, exc)
-                if attempt == 0:
-                    continue
-                return False
-        return False
+                    if push_sender is not None:
+                        ok = push_sender(line_user_id, text)
+                    else:
+                        ok = self._default_push_sender(line_user_id, text)
+                    if ok:
+                        # Keep the marker when the transport acknowledged the
+                        # send, even if the local deadline elapsed while waiting;
+                        # later ProductSession writes remain guard-protected.
+                        success = True
+                        if event_id:
+                            self._mark_event_pushed(event_id)
+                        return True
+                    if attempt == 0:
+                        continue
+                    return False
+                except Exception as exc:
+                    logger.warning("push failed attempt %s: %s", attempt + 1, exc)
+                    if attempt == 0:
+                        continue
+                    return False
+            return False
+        finally:
+            if event_id:
+                self._finish_push(event_id, success=success)
 
     def _default_push_sender(self, line_user_id: str, text: str) -> bool:
         try:
@@ -714,13 +741,41 @@ class ConversationOrchestrator:
             config = Configuration(access_token=token)
             with ApiClient(configuration=config) as api_client:
                 api = MessagingApi(api_client=api_client)
-                api.push_message(PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text[:4900])]))
+                kwargs: dict[str, Any] = {}
+                try:
+                    import inspect
+
+                    params = inspect.signature(api.push_message).parameters
+                    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                    if "x_line_retry_key" in params or has_kwargs:
+                        kwargs["x_line_retry_key"] = uuid.uuid5(uuid.NAMESPACE_URL, text + line_user_id).hex
+                    guard = current_deadline_guard()
+                    if guard is not None and ("_request_timeout" in params or has_kwargs):
+                        remaining = guard.remaining_s()
+                        if remaining is not None:
+                            kwargs["_request_timeout"] = max(0.001, remaining)
+                except Exception:
+                    pass
+                api.push_message(
+                    PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text[:4900])]),
+                    **kwargs,
+                )
             return True
         except Exception as exc:
             logger.warning("default push failed: %s", exc)
             raise
 
-    def _maybe_record_question_for_doctor(self, line_user_id: str, original_text: str, workflow: WorkflowResult) -> None:
+    def _maybe_record_question_for_doctor(
+        self,
+        line_user_id: str,
+        original_text: str,
+        workflow: WorkflowResult,
+        *,
+        deadline_guard: DeadlineGuard | None = None,
+    ) -> None:
+        active_guard = deadline_guard or current_deadline_guard()
+        if active_guard is not None and active_guard.should_abort():
+            return
         if not original_text or not original_text.strip():
             return
         if workflow.status != "FALLBACK":
@@ -746,6 +801,8 @@ class ConversationOrchestrator:
             now = datetime.now(timezone.utc)
             pending = PendingAction(type="PENDING_CONFIRM_QUESTION", proposal=q, created_at=now)
             try:
+                if active_guard is not None and active_guard.should_abort():
+                    return
                 self.repository.save(
                     session.model_copy(update={"pending_action": pending, "pending_question_proposal": q}, deep=True),
                     expected_version=session.version,
@@ -825,12 +882,21 @@ class ConversationOrchestrator:
     ) -> None:
         if self._is_duplicate_push(event_id):
             return
-        spawn_guard = DeadlineGuard(self.async_formal_timeout_s * 2 + 5)
+        # One job-wide guard owns the complete background task.  A timed-out
+        # dependency is abandoned; its eventual result must not be converted
+        # into a late push or ProductSession write.
+        spawn_guard = DeadlineGuard(self.async_formal_timeout_s)
 
         def _execute_and_push() -> None:
             workflow: WorkflowResult | None = None
             for attempt in range(2):
                 try:
+                    if spawn_guard.should_abort():
+                        return
+                    remaining = spawn_guard.remaining_s()
+                    if remaining is None or remaining <= 0:
+                        spawn_guard.mark_abandoned()
+                        return
                     sess = self.repository.get(session_id)
                     target_session = sess if sess is not None else ProductSession.model_validate(
                         {
@@ -842,40 +908,28 @@ class ConversationOrchestrator:
                             "expires_at": (datetime.now(timezone.utc) + self.session_ttl).isoformat(),
                         }
                     )
-                    wf = self._run_formal_with_timeout(text, target_session, self.async_formal_timeout_s)
+                    wf = self._run_formal_with_timeout(text, target_session, remaining)
                     workflow = wf
                     break
                 except FuturesTimeoutError:
                     logger.warning("async formal timeout attempt %s for %s", attempt + 1, event_id[:8])
-                    if attempt == 1:
-                        workflow = WorkflowResult(
-                            request_id=event_id,
-                            status="FALLBACK",
-                            final_response=HONEST_FALLBACK_TEXT,
-                            fallback_reason="FORMAL_TIMEOUT",
-                            a_result=None,
-                            query_expansion=None,
-                            rag_result=None,
-                            b_result=None,
-                            c_result=None,
-                            d_result=None,
-                            agent_action=None,
-                            agent_reason_code=None,
-                            question=None,
-                            current_query=text,
-                            execution_history=[],
-                            agent_steps=0,
-                            rewrite_count=0,
-                            clarification_count=0,
-                            termination_reason="FORMAL_TIMEOUT",
-                            intake_snapshot=None,
-                            intake_stage=None,
-                            previsit_summary=None,
-                            system_risk_classification=None,
-                            trace={"events": [], "evaluations": []},
-                        )
-                    else:
-                        continue
+                    spawn_guard.mark_abandoned()
+                    # A timeout gets the deterministic honest response, but
+                    # never the late workflow result.  This safe notification
+                    # is deliberately sent without the abandoned workflow
+                    # guard and is not appended to ProductSession.
+                    timeout_workflow = _timeout_workflow_result(
+                        event_id,
+                        text,
+                        reason=DEPENDENCY_OR_TIMEOUT_REASON,
+                    )
+                    self._push_with_retry(
+                        line_user_id,
+                        self.prepare_formal_push_text(timeout_workflow, text),
+                        event_id=event_id,
+                        push_sender=push_sender,
+                    )
+                    return
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("async formal error attempt %s for %s: %s", attempt + 1, event_id[:8], exc)
                     if attempt == 1:
@@ -883,7 +937,7 @@ class ConversationOrchestrator:
                             request_id=event_id,
                             status="FALLBACK",
                             final_response=HONEST_FALLBACK_TEXT,
-                            fallback_reason="SYSTEM_DEPENDENCY",
+                            fallback_reason=DEPENDENCY_OR_TIMEOUT_REASON,
                             a_result=None,
                             query_expansion=None,
                             rag_result=None,
@@ -898,7 +952,7 @@ class ConversationOrchestrator:
                             agent_steps=0,
                             rewrite_count=0,
                             clarification_count=0,
-                            termination_reason="SYSTEM_DEPENDENCY",
+                            termination_reason=DEPENDENCY_OR_TIMEOUT_REASON,
                             intake_snapshot=None,
                             intake_stage=None,
                             previsit_summary=None,
@@ -912,7 +966,7 @@ class ConversationOrchestrator:
                     request_id=event_id,
                     status="FALLBACK",
                     final_response=HONEST_FALLBACK_TEXT,
-                    fallback_reason="SYSTEM_DEPENDENCY",
+                    fallback_reason=DEPENDENCY_OR_TIMEOUT_REASON,
                     a_result=None,
                     query_expansion=None,
                     rag_result=None,
@@ -927,7 +981,7 @@ class ConversationOrchestrator:
                     agent_steps=0,
                     rewrite_count=0,
                     clarification_count=0,
-                    termination_reason="SYSTEM_DEPENDENCY",
+                    termination_reason=DEPENDENCY_OR_TIMEOUT_REASON,
                     intake_snapshot=None,
                     intake_stage=None,
                     previsit_summary=None,
@@ -968,7 +1022,7 @@ class ConversationOrchestrator:
                 if spawn_guard.should_abort():
                     return
                 if _should_push_honest_fallback(workflow):
-                    self._maybe_record_question_for_doctor(line_user_id, text, workflow)
+                    self._maybe_record_question_for_doctor(line_user_id, text, workflow, deadline_guard=spawn_guard)
 
         def _background() -> None:
             acquired = _FORMAL_SEMAPHORE.acquire(blocking=False)

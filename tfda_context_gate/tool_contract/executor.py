@@ -13,12 +13,12 @@ Invariants:
 
 from __future__ import annotations
 
-import concurrent.futures
 import time
 from typing import Any, Optional
 
 from .registry import ToolRegistry
 from .schemas import ToolError, ToolRequest, ToolResult
+from tfda_context_gate.e_observability.deadline import run_with_deadline
 
 
 class ToolExecutor:
@@ -166,18 +166,25 @@ class ToolExecutor:
             return tool.execute(request.params, request_id=request.request_id)  # type: ignore[union-attr]
 
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_call)
-                result = future.result(timeout=self.timeout_ms / 1000.0)
-                # Ensure latency_ms is set (tool may have set it)
-                if result.latency_ms is None:
-                    result.latency_ms = (time.perf_counter() - started) * 1000
-                # Echo task_type if not set by tool
-                if result.task_type is None and request.task_type is not None:
-                    result.task_type = request.task_type
-                self._record_tool_span(request, result)
-                return result
-        except concurrent.futures.TimeoutError:
+            # Do not use a per-call executor context manager here: on timeout
+            # its ``__exit__`` waits for the blocking tool and defeats the
+            # caller's wall-clock bound.  The shared bounded deadline pool
+            # retains the worker until it exits and fails closed when full.
+            result, timed_out, guard = run_with_deadline(
+                _call,
+                timeout_s=self.timeout_ms / 1000.0,
+            )
+            if timed_out or result is None or guard.should_abort():
+                raise TimeoutError
+            # Ensure latency_ms is set (tool may have set it)
+            if result.latency_ms is None:
+                result.latency_ms = (time.perf_counter() - started) * 1000
+            # Echo task_type if not set by tool
+            if result.task_type is None and request.task_type is not None:
+                result.task_type = request.task_type
+            self._record_tool_span(request, result)
+            return result
+        except TimeoutError:
             latency_ms = (time.perf_counter() - started) * 1000
             result = ToolResult(
                 tool_name=request.tool_name,

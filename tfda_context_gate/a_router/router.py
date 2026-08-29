@@ -216,7 +216,23 @@ class LangChainSignalExtractor:
                 raise RouterDependencyError("ollama provider requires langchain-ollama") from exc
             bare = model.split("/", 1)[-1]
             base_url = env_value("OLLAMA_BASE_URL", "http://localhost:11434")
-            llm = ChatOllama(model=bare, base_url=base_url, temperature=0)
+            ollama_kwargs: dict[str, Any] = {"model": bare, "base_url": base_url, "temperature": 0}
+            # ChatOllama exposes native urllib timeouts through
+            # ``sync_client_kwargs``.  Inspect the installed API before
+            # passing it so an older langchain-ollama cannot fail at startup
+            # because of an unsupported constructor argument.
+            try:
+                import inspect
+
+                if "sync_client_kwargs" in inspect.signature(ChatOllama).parameters:
+                    timeout_raw = env_value(
+                        "ROUTER_REQUEST_TIMEOUT_S",
+                        env_value("FORMAL_WORKFLOW_TIMEOUT_S", "45"),
+                    )
+                    ollama_kwargs["sync_client_kwargs"] = {"timeout": float(timeout_raw or "45")}
+            except (TypeError, ValueError, OverflowError):
+                pass
+            llm = ChatOllama(**ollama_kwargs)
             return cls.from_llm(llm)
 
         base_url = env_value("OPENCODE_BASE_URL") or env_value("OPENAI_BASE_URL")
@@ -233,6 +249,14 @@ class LangChainSignalExtractor:
                 kwargs["base_url"] = base_url
             if api_key:
                 kwargs["api_key"] = api_key
+            try:
+                import inspect
+
+                if "timeout" in inspect.signature(ChatOpenAI).parameters:
+                    timeout_raw = env_value("ROUTER_REQUEST_TIMEOUT_S", env_value("FORMAL_WORKFLOW_TIMEOUT_S", "45"))
+                    kwargs["timeout"] = float(timeout_raw or "45")
+            except (TypeError, ValueError, OverflowError):
+                pass
             # mimo 系列關閉思考，否則結構化輸出前會噴大量 hidden reasoning
             if is_mimo:
                 kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
@@ -265,6 +289,25 @@ class LangChainSignalExtractor:
             val = env_value(key)
             if val:
                 os.environ[key] = val
+        if model_name.startswith("ollama/"):
+            try:
+                from langchain_ollama import ChatOllama
+            except ImportError as exc:
+                raise RouterDependencyError("ollama provider requires langchain-ollama") from exc
+            ollama_kwargs: dict[str, Any] = {
+                "model": model_name.split("/", 1)[-1],
+                "base_url": env_value("OLLAMA_BASE_URL", "http://localhost:11434"),
+                "temperature": 0,
+            }
+            try:
+                import inspect
+
+                if "sync_client_kwargs" in inspect.signature(ChatOllama).parameters:
+                    timeout_raw = env_value("ROUTER_REQUEST_TIMEOUT_S", env_value("FORMAL_WORKFLOW_TIMEOUT_S", "45"))
+                    ollama_kwargs["sync_client_kwargs"] = {"timeout": float(timeout_raw or "45")}
+            except (TypeError, ValueError, OverflowError):
+                pass
+            return cls.from_llm(ChatOllama(**ollama_kwargs))
         base_url = env_value("OPENCODE_BASE_URL") or env_value("OPENAI_BASE_URL")
         api_key = env_value("OPENCODE_API_KEY") or env_value("OPENAI_API_KEY")
         is_mimo = "mimo" in model_name.lower()
@@ -279,6 +322,14 @@ class LangChainSignalExtractor:
                 kwargs["base_url"] = base_url
             if api_key:
                 kwargs["api_key"] = api_key
+            try:
+                import inspect
+
+                if "timeout" in inspect.signature(ChatOpenAI).parameters:
+                    timeout_raw = env_value("ROUTER_REQUEST_TIMEOUT_S", env_value("FORMAL_WORKFLOW_TIMEOUT_S", "45"))
+                    kwargs["timeout"] = float(timeout_raw or "45")
+            except (TypeError, ValueError, OverflowError):
+                pass
             if is_mimo:
                 kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
                 kwargs["reasoning_effort"] = "none"

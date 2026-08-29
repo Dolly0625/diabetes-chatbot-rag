@@ -29,6 +29,7 @@ class ProductSessionRepository(Protocol):
     def save(self, session: ProductSession, *, expected_version: int) -> ProductSession: ...
     def claim_webhook_event(self, event_id: str, principal_id_hash: str, *, lease_seconds: int = 120) -> str | None: ...
     def complete_webhook_event(self, event_id: str, result: dict[str, Any], *, claim_token: str) -> WebhookEventRecord: ...
+    def mark_webhook_event_pushed(self, event_id: str) -> WebhookEventRecord | None: ...
     def fail_webhook_event(self, event_id: str, *, claim_token: str) -> None: ...
     def get_webhook_event(self, event_id: str) -> WebhookEventRecord | None: ...
     def create_share_grant(self, grant: ShareGrant) -> ShareGrant: ...
@@ -190,6 +191,31 @@ class SQLiteProductSessionRepository:
         if record is None:
             raise RuntimeError("completed webhook event disappeared")
         return record
+
+    def mark_webhook_event_pushed(self, event_id: str) -> WebhookEventRecord | None:
+        """Persist the post-transport push marker for replay idempotency.
+
+        This update intentionally occurs *after* the external LINE call has
+        succeeded.  It is therefore not a pre-send claim masquerading as a
+        successful delivery, while a later webhook replay can still consult a
+        durable marker after the process-local cache has been lost.
+        """
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT result FROM webhook_events WHERE event_id=?", (event_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row["result"]) if row["result"] else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["pushed"] = True
+            connection.execute(
+                "UPDATE webhook_events SET result=?,updated_at=? WHERE event_id=?",
+                (json.dumps(payload, ensure_ascii=False, sort_keys=True), datetime.now(timezone.utc).isoformat(), event_id),
+            )
+        return self.get_webhook_event(event_id)
 
     def fail_webhook_event(self, event_id: str, *, claim_token: str) -> None:
         now = datetime.now(timezone.utc).isoformat()

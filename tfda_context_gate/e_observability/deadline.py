@@ -37,6 +37,17 @@ _SHARED_EXECUTOR = ThreadPoolExecutor(
 )
 _SHARED_CAPACITY = threading.BoundedSemaphore(MAX_DEADLINE_WORKERS)
 
+# Nested calls cannot use ``_SHARED_EXECUTOR``: all shared workers may be
+# waiting for their child and submitting there would deadlock.  A second,
+# equally bounded pool gives nested dependency calls their own admission
+# budget.  It is deliberately not a per-call executor, so abandoned work
+# remains bounded and no timeout path waits for executor shutdown.
+_NESTED_EXECUTOR = ThreadPoolExecutor(
+    max_workers=MAX_DEADLINE_WORKERS,
+    thread_name_prefix="deadline-nested",
+)
+_NESTED_CAPACITY = threading.BoundedSemaphore(MAX_DEADLINE_WORKERS)
+
 _ACTIVE_GUARD: contextvars.ContextVar["DeadlineGuard | None"] = contextvars.ContextVar(
     "tfda_active_deadline_guard", default=None
 )
@@ -45,8 +56,9 @@ _ACTIVE_GUARD: contextvars.ContextVar["DeadlineGuard | None"] = contextvars.Cont
 class DeadlineGuard:
     """Monotonic deadline and abandoned flag for side-effect gating."""
 
-    def __init__(self, timeout_s: float | None):
+    def __init__(self, timeout_s: float | None, *, parent: "DeadlineGuard | None" = None):
         self.timeout_s = timeout_s
+        self.parent = parent
         self.deadline_monotonic: float | None = None
         self._abandoned = False
         self._lock = threading.Lock()
@@ -68,12 +80,18 @@ class DeadlineGuard:
 
     def should_abort(self) -> bool:
         """Whether a late worker must stop before persistence or push."""
-        return self.is_abandoned() or self.is_expired()
+        return self.is_abandoned() or self.is_expired() or bool(self.parent and self.parent.should_abort())
 
     def remaining_s(self) -> float | None:
-        if self.deadline_monotonic is None:
-            return None
-        return max(0.0, self.deadline_monotonic - time.monotonic())
+        own_remaining = None
+        if self.deadline_monotonic is not None:
+            own_remaining = max(0.0, self.deadline_monotonic - time.monotonic())
+        parent_remaining = self.parent.remaining_s() if self.parent is not None else None
+        if own_remaining is None:
+            return parent_remaining
+        if parent_remaining is None:
+            return own_remaining
+        return min(own_remaining, parent_remaining)
 
 
 def current_deadline_guard() -> DeadlineGuard | None:
@@ -94,10 +112,10 @@ def _call_in_scope(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> T:
-    # Preserve the outer guard for nested inline calls.  Replacing it would
-    # let a longer inner timeout outlive the caller's already-expired budget.
-    active_guard = _ACTIVE_GUARD.get() or guard
-    token = _ACTIVE_GUARD.set(active_guard)
+    # Always expose the guard that owns this callable.  For nested calls this
+    # guard carries the parent, so side-effect code observes the effective
+    # minimum deadline and also sees parent abandonment.
+    token = _ACTIVE_GUARD.set(guard)
     try:
         return func(*args, **kwargs)
     finally:
@@ -125,33 +143,78 @@ def run_with_deadline(
     intentional: creating a per-call executor would allow abandoned workers
     to accumulate without a hard upper bound.
 
-    If called from inside another deadline worker, execute inline.  This avoids
-    nested-pool deadlock (an outer worker cannot consume all pool slots while
-    waiting for an inner submission).  The outer deadline remains the hard
-    caller bound; native HTTP timeouts remain responsible for the dependency.
+    If called from inside another deadline worker, the child runs in a second
+    bounded pool.  Sharing the primary pool would deadlock when all workers
+    wait for children; the separate pool avoids that while keeping abandoned
+    work bounded.  The effective bound is min(parent, child); native HTTP
+    timeouts remain responsible for stopping the underlying dependency call.
     """
 
     del use_shared  # compatibility flag; bounded shared execution is mandatory
 
-    if timeout_s is None or timeout_s <= 0:
-        guard = DeadlineGuard(None)
-        return func(*args, **kwargs), False, guard
-
-    guard = DeadlineGuard(timeout_s)
-
-    # Formal runner and orchestrator can both enforce a boundary.  Do not
-    # submit a nested future from a deadline worker: that can deadlock when all
-    # five outer workers are waiting for five inner workers.
     parent_guard = current_deadline_guard()
+
+    # A child timeout of ``None`` means "use the parent budget" when nested;
+    # only a top-level no-timeout call is intentionally unbounded.
+    if timeout_s is None or timeout_s <= 0:
+        if parent_guard is None:
+            guard = DeadlineGuard(None)
+            return func(*args, **kwargs), False, guard
+        timeout_s = parent_guard.remaining_s()
+        if timeout_s is None:
+            timeout_s = 0.0
+
     if parent_guard is not None:
         if parent_guard.should_abort():
+            guard = DeadlineGuard(timeout_s, parent=parent_guard)
             guard.mark_abandoned()
             return _safe_fallback(fallback), True, guard
-        result = _call_in_scope(guard, func, args, kwargs)
-        if guard.should_abort() or parent_guard.should_abort():
+
+        # The effective bound is min(child, parent remaining).  Running the
+        # child inline would let an uncooperative callable (e.g. a blocking
+        # transport) exceed the child deadline.  Use the separate bounded
+        # nested pool instead; a full nested pool fails closed immediately so
+        # recursive nesting cannot deadlock.
+        parent_remaining = parent_guard.remaining_s()
+        effective_timeout = float(timeout_s)
+        if parent_remaining is not None:
+            effective_timeout = min(effective_timeout, parent_remaining)
+        guard = DeadlineGuard(effective_timeout, parent=parent_guard)
+        if effective_timeout <= 0 or not _NESTED_CAPACITY.acquire(blocking=False):
             guard.mark_abandoned()
             return _safe_fallback(fallback), True, guard
-        return result, False, guard
+        try:
+            future = _NESTED_EXECUTOR.submit(_call_in_scope, guard, func, args, kwargs)
+        except Exception:
+            _NESTED_CAPACITY.release()
+            raise
+        released = False
+        release_lock = threading.Lock()
+
+        def _release_nested(_future: Future[T]) -> None:
+            nonlocal released
+            with release_lock:
+                if not released:
+                    released = True
+                    _NESTED_CAPACITY.release()
+
+        future.add_done_callback(_release_nested)
+        try:
+            result = future.result(timeout=effective_timeout)
+            if guard.should_abort():
+                guard.mark_abandoned()
+                return _safe_fallback(fallback), True, guard
+            return result, False, guard
+        except FuturesTimeoutError:
+            guard.mark_abandoned()
+            try:
+                future.cancel()
+            except Exception:
+                pass
+            return _safe_fallback(fallback), True, guard
+
+    # Top-level calls use the primary bounded pool.
+    guard = DeadlineGuard(timeout_s)
 
     # Admission is non-blocking.  A full pool means all bounded workers are
     # either running or already handling a timed-out call; queueing another

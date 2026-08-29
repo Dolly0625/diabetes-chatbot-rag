@@ -41,8 +41,15 @@ logger = logging.getLogger(__name__)
 HONEST_FALLBACK_PUSH_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
 ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你 📋"
+# Canonical async boundary classification; legacy reason codes remain
+# readable for stored workflow records and compatibility tests.
+DEPENDENCY_OR_TIMEOUT_REASON = "DEPENDENCY_OR_TIMEOUT"
 ASYNC_FORMAL_TIMEOUT_S = float(os.getenv("ASYNC_FORMAL_TIMEOUT_S", "120"))
 _pushed_events: set[str] = set()
+# An in-flight reservation closes the check/send race.  It is released on a
+# failed transport so a later retry can safely attempt the same event again;
+# successful sends move to ``_pushed_events`` permanently for this process.
+_pushing_events: set[str] = set()
 _pushed_lock = threading.Lock()
 _FORMAL_SEMAPHORE = threading.Semaphore(5)
 
@@ -494,7 +501,7 @@ def _format_formal_push_text(workflow: Any, original_text: str = "") -> str:
             if sources:
                 return f"{base}\n\n資料來源：{'、'.join(sources[:2])}"
             return base
-        if status == "FALLBACK" and fallback_reason in {"B_INSUFFICIENT", "FORMAL_TIMEOUT", "C_FAILURE", "SYSTEM_DEPENDENCY", "B_UNSAFE"}:
+        if status == "FALLBACK" and fallback_reason in {"B_INSUFFICIENT", "FORMAL_TIMEOUT", "C_FAILURE", "SYSTEM_DEPENDENCY", "B_UNSAFE", DEPENDENCY_OR_TIMEOUT_REASON}:
             return HONEST_FALLBACK_PUSH_TEXT
         if final.strip():
             return final.strip()
@@ -503,12 +510,22 @@ def _format_formal_push_text(workflow: Any, original_text: str = "") -> str:
         return HONEST_FALLBACK_PUSH_TEXT
 
 
-def _is_duplicate_push(event_id: str | None) -> bool:
+def _is_duplicate_push(event_id: str | None, repository: Any | None = None) -> bool:
     if not event_id:
         return False
     with _pushed_lock:
         if event_id in _pushed_events:
             return True
+    if repository is not None:
+        try:
+            record = repository.get_webhook_event(event_id)
+            return bool(
+                record is not None
+                and isinstance(record.result, dict)
+                and record.result.get("pushed") is True
+            )
+        except Exception:
+            pass
     return False
 
 
@@ -519,34 +536,118 @@ def _mark_pushed(event_id: str | None) -> None:
         _pushed_events.add(event_id)
 
 
-def _push_text(line_user_id: str, text: str, event_id: str | None = None) -> bool:
+def _begin_push(event_id: str | None) -> bool:
+    """Atomically reserve an event for one transport attempt."""
+
+    if not event_id:
+        return True
+    with _pushed_lock:
+        if event_id in _pushed_events or event_id in _pushing_events:
+            return False
+        _pushing_events.add(event_id)
+        return True
+
+
+def _finish_push(event_id: str | None, *, success: bool) -> None:
+    if not event_id:
+        return
+    with _pushed_lock:
+        _pushing_events.discard(event_id)
+        if success:
+            _pushed_events.add(event_id)
+
+
+def _push_text(
+    line_user_id: str,
+    text: str,
+    event_id: str | None = None,
+    *,
+    deadline_guard: Any | None = None,
+) -> bool:
     if not line_user_id or not text:
         return False
-    if event_id and _is_duplicate_push(event_id):
+    if deadline_guard is not None and deadline_guard.should_abort():
+        return False
+    if not _begin_push(event_id):
         return False
     if len(text) > 4900:
         text = text[:4900] + "…"
-    for attempt in range(2):
-        try:
-            api = _get_messaging_api()
-            if api is None:
-                return False
-            from linebot.v3.messaging import PushMessageRequest, TextMessage
+    success = False
+    try:
+        for attempt in range(2):
+            try:
+                if deadline_guard is not None and deadline_guard.should_abort():
+                    return False
+                api = _get_messaging_api()
+                if api is None:
+                    return False
+                from linebot.v3.messaging import PushMessageRequest, TextMessage
 
-            api.push_message(PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text)]))
-            if event_id:
-                _mark_pushed(event_id)
-            return True
-        except Exception as exc:
-            logger.warning("push_message failed attempt %s for %s: %s", attempt + 1, event_id, exc)
-            if attempt == 0:
-                continue
-            return False
+                kwargs: dict[str, Any] = {}
+                # LINE's generated SDK exposes both a retry key and a native
+                # request timeout.  Inspecting the callable keeps test fakes
+                # and older SDKs compatible without guessing unsupported args.
+                try:
+                    import inspect
+
+                    params = inspect.signature(api.push_message).parameters
+                    if "x_line_retry_key" in params or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                    ):
+                        if event_id:
+                            kwargs["x_line_retry_key"] = uuid.uuid5(uuid.NAMESPACE_URL, event_id).hex
+                    if "_request_timeout" in params or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                    ):
+                        remaining = deadline_guard.remaining_s() if deadline_guard is not None else None
+                        if remaining is not None:
+                            kwargs["_request_timeout"] = max(0.001, remaining)
+                except Exception:
+                    pass
+                api.push_message(
+                    PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text)]),
+                    **kwargs,
+                )
+                # A transport that returned success owns the event even if
+                # the surrounding deadline expires immediately afterwards;
+                # marking it failed would make a retry duplicate a real send.
+                success = True
+                return True
+            except Exception as exc:
+                logger.warning("push_message failed attempt %s for %s: %s", attempt + 1, event_id, exc)
+                if attempt == 0:
+                    continue
+                return False
+    finally:
+        _finish_push(event_id, success=success)
     return False
 
 
-def _maybe_record_question_for_doctor(orchestrator: Any, line_user_id: str, original_text: str, workflow: Any) -> None:
+def _mark_event_pushed(orchestrator: Any | None, event_id: str | None) -> None:
+    """Persist the post-transport push marker when the repository supports it."""
+
+    if orchestrator is None or not event_id:
+        return
     try:
+        repository = getattr(orchestrator, "repository", None)
+        marker = getattr(repository, "mark_webhook_event_pushed", None)
+        if callable(marker):
+            marker(event_id)
+    except Exception:
+        logger.warning("could not persist push marker for %s", event_id)
+
+
+def _maybe_record_question_for_doctor(
+    orchestrator: Any,
+    line_user_id: str,
+    original_text: str,
+    workflow: Any,
+    *,
+    deadline_guard: Any | None = None,
+) -> None:
+    try:
+        if deadline_guard is not None and deadline_guard.should_abort():
+            return
         status = getattr(workflow, "status", None) or (workflow.get("status") if isinstance(workflow, dict) else None)
         if status != "FALLBACK":
             return
@@ -568,6 +669,8 @@ def _maybe_record_question_for_doctor(orchestrator: Any, line_user_id: str, orig
         if not q or q in session.intake_snapshot.questions_for_doctor:
             return
         if len(session.intake_snapshot.questions_for_doctor) >= 10:
+            return
+        if deadline_guard is not None and deadline_guard.should_abort():
             return
         # converge to single service method: only set pending, not direct append
         try:
@@ -596,6 +699,11 @@ def _schedule_formal_push(
     event_id: str,
     text: str,
 ) -> None:
+    from tfda_context_gate.e_observability.deadline import DeadlineGuard
+
+    # Start the deadline at admission, so semaphore queue time is part of the
+    # user-facing budget rather than an unbounded prelude.
+    job_guard = DeadlineGuard(ASYNC_FORMAL_TIMEOUT_S)
     now = time.time()
     norm = _normalize_text(text)
     key = (line_user_id, norm)
@@ -610,11 +718,22 @@ def _schedule_formal_push(
             _text_dedup[key] = now
 
     def _execute_formal_and_push() -> None:
+        from tfda_context_gate.e_observability.deadline import run_with_deadline
+
+        # This guard bounds the whole background job, including retries.  A
+        # worker that returns after this point is abandoned and cannot push or
+        # mutate ProductSession.
         try:
             wf = None
             last_exc: Exception | None = None
             for attempt in range(2):
                 try:
+                    if job_guard.should_abort():
+                        return
+                    remaining = job_guard.remaining_s()
+                    if remaining is None or remaining <= 0:
+                        job_guard.mark_abandoned()
+                        return
                     if orchestrator is not None:
                         session = orchestrator.session_for_user(line_user_id)
                         declared_role = "PATIENT"
@@ -625,85 +744,112 @@ def _schedule_formal_push(
                                 declared_role = _CO._declared_role(session.actor_role)  # type: ignore[attr-defined]
                             except Exception:
                                 declared_role = "PATIENT"
-                        if False and hasattr(orchestrator, "_run_formal_with_timeout"):
-                            wf = orchestrator._run_formal_with_timeout(text, session if session is not None else orchestrator._load_or_create(line_user_id), ASYNC_FORMAL_TIMEOUT_S)  # type: ignore[attr-defined]
+                        if hasattr(orchestrator, "_run_formal_with_timeout"):
+                            wf = orchestrator._run_formal_with_timeout(  # type: ignore[attr-defined]
+                                text,
+                                session if session is not None else orchestrator._load_or_create(line_user_id),
+                                remaining,
+                            )
                         else:
-                            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
                             def _call() -> Any:
                                 return orchestrator._call_workflow(
                                     {"request_id": f"line-push-{event_id[:8]}", "schema_version": "a.v0.1", "user_raw_input": text, "declared_role": declared_role, "language": "zh-TW"},
                                     use_formal=True,
                                 )
 
-                            with ThreadPoolExecutor(max_workers=1) as ex:
-                                fut = ex.submit(_call)
-                                wf = fut.result(timeout=ASYNC_FORMAL_TIMEOUT_S)
+                            wf, timed_out, child_guard = run_with_deadline(_call, timeout_s=remaining)
+                            if timed_out or wf is None or child_guard.should_abort():
+                                job_guard.mark_abandoned()
+                                return
                     else:
-                        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
                         def _compat_call() -> Any:
                             return handle_text_message(text, request_id=f"compat-{event_id[:8]}", use_formal=True)
 
-                        with ThreadPoolExecutor(max_workers=1) as ex:
-                            fut = ex.submit(_compat_call)
-                            wf = fut.result(timeout=ASYNC_FORMAL_TIMEOUT_S)
+                        wf, timed_out, child_guard = run_with_deadline(_compat_call, timeout_s=remaining)
+                        if timed_out or wf is None or child_guard.should_abort():
+                            job_guard.mark_abandoned()
+                            return
                     break
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
                     is_timeout = "TimeoutError" in type(exc).__name__ or "FuturesTimeoutError" in type(exc).__name__
                     logger.warning("formal workflow %s attempt %s for %s: %s", "timeout" if is_timeout else "error", attempt + 1, event_id[:8], exc)
-                    if attempt == 0:
+                    if is_timeout:
+                        # A timed-out workflow may still be unwinding in its
+                        # bounded worker.  Abandon its result so that the
+                        # eventual answer cannot trigger a push or write.
+                        job_guard.mark_abandoned()
+                        from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
+
+                        safe_fallback = _WR(
+                            request_id=event_id,
+                            status="FALLBACK",
+                            final_response=HONEST_FALLBACK_PUSH_TEXT,
+                            fallback_reason=DEPENDENCY_OR_TIMEOUT_REASON,
+                            a_result=None,
+                            query_expansion=None,
+                            rag_result=None,
+                            b_result=None,
+                            c_result=None,
+                            d_result=None,
+                            agent_action=None,
+                            agent_reason_code=None,
+                            question=None,
+                            current_query=text,
+                            execution_history=[],
+                            agent_steps=0,
+                            rewrite_count=0,
+                            clarification_count=0,
+                            intake_snapshot=None,
+                            intake_stage=None,
+                            previsit_summary=None,
+                            system_risk_classification=None,
+                            trace={"events": [], "evaluations": []},
+                        )
+                        # The honest timeout notice is a new safe outcome, not
+                        # the abandoned workflow result; it is never persisted
+                        # into ProductSession.
+                        timeout_text = _format_formal_push_text(safe_fallback, text)
+                        if _push_text(line_user_id, timeout_text, event_id=event_id):
+                            _mark_event_pushed(orchestrator, event_id)
+                        return
+                    if attempt == 0 and not job_guard.should_abort():
                         continue
                     from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
 
-                    reason = "FORMAL_TIMEOUT" if is_timeout else "SYSTEM_DEPENDENCY"
+                    reason = "FORMAL_TIMEOUT" if is_timeout else DEPENDENCY_OR_TIMEOUT_REASON
                     wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason=reason, a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason=reason, intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
             if wf is None:
-                from tfda_context_gate.workflow.schemas import WorkflowResult as _WR
-
-                wf = _WR(request_id=event_id, status="FALLBACK", final_response=HONEST_FALLBACK_PUSH_TEXT, fallback_reason="SYSTEM_DEPENDENCY", a_result=None, query_expansion=None, rag_result=None, b_result=None, c_result=None, d_result=None, agent_action=None, agent_reason_code=None, question=None, current_query=text, execution_history=[], agent_steps=0, rewrite_count=0, clarification_count=0, termination_reason="SYSTEM_DEPENDENCY", intake_snapshot=None, intake_stage=None, previsit_summary=None, system_risk_classification=None, trace={"events": [], "evaluations": []})
+                return
+            if job_guard.should_abort():
+                return
             push_text = _format_formal_push_text(wf, text)
-            # P1.1: write final push answer to same session so next turn sees Q + placeholder + answer
-            if orchestrator is not None:
-                try:
-                    sess_push = orchestrator.session_for_user(line_user_id)
-                    if sess_push is not None:
-                        ctx_push = orchestrator.context_manager.append_turn(sess_push.conversation_context, role="assistant", content=push_text)
-                        ctx_push, _ = orchestrator.context_manager.compact(ctx_push, stage_completed=False)
-                        sess_push = sess_push.model_copy(update={"conversation_context": ctx_push}, deep=True)
-                        sess_push = orchestrator._sync_clinical_context(sess_push)
-                        try:
-                            orchestrator.repository.save(sess_push, expected_version=sess_push.version)
-                        except Exception:
-                            latest = orchestrator.session_for_user(line_user_id)
-                            if latest is not None:
-                                ctx2 = orchestrator.context_manager.append_turn(latest.conversation_context, role="assistant", content=push_text)
-                                ctx2, _ = orchestrator.context_manager.compact(ctx2, stage_completed=False)
-                                latest2 = latest.model_copy(update={"conversation_context": ctx2}, deep=True)
-                                latest2 = orchestrator._sync_clinical_context(latest2)
-                                try:
-                                    orchestrator.repository.save(latest2, expected_version=latest.version)
-                                except Exception:
-                                    pass
-                        _mark_pushed(event_id)
-                except Exception:
-                    pass
-            ok = False
-            for attempt in range(2):
-                try:
-                    ok = _push_text(line_user_id, push_text, event_id=event_id)
-                    if ok:
-                        break
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("push retry failed %s: %s", event_id, exc)
-                    if attempt == 0:
-                        continue
+            ok = _push_text(line_user_id, push_text, event_id=event_id, deadline_guard=job_guard)
+            if ok:
+                # Mark durable idempotency only after LINE acknowledged the
+                # push.  ProductSession is likewise updated only afterwards.
+                _mark_event_pushed(orchestrator, event_id)
+                if job_guard.should_abort():
+                    return
+                if orchestrator is not None:
+                    try:
+                        sess_push = orchestrator.session_for_user(line_user_id)
+                        if sess_push is not None and not job_guard.should_abort():
+                            ctx_push = orchestrator.context_manager.append_turn(sess_push.conversation_context, role="assistant", content=push_text)
+                            ctx_push, _ = orchestrator.context_manager.compact(ctx_push, stage_completed=False)
+                            sess_push = sess_push.model_copy(update={"conversation_context": ctx_push}, deep=True)
+                            sess_push = orchestrator._sync_clinical_context(sess_push)
+                            if not job_guard.should_abort():
+                                orchestrator.repository.save(sess_push, expected_version=sess_push.version)
+                    except Exception:
+                        pass
             if ok and push_text == HONEST_FALLBACK_PUSH_TEXT and orchestrator is not None:
-                _maybe_record_question_for_doctor(orchestrator, line_user_id, text, wf)
-            if not ok and not _is_duplicate_push(event_id):
+                _maybe_record_question_for_doctor(orchestrator, line_user_id, text, wf, deadline_guard=job_guard)
+            if not ok and not job_guard.should_abort() and not _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
                 try:
-                    _push_text(line_user_id, HONEST_FALLBACK_PUSH_TEXT, event_id=event_id)
+                    fallback_ok = _push_text(line_user_id, HONEST_FALLBACK_PUSH_TEXT, event_id=event_id, deadline_guard=job_guard)
+                    if fallback_ok:
+                        _mark_event_pushed(orchestrator, event_id)
                 except Exception:
                     pass
         except Exception as exc:  # noqa: BLE001
@@ -712,7 +858,10 @@ def _schedule_formal_push(
     def _bg() -> None:
         acquired = _FORMAL_SEMAPHORE.acquire(blocking=False)
         if not acquired:
-            if _is_duplicate_push(event_id):
+            if job_guard.should_abort():
+                job_guard.mark_abandoned()
+                return
+            if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
                 return
             try:
                 _push_text(line_user_id, QUEUED_FALLBACK_TEXT, event_id=None)
@@ -720,10 +869,16 @@ def _schedule_formal_push(
                 pass
 
             def _delayed() -> None:
-                with _FORMAL_SEMAPHORE:
-                    if _is_duplicate_push(event_id):
+                remaining = job_guard.remaining_s()
+                if remaining is None or remaining <= 0 or not _FORMAL_SEMAPHORE.acquire(timeout=remaining):
+                    job_guard.mark_abandoned()
+                    return
+                try:
+                    if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
                         return
                     _execute_formal_and_push()
+                finally:
+                    _FORMAL_SEMAPHORE.release()
 
             try:
                 threading.Thread(target=_delayed, daemon=True).start()
@@ -731,7 +886,7 @@ def _schedule_formal_push(
                 pass
             return
         try:
-            if _is_duplicate_push(event_id):
+            if _is_duplicate_push(event_id, getattr(orchestrator, "repository", None)):
                 return
             _execute_formal_and_push()
         finally:
@@ -1164,7 +1319,7 @@ async def callback(
                 orchestrator = _get_conversation_orchestrator()
                 webhook_event_id = ev.get("webhookEventId") or message.get("id")
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":
-                    if _is_duplicate_push(str(webhook_event_id)):
+                    if _is_duplicate_push(str(webhook_event_id), getattr(orchestrator, "repository", None)):
                         try:
                             existing = orchestrator.repository.get_webhook_event(str(webhook_event_id))
                             if existing is not None and existing.status == "COMPLETED" and existing.result:

@@ -87,6 +87,7 @@ FALLBACK_TEMPLATES = {
     "B_UNSAFE": "目前無法確認檢索資料足以支援可靠回答，請改由合格醫療專業人員評估。",
     "C_FAILURE": "目前無法產生可驗證的回答，請改由合格醫療專業人員評估。",
     "SYSTEM_DEPENDENCY": "目前系統無法完成安全處理，請稍後再試或改由合格醫療專業人員評估。",
+    "DEPENDENCY_OR_TIMEOUT": "目前系統無法完成安全處理，請稍後再試或改由合格醫療專業人員評估。",
     "FORMAL_TIMEOUT": "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？",
     "IDENTITY": IDENTITY_VARIANTS[0],
     "EMPATHY": EMPATHY_VARIANTS[0],
