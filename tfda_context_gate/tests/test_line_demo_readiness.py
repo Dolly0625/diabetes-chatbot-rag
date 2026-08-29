@@ -18,6 +18,13 @@ from scripts.demo.check_line_demo_readiness import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_from_project_dotenv(monkeypatch):
+    """Keep readiness tests independent from a developer's local secrets."""
+
+    monkeypatch.setenv("LINE_DEMO_READINESS_LOAD_DOTENV", "false")
+
+
 def test_no_secret_in_stdout(monkeypatch, capsys):
     secret = "my_super_secret_value_987654321"
     token = "my_token_abc123_super_long_token_value"
@@ -93,6 +100,20 @@ def test_ready_device_when_all_set(monkeypatch, tmp_path):
     assert readiness == READY_DEVICE
 
 
+def test_line_device_requires_public_https_callback(monkeypatch):
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", "a" * 32)
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "b" * 60)
+    monkeypatch.setenv("CONVERSATION_LLM_MODEL", "opencode/mimo-v2.5")
+    monkeypatch.setenv("OPENCODE_API_KEY", "fake-key")
+    monkeypatch.delenv("LINE_CALLBACK_URL", raising=False)
+    monkeypatch.delenv("CALLBACK_URL", raising=False)
+    monkeypatch.delenv("APP_BASE_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_URL", raising=False)
+    monkeypatch.delenv("PATIENT_PORTAL_URL", raising=False)
+    checks = run_all_checks()
+    assert compute_readiness(checks) == READY_LOCAL
+
+
 def test_identity_hash_key_short_is_blocked(monkeypatch):
     monkeypatch.setenv("LINE_IDENTITY_HASH_KEY", "short")
     from scripts.demo.check_line_demo_readiness import check_identity_hash_key
@@ -132,6 +153,7 @@ def test_cli_via_subprocess_no_secret_leak(tmp_path):
         "OPENCODE_API_KEY": "subprocess_key",
         "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
         "HOME": str(Path.home()),
+        "LINE_DEMO_READINESS_LOAD_DOTENV": "false",
     }
     result = subprocess.run(
         [sys.executable, "-m", "scripts.demo.check_line_demo_readiness", "--json"],

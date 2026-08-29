@@ -86,6 +86,12 @@ def _get_env(name: str, default: str | None = None) -> str | None:
     val = os.getenv(name)
     if val is not None:
         return val
+    # Tests and CI can explicitly disable the project .env fallback so a
+    # deliberately missing variable stays missing.  Normal CLI execution
+    # keeps the convenient .env behaviour.
+    load_dotenv = os.getenv("LINE_DEMO_READINESS_LOAD_DOTENV", "true")
+    if load_dotenv.strip().lower() not in {"1", "true", "yes", "on"}:
+        return default
     # fallback: 讀 .env（若存在），但不覆蓋已設定的 monkeypatch
     dotenv_path = PROJECT_ROOT / ".env"
     if dotenv_path.is_file():
@@ -590,8 +596,8 @@ def check_callback_https() -> CheckResult:
         return CheckResult(
             id="callback_https",
             name="callback 是否需要公開 HTTPS",
-            status=WARN,
-            message="未設定公開 URL，需手動確認",
+            status=BLOCKED,
+            message="未設定公開 HTTPS URL",
             hint="真機 Demo 需要公開 HTTPS callback（例：ngrok / Cloud Run），請設定 LINE_CALLBACK_URL 或 APP_BASE_URL 為 https://",
             category="line",
         )
@@ -610,7 +616,7 @@ def check_callback_https() -> CheckResult:
             return CheckResult(
                 id="callback_https",
                 name="callback 是否需要公開 HTTPS",
-                status=WARN,
+                status=BLOCKED,
                 message="為 localhost，僅本地可用",
                 hint="真機 Demo 請改用公開 HTTPS（ngrok / serveo / Cloud Run）",
                 category="line",
@@ -626,7 +632,7 @@ def check_callback_https() -> CheckResult:
     return CheckResult(
         id="callback_https",
         name="callback 是否需要公開 HTTPS",
-        status=WARN,
+        status=BLOCKED,
         message="URL 格式不明",
         hint="請設定為 https:// 開頭的公開 URL",
         category="line",

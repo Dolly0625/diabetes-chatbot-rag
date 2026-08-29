@@ -42,7 +42,7 @@ Exit code：
 | 9 | `bge_m3` | bge-m3 是否存在 | `OLLAMA_BASE_URL` + `data/processed/.vector_cache/*.pkl` | 快取或 Ollama 有 | 未發現 | — |
 | 10 | `portal_urls` | patient / clinician portal URL | `PATIENT_PORTAL_URL` / `CLINICIAN_PORTAL_URL` / `APP_BASE_URL` 等 | 已設定 | 未設定 | — |
 | 11 | `liff_config` | LIFF channel / client ID | `LINE_LOGIN_CHANNEL_ID` / `LINE_LIFF_ID` | 兩者皆有 | 部分或無 | — |
-| 12 | `callback_https` | callback 需公開 HTTPS | `LINE_CALLBACK_URL` / `APP_BASE_URL` / `PATIENT_PORTAL_URL` 等 | `https://` | `localhost` 或未設定 | `http://` 非本地 |
+| 12 | `callback_https` | callback 需公開 HTTPS | `LINE_CALLBACK_URL` / `APP_BASE_URL` / `PATIENT_PORTAL_URL` 等 | `https://` | — | 未設定、`localhost` 或非 HTTPS |
 | 13 | `webhook_signature_verification` | webhook 簽章驗證是否開啟 | `LINE_CHANNEL_SECRET` + `LINE_ALLOW_UNSIGNED_WEBHOOK` | 已開啟 | — | 未設定或允許未簽章 |
 | 14 | `async_push` | async push Messaging API 權限 | `LINE_CHANNEL_ACCESS_TOKEN` 等 | 已設定 token | — | 未設定 |
 | 15 | `rich_menu` | Rich Menu 提醒 | —（不呼叫 API） | — | 需人工確認 | — |

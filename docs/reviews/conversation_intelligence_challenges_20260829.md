@@ -105,7 +105,7 @@ Conversation Interpreter（理解與結構化候選）
 
 真正的延遲上限需要使用 HTTP／SDK 原生 timeout、可傳遞的 deadline，以及確保超時工作不再寫入 session 或推送 LINE 回覆。單純提高 45／120 秒上限不算修復。
 
-## 3. 架構決策：採用混合式快速路由
+## 3. 架構決策：混合式路由，但 Semantic Router 暫不上線
 
 經討論後，不建議讓每一句都直接進生成式 AI，也不建議完全以 Semantic Router 取代 interpreter。較合適的目標架構為：
 
@@ -124,7 +124,9 @@ Conversation Interpreter（理解與結構化候選）
 - mixed／修正／指代不明／低信心：完整 AI
 ```
 
-現階段優先以專案既有本地 `bge-m3` 建立 semantic prototype，避免立即增加模型與訓練流程。Semantic Router 只負責分流，不得直接寫入病患資料，也不得取代 deterministic red-flag gate。SetFit 留待累積足夠人工標註語料後再評估。
+已以專案既有本地 `bge-m3` 完成 84 筆 PII-free 離線評估。Embedding 延遲約 cold 170ms、warm p50 161ms、p95 172ms，速度遠快於 6～8 秒的 Formal interpreter；但混合意圖的區分仍不夠安全。將 false-fast 壓到 0 時，MIXED recall 為 0，fallback 約 77～96%；放寬門檻雖可提高 recall，卻產生 25～29 筆 false-fast。
+
+因此 Semantic Router 目前不接 production，最多只能做 shadow logging。它只負責分流，不得直接寫入病患資料，也不得取代 deterministic red-flag gate。SetFit 留待累積足夠人工標註語料後再評估。
 
 上線策略應先採 shadow mode：記錄 Semantic Router 會選哪條路，但暫時不改正式結果；通過未見變體、multi-label、信心門檻與 fallback 評估後，才讓高信心純衛教或閒聊跳過 conversation interpreter。
 
@@ -139,14 +141,19 @@ Conversation Interpreter（理解與結構化候選）
 | P1.1 Formal interpreter | `683b5dd`、`5e5cb8e` | 296 | 正式 AI 理解上線、控制句防污染 |
 | P1.1.1 safety closure | `b496308` | 313 | 修正產品命令優先序、身分與 subject 安全 |
 | P2A candidate merge | `c64bcf7` | 405 | partial match 不再阻止 AI、多症狀泛化 |
-| P2A.1-A data quality worktree | `a3595cb`（待 amend） | 439 | 中英同義去重；審核後要求補藥品子類與跨子句否定 |
+| P2A.1 data quality | `1aad054` | 451 | 中英同義去重、藥品子類與子句級否定 |
+| P2A.1 latency/multi-intent | `c9a1c56` | — | mixed-intent 落地、分階段量測與真正 deadline |
+| LINE reliability closure | `394f24c`～`9e4b6e3` | 486 | bounded admission、late side-effect guard、push 與 replay 冪等 |
+| Engineering demo pack | `7ec2483` | — | 四條 deterministic Demo 旅程 |
+| LINE readiness preflight | `3690185` | 496 | 不洩密的真機設定檢查 |
 
-截至本文撰寫時：
+截至本文更新時：
 
-- 主線 HEAD 為 `c64bcf7`，405 tests，tree 乾淨。
-- `p2a1-data-quality` worktree 尚未合併，正補修審核邊界。
-- `p2a1-latency` worktree 正處理 mixed-intent、分階段 latency、真正 timeout 與安全並行。
-- 所有列出的 commits 均尚未 push；後續應在整合驗收後建立遠端備份分支。
+- data quality、mixed-intent/deadline、LINE push/replay 修復已合入主線。
+- 整合分支獨立複審為 486 passed；加入 readiness tests 後主線為 496 passed。
+- 工程 Demo 四情境已可重現；LINE 真機仍需公開 HTTPS callback，目前 preflight 為 `READY_FOR_LOCAL_DEMO`。
+- Semantic Router 評估保留在獨立實驗分支 `747c5f1`，未合入 production。
+- 以上 commits 均尚未 push。
 
 ## 5. 可用於報告的研究觀察
 
@@ -160,12 +167,10 @@ Conversation Interpreter（理解與結構化候選）
 
 ## 6. 後續工作順序
 
-1. 完成並獨立驗收 P2A.1-A：同義詞、藥品子類與子句級否定。
-2. 完成並獨立驗收 P2A.1-B：mixed-intent 落地、stage latency、真正 timeout、安全並行。
-3. 在主線依序整合兩個 worktree，重跑完整 pytest、紅旗、授權、PendingAction 與 live Formal smoke。
-4. 開始 P2A.2 Semantic Router：先離線評估，再 shadow mode，最後只啟用高信心快速路徑。
-5. 完成 P2B 自然表達層；不得增加新的串行 LLM rephraser。
-6. 完成病患 Review／分享 UI、醫護摘要 UI 與 LINE 手機端 E2E 展示。
+1. 設定公開 HTTPS callback，完成 LINE 手機端 E2E，並人工確認 Rich Menu。
+2. 完成病患 Review／分享 UI 與醫護摘要 UI；若要展示醫護端，補 clinician allowlist。
+3. 完成 P2B 自然表達層；不得增加新的串行 LLM rephraser。
+4. Semantic Router 只先做 shadow mode；未有更好標註資料與門檻前不啟用 fast route。
 
 ## 7. 報告撰寫建議
 
