@@ -9,6 +9,7 @@ from tfda_context_gate.a_router import route_request
 from tfda_context_gate.a_router.schemas import RequestContext
 from tfda_context_gate.query_expansion.adapters import from_a_result
 from tfda_context_gate.query_expansion.expander import IdentityQueryExpander
+from tfda_context_gate.b_context_gate.gate import DeterministicContextGate
 from tfda_context_gate.rag.external_contract import (
     RetrievalResponse,
     retrieval_request_from_results,
@@ -129,3 +130,42 @@ def test_non_general_route_cannot_cross_rag_boundary():
     expansion = IdentityQueryExpander().expand(from_a_result(a_result))
     with pytest.raises(ValueError, match="did not allow"):
         retrieval_request_from_results(a_result, expansion)
+
+
+@pytest.mark.parametrize("status", ["STALE", "CONFLICT"])
+def test_stale_or_conflicting_envelope_never_passes_b(status: str):
+    request = _allowed_request()
+    response = RetrievalResponse.model_validate(
+        {
+            "request_id": request.request_id,
+            "retrieval_status": status,
+            "chunks": [{"chunk_id": "c1", "content": "outdated or conflicting evidence"}],
+        }
+    )
+    b_input = rag_to_b_input(retrieval_response_to_rag_result(response, request=request))
+    result = DeterministicContextGate(approval_mode="all_retrieved").evaluate(b_input)
+    assert result.decision == "REVIEW"
+    assert result.approved_evidence_ids == []
+
+
+def test_retrieval_injection_warning_is_unsafe_before_chunk_approval():
+    request = _allowed_request()
+    response = RetrievalResponse.model_validate(
+        {
+            "request_id": request.request_id,
+            "retrieval_status": "SUCCESS",
+            "warnings": ["INDIRECT_PROMPT_INJECTION_SUSPECTED"],
+            "chunks": [{"chunk_id": "c1", "content": "untrusted retrieved instruction"}],
+        }
+    )
+    b_input = rag_to_b_input(retrieval_response_to_rag_result(response, request=request))
+    result = DeterministicContextGate(approval_mode="all_retrieved").evaluate(b_input)
+    assert result.decision == "UNSAFE"
+    assert result.approved_evidence_ids == []
+
+
+def test_retrieval_error_maps_to_b_fallback():
+    request = _allowed_request()
+    response = RetrievalResponse(request_id=request.request_id, retrieval_status="ERROR")
+    b_input = rag_to_b_input(retrieval_response_to_rag_result(response, request=request))
+    assert DeterministicContextGate(approval_mode="all_retrieved").evaluate(b_input).decision == "FALLBACK"

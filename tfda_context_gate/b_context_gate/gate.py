@@ -46,6 +46,50 @@ class DeterministicContextGate:
         分支 2：重複 evidence_id → UNSAFE
         分支 3：依 approval_mode 篩選核准清單，無核准則 INSUFFICIENT，否則 PASS
         """
+        retrieval_status = str(request.tool_context.get("retrieval_status") or "").upper()
+        warnings = [str(value).upper() for value in request.tool_context.get("warnings", [])]
+
+        # External envelope is advisory data from an untrusted dependency;
+        # fail closed before considering individual chunks.  PARTIAL remains
+        # eligible for the normal sufficiency check below.
+        if any("PROMPT_INJECTION" in warning for warning in warnings):
+            return CanonicalBResult(
+                request_id=request.request_id,
+                decision="UNSAFE",
+                approved_evidence_ids=[],
+                evidence=request.evidence,
+                reason_codes=["RETRIEVAL_PROMPT_INJECTION_WARNING"],
+                retrieval_feedback={"retrieval_queries": request.retrieval_queries, "warnings": warnings},
+                relevance="UNKNOWN",
+                sufficiency="UNSAFE",
+                safety="FAIL",
+            )
+        if retrieval_status in {"STALE", "CONFLICT"}:
+            return CanonicalBResult(
+                request_id=request.request_id,
+                decision="REVIEW",
+                approved_evidence_ids=[],
+                evidence=request.evidence,
+                reason_codes=[f"RETRIEVAL_{retrieval_status}"],
+                retrieval_feedback={"retrieval_queries": request.retrieval_queries, "retrieval_status": retrieval_status},
+                relevance="UNKNOWN",
+                sufficiency="REVIEW",
+                conflict="CONFLICT" if retrieval_status == "CONFLICT" else None,
+                safety="NOT_ASSESSED",
+            )
+        if retrieval_status == "ERROR":
+            return CanonicalBResult(
+                request_id=request.request_id,
+                decision="FALLBACK",
+                approved_evidence_ids=[],
+                evidence=[],
+                reason_codes=["RETRIEVAL_ERROR"],
+                retrieval_feedback={"retrieval_queries": request.retrieval_queries, "retrieval_status": retrieval_status},
+                relevance="NONE",
+                sufficiency="INSUFFICIENT",
+                safety="NOT_ASSESSED",
+            )
+
         # ── 分支 1：完全沒有證據，直接判 INSUFFICIENT ──
         if not request.evidence:
             return CanonicalBResult(
@@ -53,8 +97,14 @@ class DeterministicContextGate:
                 decision="INSUFFICIENT",  # 證據不足
                 approved_evidence_ids=[],
                 evidence=[],
-                reason_codes=["CONTEXT_INSUFFICIENT", "NO_RETRIEVED_EVIDENCE"],
-                retrieval_feedback={"retrieval_queries": request.retrieval_queries},
+                reason_codes=[
+                    "CONTEXT_INSUFFICIENT",
+                    "RETRIEVAL_EMPTY" if retrieval_status == "EMPTY" else "NO_RETRIEVED_EVIDENCE",
+                ],
+                retrieval_feedback={
+                    "retrieval_queries": request.retrieval_queries,
+                    **({"retrieval_status": retrieval_status} if retrieval_status else {}),
+                },
                 relevance="NONE",  # 無相關性可言
                 sufficiency="INSUFFICIENT",
                 safety="NOT_ASSESSED",  # 尚未進入安全評估

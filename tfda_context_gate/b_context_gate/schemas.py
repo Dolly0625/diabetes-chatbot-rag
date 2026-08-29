@@ -84,7 +84,7 @@ class CanonicalBInput(StrictModel):
     retrieval_queries: list[str] = Field(min_length=1)  # 實際送檢索的查詢列表（至少 1 筆）
     evidence: list[CanonicalEvidence] = Field(default_factory=list)  # 待審證據清單
     task_type: str | None = None  # 預留：產品任務類型（patient_education / pre_visit_intake / clinician_evidence），v0.1 不判讀
-    tool_context: dict[str, Any] = Field(default_factory=dict)  # 預留：工具上下文（source_id / filters / tool_name / status），v0.1 僅透傳
+    tool_context: dict[str, Any] = Field(default_factory=dict)  # 工具上下文；外部 retrieval status/warnings 由 B fail-closed 判讀
 
 
 class CanonicalBResult(StrictModel):
