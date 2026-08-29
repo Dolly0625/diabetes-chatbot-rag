@@ -179,6 +179,11 @@ from tfda_context_gate.access_control import (
 )
 from tfda_context_gate.clinical_safety import RiskSignalPolicy
 from tfda_context_gate.conversation import ConversationContextManager
+from tfda_context_gate.conversation.envelope import build_conversation_envelope, envelope_to_model_context
+from tfda_context_gate.conversation.interpreter import (
+    ConversationInterpreter,
+    DeterministicConversationInterpreter,
+)
 from tfda_context_gate.intake.schemas import PreVisitIntake
 from tfda_context_gate.product_session import ProductSession, ProductSessionRepository
 from tfda_context_gate.product_session import ProductSessionConflict
@@ -350,6 +355,7 @@ class ConversationOrchestrator:
         workflow_runner: WorkflowRunner = run_workflow,
         session_ttl: timedelta = timedelta(days=7),
         context_manager: ConversationContextManager | None = None,
+        interpreter: ConversationInterpreter | None = None,
         use_formal: bool | None = None,
         formal_timeout_s: float | None = None,
         async_formal_timeout_s: float | None = None,
@@ -363,6 +369,22 @@ class ConversationOrchestrator:
         self.session_ttl = session_ttl
         self.context_manager = context_manager or ConversationContextManager()
         self.risk_policy = RiskSignalPolicy()
+        # P1 interpreter: deterministic default, formal optionally via env (no dotenv override to keep tests hermetic)
+        if interpreter is not None:
+            self.interpreter: ConversationInterpreter = interpreter
+        else:
+            conv_model = os.getenv("CONVERSATION_LLM_MODEL", "").strip()
+            if conv_model:
+                try:
+                    from tfda_context_gate.conversation.interpreter import FormalConversationInterpreter
+
+                    self.interpreter = FormalConversationInterpreter()
+                except Exception:
+                    self.interpreter = DeterministicConversationInterpreter()
+            else:
+                self.interpreter = DeterministicConversationInterpreter()
+        self._last_interpretation: Any | None = None
+        self._last_envelope: Any | None = None
         if use_formal is None:
             env_val = os.getenv("LINE_USE_FORMAL")
             if env_val is not None:
@@ -1092,13 +1114,7 @@ class ConversationOrchestrator:
 
     def _process_text(self, session: ProductSession, text: str) -> OrchestratorResult:
         previous_version = session.version
-        context = self.context_manager.append_turn(
-            session.conversation_context,
-            role="user",
-            content=text or "（空白訊息）",
-        )
-        session = session.model_copy(update={"conversation_context": context}, deep=True)
-
+        # 3: RiskSignalPolicy on current_message + existing monotonic risk state (before envelope/interpreter)
         risk = self.risk_policy.classify(text)
         cumulative_risk = self._merge_risk(session.system_risk_classification, risk.model_dump(mode="json"))
         context = self.context_manager.apply_structured_updates(
@@ -1113,8 +1129,11 @@ class ConversationOrchestrator:
             deep=True,
         )
 
-        # 一旦同一 subject 出現明確紅旗，後續產品命令也不得把它洗回一般狀態。
+        # 4: 紅旗立即中止 — 不得把 Interpreter 放在紅旗之前
         if cumulative_risk.get("level") == "RED_FLAG":
+            # Still need to record user turn for trace before returning
+            ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
+            session = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
             reply = fallback_response("A_EMERGENCY")
             session = self._sync_clinical_context(session)
             context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
@@ -1130,6 +1149,42 @@ class ConversationOrchestrator:
                 status="FALLBACK",
                 intake_stage=saved.intake_stage,
             )
+
+        # 5-7: 建 ConversationEnvelope (ACTIVE 對話期) → 執行 ConversationInterpreter (must be after red flag)
+        envelope = None
+        interpretation = None
+        try:
+            envelope = build_conversation_envelope(session, text)
+            self._last_envelope = envelope
+            try:
+                interpretation = self.interpreter.interpret(envelope)
+            except Exception:
+                interpretation = DeterministicConversationInterpreter().interpret(envelope)
+            self._last_interpretation = interpretation
+        except Exception:
+            # Safe fallback: deterministic minimal interpretation
+            interpretation = None
+            self._last_envelope = envelope
+            self._last_interpretation = None
+
+        # 8: 若 interpreter 判斷需澄清 (subject 切換不明等)，先追問，不自行轉換
+        if interpretation and interpretation.needs_clarification:
+            ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
+            session = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
+            reply = interpretation.clarification_question or "請再說明一下？"
+            session = self._sync_clinical_context(session)
+            context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
+            context, _ = self.context_manager.compact(context, stage_completed=False)
+            saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+            return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+
+        # Record user turn AFTER envelope/interpreter (so envelope recent_turns = prior, current_message independent)
+        context = self.context_manager.append_turn(
+            session.conversation_context,
+            role="user",
+            content=text or "（空白訊息）",
+        )
+        session = session.model_copy(update={"conversation_context": context}, deep=True)
 
         if _is_empathy_text(text):
             try:
@@ -1229,11 +1284,23 @@ class ConversationOrchestrator:
             session, reply, status = command_result
             intake_stage = session.intake_stage
         else:
-            if self._is_intake_active(session, text) and self._looks_like_side_question(session, text):
+            # P1: side question handling must respect interpreter multi-intent and cross-turn resolution
+            is_side_candidate = self._looks_like_side_question(session, text)
+            if interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents:
+                is_side_candidate = False
+            if interpretation and interpretation.resolved_education_query and interpretation.references_resolved:
+                # cross-turn followup is side-like but resolved query should be used
+                is_side_candidate = True
+            if self._is_intake_active(session, text) and is_side_candidate:
+                side_query = text
+                if interpretation and interpretation.resolved_education_query and interpretation.references_resolved:
+                    side_query = interpretation.resolved_education_query
+                elif interpretation and interpretation.resolved_education_query and "EDUCATION_QUESTION" in interpretation.intents:
+                    side_query = interpretation.resolved_education_query
                 workflow = self._call_workflow({
                     "request_id": f"{session.session_id}-side-v{previous_version + 1}",
                     "schema_version": "a.v0.1",
-                    "user_raw_input": text,
+                    "user_raw_input": side_query,
                     "declared_role": self._declared_role(session.actor_role),
                     "language": "zh-TW",
                 })
@@ -1261,8 +1328,21 @@ class ConversationOrchestrator:
             old_stage = session.intake_stage
             intake_note: str | None = None
             workflow_text = text
-            if self._is_intake_active(session, text) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
-                session, intake_note = self._normalize_intake_answer(session, text)
+            # P1 early multi detection for intake: avoid education being added as doctor question
+            is_multi_early = interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents
+            intake_text_for_normalize = text
+            if is_multi_early and interpretation and interpretation.resolved_education_query:
+                edu_q = interpretation.resolved_education_query
+                if edu_q and edu_q in text:
+                    intake_text_for_normalize = text.replace(edu_q, "").strip("，,。 ")
+                else:
+                    parts = text.split("，")
+                    for ep in [p for p in parts if "水果" in p or "可以吃" in p]:
+                        intake_text_for_normalize = intake_text_for_normalize.replace(ep, "").strip("，,。 ")
+                if not intake_text_for_normalize.strip():
+                    intake_text_for_normalize = text
+            if self._is_intake_active(session, intake_text_for_normalize) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
+                session, intake_note = self._normalize_intake_answer(session, intake_text_for_normalize)
                 if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
                     session = self._sync_clinical_context(session)
                     context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=intake_note or "請問程度大約是輕度、中度、重度，或 1–10 分中的幾分？")
@@ -1282,19 +1362,45 @@ class ConversationOrchestrator:
                 saved = self.repository.save(session, expected_version=previous_version)
                 return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=intake_note or "好的，已進入確認階段。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
             workflow_text = text
-            workflow = self._call_workflow(
-                {
-                    "request_id": f"{session.session_id}-v{previous_version + 1}",
-                    "schema_version": "a.v0.1",
-                    "user_raw_input": workflow_text,
-                    "declared_role": self._declared_role(session.actor_role),
-                    "language": "zh-TW",
-                },
-                task_type="pre_visit_intake" if session.status in {"ACTIVE", "AWAITING_CONFIRMATION"} and self._is_intake_active(session, text) else None,
-                intake=session.intake_snapshot if self._is_intake_active(session, text) else None,
-            )
+            is_multi = interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents
+            # P1: interpreter resolved education query should be used for A→RAG→B→C→D
+            if interpretation and interpretation.resolved_education_query and "EDUCATION_QUESTION" in interpretation.intents:
+                workflow_text = interpretation.resolved_education_query
+            elif interpretation and interpretation.references_resolved and interpretation.resolved_education_query:
+                workflow_text = interpretation.resolved_education_query
+            if is_multi:
+                # Multi-intent: intake already handled via _normalize_intake_answer, education via separate RAG workflow (no intake task)
+                workflow = self._call_workflow(
+                    {
+                        "request_id": f"{session.session_id}-v{previous_version + 1}",
+                        "schema_version": "a.v0.1",
+                        "user_raw_input": workflow_text,
+                        "declared_role": self._declared_role(session.actor_role),
+                        "language": "zh-TW",
+                    },
+                    task_type=None,
+                    intake=None,
+                )
+            else:
+                workflow = self._call_workflow(
+                    {
+                        "request_id": f"{session.session_id}-v{previous_version + 1}",
+                        "schema_version": "a.v0.1",
+                        "user_raw_input": workflow_text,
+                        "declared_role": self._declared_role(session.actor_role),
+                        "language": "zh-TW",
+                    },
+                    task_type="pre_visit_intake" if session.status in {"ACTIVE", "AWAITING_CONFIRMATION"} and self._is_intake_active(session, text) else None,
+                    intake=session.intake_snapshot if self._is_intake_active(session, text) else None,
+                )
+            is_multi_multi = interpretation and "INTAKE_ANSWER" in interpretation.intents and "EDUCATION_QUESTION" in interpretation.intents
+            pending_q_from_workflow = workflow.question
+            # P1 multi: education workflow has no intake question, need to preserve next intake question
+            if is_multi_multi and pending_q_from_workflow is None:
+                nxt_field = self._next_pending_field(PreVisitIntake.model_validate(workflow.intake_snapshot or session.intake_snapshot))
+                pending_q_from_workflow = self._question_for_field(nxt_field) if nxt_field else None
             updates: dict[str, Any] = {
-                "pending_question": workflow.question,
+                "pending_question": pending_q_from_workflow,
                 "system_risk_classification": self._merge_risk(
                     session.system_risk_classification,
                     workflow.system_risk_classification or risk.model_dump(mode="json"),
@@ -1308,6 +1414,9 @@ class ConversationOrchestrator:
                 workflow.intake_snapshot or session.intake_snapshot
             )
             updates["pending_field"] = self._next_pending_field(resulting_intake)
+            # Ensure multi keeps correct pending_question after intake write
+            if is_multi_multi and updates.get("pending_question") is None and updates.get("pending_field"):
+                updates["pending_question"] = self._question_for_field(updates["pending_field"])
             if workflow.status == "NEEDS_CONFIRMATION":
                 updates["status"] = "AWAITING_CONFIRMATION"
             if not resulting_intake.questions_for_doctor and updates.get("intake_stage") == "review":
@@ -1331,7 +1440,8 @@ class ConversationOrchestrator:
             else:
                 reply, status, intake_stage = workflow.final_response, workflow.status, workflow.intake_stage
                 # When workflow returned None stage (e.g. BLOCKED) but intake progressed, use session's derived stage
-                if intake_stage is None and intake_note is not None:
+                # P1 multi: keep education answer, don't overwrite with pending question (will be appended deterministically later)
+                if intake_stage is None and intake_note is not None and not is_multi:
                     intake_stage = session.intake_stage
                     status = "NEEDS_CLARIFICATION" if session.pending_field else status
                     if session.pending_question:
@@ -1360,6 +1470,11 @@ class ConversationOrchestrator:
                     reply = f"{intake_note}\n\n{reply}"
             elif checkpoint:
                 reply = f"{checkpoint}\n\n{reply}"
+            # P1 multi: deterministically append next intake question after education answer
+            if is_multi_multi and session.pending_field and session.pending_question:
+                nxt_q = session.pending_question
+                if nxt_q and nxt_q.strip() not in reply and workflow.status == "COMPLETED":
+                    reply = f"{reply}\n\n{nxt_q}"
             session = self._sync_clinical_context(session)
             if stage_completed and old_stage in {"stage1", "stage2", "stage3"}:
                 session = session.model_copy(update={

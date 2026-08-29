@@ -6,6 +6,14 @@ from .envelope import (
     build_conversation_envelope,
     envelope_to_model_context,
 )
+from .interpreter import (
+    ConversationInterpreter,
+    ConversationTurnInterpretation,
+    DeterministicConversationInterpreter,
+    FakeConversationInterpreter,
+    FormalConversationInterpreter,
+    IntakeCandidate,
+)
 from .manager import ConversationContextManager, estimate_tokens
 from tfda_context_gate.access_control import AuthorizationStatus
 
@@ -27,8 +35,14 @@ __all__ = [
     "ConversationContextManager",
     "ConversationTurn",
     "ConversationEnvelope",
+    "ConversationInterpreter",
+    "ConversationTurnInterpretation",
+    "DeterministicConversationInterpreter",
     "EnvelopeTurn",
+    "FakeConversationInterpreter",
+    "FormalConversationInterpreter",
     "FactRevision",
+    "IntakeCandidate",
     "build_conversation_envelope",
     "envelope_to_model_context",
     "estimate_tokens",
