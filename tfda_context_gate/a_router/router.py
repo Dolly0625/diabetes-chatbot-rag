@@ -200,7 +200,9 @@ class LangChainSignalExtractor:
         except ImportError:
             pass
 
-        model = env_value("ROUTER_LLM_MODEL", "opencode/mimo-v2.5") or "opencode/mimo-v2.5"
+        model = env_value("ROUTER_LLM_MODEL", "") or ""
+        if not model:
+            raise RouterDependencyError("ROUTER_LLM_MODEL is required; set it in .env or use deterministic fallback")
         for key in ("OPENCODE_API_KEY", "OPENCODE_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OLLAMA_BASE_URL"):
             val = env_value(key)
             if val:

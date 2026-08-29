@@ -33,7 +33,9 @@ def _build_formal_generator():
     from tfda_context_gate.c_generator.schemas import EvidenceAwareV2Answer
     from tfda_context_gate.run_config import env_value
 
-    model = env_value("ROUTER_LLM_MODEL", "opencode/mimo-v2.5") or "opencode/mimo-v2.5"
+    model = env_value("ROUTER_LLM_MODEL", "") or ""
+    if not model:
+        raise RuntimeError("ROUTER_LLM_MODEL is required for formal generator; set it in .env or use deterministic fallback")
     base_url = env_value("OPENCODE_BASE_URL") or env_value("OPENAI_BASE_URL")
     api_key = env_value("OPENCODE_API_KEY") or env_value("OPENAI_API_KEY")
     bare = model.split("/", 1)[-1] if "/" in model else model

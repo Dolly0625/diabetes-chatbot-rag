@@ -1,19 +1,30 @@
 #!/usr/bin/env python3
 """P1.1 Live Smoke — 不進 pytest，使用 .env 真實模型測試未見語句。
 
-用法: python3 scripts/p1_live_smoke.py
+正式執行（擇一）:
+  python -m scripts.p1_live_smoke
+  python scripts/p1_live_smoke.py
+相容舊用法（shell hack）:
+  PYTHONPATH=. python scripts/p1_live_smoke.py
+
 報告: 是否真的使用 Formal、模型名稱（非秘密）、每輪 latency、intents、resolved query、candidate field、confidence、session snapshot、是否 fallback。
 不輸出 API key、LINE ID、hash 等秘密。
 量測 p50/p95、timeout/fallback 比例，CONVERSATION_LLM_TIMEOUT_S 可由 .env 設定。
+不納入 pytest（scripts/ 目錄、檔名非 test_*）。
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# 支援 python scripts/p1_live_smoke.py 直接執行（無需 PYTHONPATH=.）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import os
 import time
 import hashlib
 import statistics
-from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 # Ensure .env loaded but not overriding test hermetic for live run
@@ -160,4 +171,12 @@ def main():
         print(f"CONVERSATION_LLM_TIMEOUT_S={os.getenv('CONVERSATION_LLM_TIMEOUT_S', '8')}")
 
 if __name__ == "__main__":
+    import argparse
+    _p = argparse.ArgumentParser(description="P1.1 Live Smoke — 正式執行: python -m scripts.p1_live_smoke （或 python scripts/p1_live_smoke.py）")
+    _p.add_argument("--help-long", action="store_true", help="顯示完整說明")
+    _a, _ = _p.parse_known_args()
+    if _a.help_long:
+        _p.print_help()
+        print("\n正式指令:\n  python -m scripts.p1_live_smoke\n  python scripts/p1_live_smoke.py")
+        raise SystemExit(0)
     main()

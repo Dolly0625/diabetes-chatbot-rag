@@ -17,6 +17,10 @@ python3 -c "from pathlib import Path; from tfda_context_gate.workflow.runner imp
 
 # Stream
 python3 -c "from tfda_context_gate.workflow.runner import stream_workflow; print(''.join(stream_workflow({'request_id':'4','user_raw_input':'請說明糖尿病的一般飲食原則。','declared_role':'PATIENT','language':'zh-TW'}, use_formal=True))[:200])"
+
+# 正式模型 smoke（live，不進 pytest；需 .env 真實模型）
+python -m scripts.p1_live_smoke
+# 相容：python scripts/p1_live_smoke.py  或  PYTHONPATH=. python scripts/p1_live_smoke.py
 ```
 
 ## 架構

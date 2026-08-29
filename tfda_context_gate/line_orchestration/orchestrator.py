@@ -1146,33 +1146,80 @@ class ConversationOrchestrator:
                 intake_stage=saved.intake_stage,
             )
 
-        # 5-7: 建 ConversationEnvelope (ACTIVE 對話期) → 執行 ConversationInterpreter (must be after red flag)
-        envelope = None
-        interpretation = None
-        try:
-            envelope = build_conversation_envelope(session, text)
-            self._last_envelope = envelope
-            try:
-                interpretation = self.interpreter.interpret(envelope)
-            except Exception:
-                interpretation = DeterministicConversationInterpreter().interpret(envelope)
-            self._last_interpretation = interpretation
-        except Exception:
-            # Safe fallback: deterministic minimal interpretation
-            interpretation = None
-            self._last_envelope = envelope
-            self._last_interpretation = None
-
-        # 8: 若 interpreter 判斷需澄清 (subject 切換不明等)，先追問，不自行轉換
-        if interpretation and interpretation.needs_clarification:
+        # 5: Identity check (bounded, cold-start also, before envelope, not via LLM)
+        if self._is_identity_question(text):
             ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
             session = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
-            reply = interpretation.clarification_question or "請再說明一下？"
+            reply = "這是 AI 糖尿病衛教／看診前整理助理，不是真人客服，也不提供診斷。緊急狀況如呼吸困難、胸痛、意識不清等，請立即尋求緊急醫療協助（例如撥打 119）。"
             session = self._sync_clinical_context(session)
-            context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
-            context, _ = self.context_manager.compact(context, stage_completed=False)
-            saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
-            return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+            ctx_assistant = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
+            ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+            saved = self.repository.save(session.model_copy(update={"conversation_context": ctx_assistant}, deep=True), expected_version=previous_version)
+            return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status="INFORMATION", intake_stage=saved.intake_stage)
+
+        # 6: Explicit product control fast path (before AI) — spec 6
+        _explicit_product_texts = self.SELF_COMMANDS | self.PROXY_COMMANDS | self.PAUSE_COMMANDS | self.CANCEL_COMMANDS | self.RESUME_COMMANDS | self.CONFIRM_COMMANDS | self.START_INTAKE_COMMANDS | self.SHARE_COMMANDS | self.SUMMARY_COMMANDS | self.MODIFY_COMMANDS | {"使用說明", "使用說明與緊急協助"}
+        if text.strip() in _explicit_product_texts or any(tok in text for tok in ("為自己整理", "代家人整理")):
+            ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
+            session_tmp = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
+            cmd_res = self._handle_product_command(session_tmp, text)
+            if cmd_res is not None:
+                sess_cmd, reply_cmd, status_cmd = cmd_res
+                sess_cmd = self._sync_clinical_context(sess_cmd)
+                ctx_assistant = self.context_manager.append_turn(sess_cmd.conversation_context, role="assistant", content=reply_cmd)
+                ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+                saved = self.repository.save(sess_cmd.model_copy(update={"conversation_context": ctx_assistant}, deep=True), expected_version=previous_version)
+                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_cmd, status=status_cmd, intake_stage=saved.intake_stage)
+
+        # 7: Intake pending deterministic fast path (before AI) — spec: AI only if deterministic cannot extract
+        # 7: For intake pending, check if deterministic can handle before AI (spec: AI only if deterministic cannot extract)
+        _skip_ai_for_intake = False
+        if self._is_intake_active(session, text) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
+            pending_field = session.pending_field or self._next_pending_field(session.intake_snapshot)
+            if pending_field:
+                is_education_like = bool(re.search(r"可以吃|飲食|水果|血糖|副作用|會傷腎|能吃|芭樂", text) and ("？" in text or "嗎" in text))
+                if not is_education_like:
+                    try:
+                        from tfda_context_gate.intake.tool import PreVisitIntakeTool
+                        tool = PreVisitIntakeTool()
+                        extracted = tool.extract_fields_from_utterance(text, stage=session.intake_stage)
+                        if pending_field in extracted and extracted[pending_field]:
+                            _skip_ai_for_intake = True
+                    except Exception:
+                        pass
+
+        # 8-9: 建 ConversationEnvelope → Interpreter (only if not handled deterministically)
+        envelope = None
+        interpretation = None
+        if not _skip_ai_for_intake:
+            try:
+                envelope = build_conversation_envelope(session, text)
+                self._last_envelope = envelope
+                try:
+                    interpretation = self.interpreter.interpret(envelope)
+                except Exception:
+                    interpretation = DeterministicConversationInterpreter().interpret(envelope)
+                self._last_interpretation = interpretation
+            except Exception:
+                interpretation = None
+                self._last_envelope = envelope
+                self._last_interpretation = None
+
+            # 10: 若 interpreter 判斷需澄清 (subject 切換不明等)，先追問，不自行轉換
+            if interpretation and interpretation.needs_clarification:
+                ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
+                session = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
+                reply = interpretation.clarification_question or "請確認：剛才的資料是你的，還是家人的？"
+                session = self._sync_clinical_context(session)
+                context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
+                context, _ = self.context_manager.compact(context, stage_completed=False)
+                saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+        else:
+            # Skipped AI for deterministic intake, interpretation remains None
+            interpretation = None
+            self._last_interpretation = None
+            self._last_envelope = None
 
         # Record user turn AFTER envelope/interpreter (so envelope recent_turns = prior, current_message independent)
         context = self.context_manager.append_turn(
@@ -1534,6 +1581,33 @@ class ConversationOrchestrator:
             return True
         if ("代" in text or "幫" in text) and "整理" in text:
             return True
+        return False
+
+    _IDENTITY_RE = re.compile(
+        r"你是真人|是真人嗎|是機器人|是.*AI|是.*ai|人工客服|真人客服|有人在嗎|電腦自動|跟醫生聊天|跟醫師聊天|機器人在回|AI在回",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_identity_question(cls, text: str) -> bool:
+        try:
+            n = unicodedata.normalize("NFKC", text).strip()
+            # Cover variants: 你是真人嗎？/現在是機器人在回覆嗎？/這是 AI 客服嗎？/有人在嗎，還是電腦自動回答？/我是在跟醫生聊天嗎？
+            if cls._IDENTITY_RE.search(n):
+                return True
+            # Additional explicit patterns
+            if "你是" in n and ("真人" in n or "AI" in n or "ai" in n.lower()):
+                return True
+            if "是" in n and "機器人" in n:
+                return True
+            if "AI" in n and ("客服" in n or "回" in n):
+                return True
+            if "有人在嗎" in n:
+                return True
+            if "跟醫生" in n or "跟醫師" in n:
+                return True
+        except Exception:
+            pass
         return False
 
     def _handle_product_command(self, session: ProductSession, text: str) -> tuple[ProductSession, str, str] | None:

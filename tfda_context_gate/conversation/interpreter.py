@@ -88,7 +88,16 @@ class ConversationInterpreter(Protocol):
 _CORRECTION_RE = re.compile(r"說錯了|更正|其實是|不是.*是|剛剛說錯", re.IGNORECASE)
 _SUBJECT_AMBIGUOUS_RE = re.compile(r"是我媽媽|是我家人|那個是我|不是我|幫家人", re.IGNORECASE)
 # subject switch that is explicit with consent phrase is NOT ambiguous; ambiguous is when source unclear without consent
-_SUBJECT_CLARIFY_RE = re.compile(r"那個是我媽媽，不是我|那個不是我|是我媽媽的|幫媽媽問|是我媽媽在吃|前面講錯.*媽媽", re.IGNORECASE)
+# P1.1.1 本人/家屬主體語意：覆蓋媽媽/媽/爸爸/爸/家人/前面講錯/幫家人問等
+_SUBJECT_CLARIFY_RE = re.compile(
+    r"那個是我媽媽，不是我|那個不是我|是我媽媽的|是我媽的|幫媽媽問|是我媽媽在吃"
+    r"|前面講錯.*(媽媽|媽|爸爸|爸|家人)"
+    r"|其實那些藥是我爸的|其實.*是我爸|是我爸的"
+    r"|剛才說的是家人|家人.*不是我|剛才.*家人.*不是我"
+    r"|我是幫家人問的|幫家人問|幫家人整理|是幫家人"
+    r"|那是我媽的藥|我自己沒有吃",
+    re.IGNORECASE,
+)
 _METFORMIN_SELF_RE = re.compile(r"我(有|正在)?吃\s*(metformin|二甲雙胍)|我目前服用\s*(metformin|二甲雙胍)|我有吃\s*(metformin|二甲雙胍)|醫生有開二甲雙胍給我", re.IGNORECASE)
 _METFORMIN_QUESTION_ONLY_RE = re.compile(r"(metformin|二甲雙胍).*會.*(傷腎|副作用)|.*副作用.*(metformin|二甲雙胍)", re.IGNORECASE)
 _FRUIT_QUERY_RE = re.compile(r"水果|芭樂|蘋果|香蕉", re.IGNORECASE)
@@ -254,13 +263,9 @@ class DeterministicConversationInterpreter:
         correction_target, correction_value = _detect_correction(envelope)
         doctor_candidate: str | None = None
 
-        # 1. Subject ambiguous detection must trigger clarification, not auto conversion
-        # Pattern: "那個是我媽媽，不是我" without explicit consent
-        if _SUBJECT_CLARIFY_RE.search(n) or ("是我媽媽" in n and "不是我" in n):
-            # Check if information_source unclear and actor_role mismatch
-            # Regardless, require clarification
+        if _SUBJECT_CLARIFY_RE.search(n) or ("是我媽媽" in n and "不是我" in n) or ("家人" in n and "不是我" in n) or ("幫家人" in n):
             needs_clarification = True
-            clarification_q = "請確認：這份資料是要記錄在您本人，還是您媽媽身上？"
+            clarification_q = "請確認：剛才的資料是你的，還是家人的？請選擇「為自己整理」或「代家人整理」。"
             intents.append("UNKNOWN")
             return ConversationTurnInterpretation(
                 intents=intents,
