@@ -109,10 +109,18 @@ def test_callback_event_replay_does_not_duplicate_product_session_turns(line_tes
     assert replies[0] == replies[1]
 
 
-def test_callback_formal_turn_admits_one_async_job_without_line_transport(line_test_app, monkeypatch):
+def test_callback_formal_turn_admits_one_async_job_without_line_transport(line_test_app, monkeypatch, tmp_path):
     scheduled: list[tuple[str, str, str]] = []
     line_test_app._reply_text = lambda *_args, **_kwargs: True
-    monkeypatch.setenv("LINE_USE_FORMAL", "true")
+    # Tests are deliberately immune to a developer's LINE_USE_FORMAL value.
+    # Construct the formal orchestrator explicitly instead of weakening that
+    # hermetic boundary or loading a live interpreter.
+    line_test_app._conversation_orchestrator = ConversationOrchestrator(
+        SQLiteProductSessionRepository(tmp_path / "formal-callback.sqlite3"),
+        identity_hash_key=IDENTITY_KEY,
+        interpreter=DeterministicConversationInterpreter(),
+        use_formal=True,
+    )
     monkeypatch.setattr(
         line_test_app,
         "_schedule_formal_push",

@@ -23,7 +23,9 @@ python3 scripts/demo/check_line_demo_readiness.py --quiet
 python3 scripts/demo/check_line_phone_demo.py --json
 ```
 
-phone checker 只從 process environment 讀取 `LINE_CALLBACK_URL`，不解析 `.env`。輸出中的 tunnel host 永遠遮罩；`--json` 也不包含 URL query、secret、token 或 API key。
+phone checker 優先從 process environment 讀取 `LINE_CALLBACK_URL`，未設定時只讀取
+專案 `.env` 的同名單一欄位，不把其他設定匯出到 process environment。輸出中的
+tunnel host 永遠遮罩；`--json` 也不包含 URL query、secret、token 或 API key。
 
 它會檢查：
 

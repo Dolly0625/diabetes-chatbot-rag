@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -33,6 +34,7 @@ PASS = "PASS"
 BLOCKED = "BLOCKED"
 READY = "READY_FOR_LINE_PHONE_DEMO"
 NOT_READY = "NOT_READY"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,21 @@ class CheckResult:
     status: str
     message: str
     hint: str
+
+
+def configured_callback_url() -> str:
+    """Read only LINE_CALLBACK_URL without exporting the rest of .env."""
+
+    process_value = os.getenv("LINE_CALLBACK_URL", "").strip()
+    if process_value:
+        return process_value
+    try:
+        from dotenv import dotenv_values
+
+        value = dotenv_values(PROJECT_ROOT / ".env").get("LINE_CALLBACK_URL")
+        return str(value or "").strip()
+    except Exception:
+        return ""
 
 
 def mask_url(raw: str, *, local: bool = False) -> str:
@@ -208,7 +225,7 @@ def run_checks(
             "確認 app 的 HTTP health route 可用",
         ))
 
-    configured_callback = (callback_url or os.getenv("LINE_CALLBACK_URL", "")).strip()
+    configured_callback = (callback_url or configured_callback_url()).strip()
     callback_error = _callback_url_error(configured_callback)
     if callback_error:
         checks.append(CheckResult("callback_url", BLOCKED, callback_error, "設定公開 HTTPS host + /callback；不要把 secret 放進 URL"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from scripts.demo.check_line_phone_demo import (
     BLOCKED,
@@ -74,3 +75,17 @@ def test_phone_checker_accepts_expected_get_405_without_posting_event():
     route = next(item for item in checks if item.id == "public_callback_route")
     assert route.status == PASS
     assert calls == ["http://127.0.0.1:8000/health", "https://sample-tunnel.example.test/callback"]
+
+
+def test_phone_checker_reads_only_callback_from_project_dotenv(tmp_path: Path, monkeypatch):
+    import scripts.demo.check_line_phone_demo as checker
+
+    (tmp_path / ".env").write_text(
+        "LINE_CALLBACK_URL=https://sample-tunnel.example.test/callback\n"
+        "LINE_CHANNEL_SECRET=must-not-be-returned\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("LINE_CALLBACK_URL", raising=False)
+    monkeypatch.setattr(checker, "PROJECT_ROOT", tmp_path)
+    assert checker.configured_callback_url() == "https://sample-tunnel.example.test/callback"
+    assert "must-not-be-returned" not in checker.configured_callback_url()
