@@ -55,12 +55,192 @@ _NORMALIZATION_MAP: dict[str, list[str]] = {
     "口渴": ["喝水還是渴", "一直喝水還是渴", "喝水還是很渴", "喝很多水還是渴", "很口渴", "一直很渴"],
 }
 
+# ── P2A.1-A 欄位限定 canonicalization（封閉高信心對照，不可跨欄混用） ──────────
+# 僅處理 intake 高頻封閉概念：chronic_conditions 與 known_medications 各自獨立字典。
+# 未知詞一律保持原值，不翻譯；canonical value 與 source_quote 分開保存於 MergedCandidate。
+
+def _normalize_canonical_key(text: str) -> str:
+    """封閉對照用 key：NFKC + 去空白/連接符 + 小寫."""
+    try:
+        t = unicodedata.normalize("NFKC", text or "").strip().lower()
+    except Exception:
+        t = (text or "").strip().lower()
+    t = re.sub(r"[\s\-_·•]+", "", t)
+    # 去除常見標點干擾（保留中英文核心）
+    t = re.sub(r"[，。,。；;、！!？?·]", "", t)
+    return t
+
+
+_CHRONIC_VARIANTS: dict[str, list[str]] = {
+    "高血壓": ["高血壓", "hypertension", "htn", "high blood pressure", "high-blood-pressure"],
+    "糖尿病": ["糖尿病", "diabetes", "diabetes mellitus", "dm"],
+    "高血脂": ["高血脂", "高脂血症", "hyperlipidemia", "hyperlipidaemia"],
+}
+
+_MED_VARIANTS: dict[str, list[str]] = {
+    "metformin": ["metformin", "二甲雙胍", "二甲双胍", "metformin hcl", "metformin hydrochloride"],
+    "insulin": ["insulin", "胰島素"],
+}
+
+
+def _build_canonical_map(variants: dict[str, list[str]]) -> dict[str, str]:
+    m: dict[str, str] = {}
+    for canon, var_list in variants.items():
+        for v in var_list:
+            k = _normalize_canonical_key(v)
+            if k:
+                m[k] = canon
+    return m
+
+
+_CHRONIC_CANONICAL_MAP: dict[str, str] = _build_canonical_map(_CHRONIC_VARIANTS)
+_MED_CANONICAL_MAP: dict[str, str] = _build_canonical_map(_MED_VARIANTS)
+
+_CHRONIC_NEGATION_RE = re.compile(r"(沒有|無|否認|未有|不曾|沒得|未曾|沒有得|沒有患|未患|不是.*高血壓|沒有.*高血壓)")
+_CHRONIC_QUESTION_RE = re.compile(r"(是什麼|是甚麼|是什麼\?|是甚麼\?|什麼是|為何|為甚麼|怎麼|如何)")
+
+
+def _canonicalize_value(field: str, value: str) -> str:
+    if not value or not value.strip():
+        return value
+    v = value.strip()
+    if v == "無":
+        return v
+    key = _normalize_canonical_key(v)
+    if field == "chronic_conditions":
+        return _CHRONIC_CANONICAL_MAP.get(key, v)
+    if field == "known_medications":
+        # 僅精確 alias 才去重；成份後帶劑型/鹽類/亞類時不可因包含子字串就錯併
+        # 例：insulin glargine / insulin degludec / metformin XR / metformin 500mg 皆保留原值
+        canon = _MED_CANONICAL_MAP.get(key)
+        if canon:
+            return canon
+        return v
+    return v
+
 
 def _normalize_text(text: str) -> str:
     try:
         return unicodedata.normalize("NFKC", text or "").strip()
     except Exception:
         return (text or "").strip()
+
+
+def _split_into_clauses(text: str) -> list[str]:
+    if not text:
+        return []
+    n = _normalize_text(text)
+    if not n:
+        return []
+    parts = re.split(r"[，。,；;、.。！!？?]+", n)
+    clauses: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        subs = re.split(r"(?:但是|不過|可是|然而|卻|但)", part)
+        for sp in subs:
+            sp = sp.strip()
+            if not sp:
+                continue
+            if "也" in sp and ("沒有" in sp or "無" in sp or "不" in sp):
+                also_parts = [s.strip() for s in sp.split("也") if s.strip()]
+                if len(also_parts) > 1:
+                    clauses.extend(also_parts)
+                    continue
+            clauses.append(sp)
+    if not clauses and n.strip():
+        return [n.strip()]
+    return clauses
+
+
+def _clause_contains_value(clause: str, value: str, field: str = "chronic_conditions") -> bool:
+    if not clause or not value:
+        return False
+    try:
+        clause_key = _normalize_canonical_key(clause)
+        val_key = _normalize_canonical_key(value)
+        if val_key and val_key in clause_key:
+            return True
+        canon = _canonicalize_value(field, value)
+        for var_key, c in _CHRONIC_CANONICAL_MAP.items():
+            if c == canon and var_key in clause_key:
+                return True
+        canon_key = _normalize_canonical_key(canon) if canon else ""
+        if canon_key and canon_key in clause_key:
+            return True
+        low_clause = clause.lower()
+        low_val = value.strip().lower()
+        if low_val and low_val in low_clause:
+            return True
+        if canon and canon in clause:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _clause_is_negated(clause: str) -> bool:
+    n = _normalize_text(clause)
+    if not n:
+        return False
+    if _CHRONIC_NEGATION_RE.search(n):
+        return True
+    if re.search(r"沒有|無|否認|未有|不曾|沒得|未曾|沒有得|沒有患|未患|不是", n):
+        return True
+    return False
+
+
+def _clause_is_question(clause: str) -> bool:
+    n = _normalize_text(clause)
+    if not n:
+        return False
+    if is_question_like(n):
+        return True
+    if _CHRONIC_QUESTION_RE.search(n):
+        if re.search(r"hypertension|htn|diabetes|hyperlipidemia|高血壓|糖尿病|高血脂", n.lower()):
+            return True
+        if "是什麼" in n or "是甚麼" in n or "什麼是" in n:
+            return True
+    if "是什麼" in n or "是甚麼" in n or "什麼是" in n:
+        return True
+    return False
+
+
+def _is_chronic_negated(raw: str, value: str) -> bool:
+    if not raw or not value or value.strip() == "無":
+        return False
+    clauses = _split_into_clauses(raw)
+    if not clauses:
+        return False
+    for clause in clauses:
+        if _clause_contains_value(clause, value, "chronic_conditions"):
+            if _clause_is_negated(clause):
+                return True
+    return False
+
+
+def _is_chronic_question(raw: str, value: str | None = None) -> bool:
+    if not raw:
+        return False
+    n = _normalize_text(raw)
+    if value is not None and value.strip():
+        clauses = _split_into_clauses(raw)
+        for clause in clauses:
+            if _clause_contains_value(clause, value, "chronic_conditions"):
+                if _clause_is_question(clause):
+                    return True
+        return False
+    if is_question_like(n):
+        if "是什麼" in n or "是甚麼" in n or "什麼是" in n:
+            return True
+        if re.search(r"hypertension|htn|diabetes|hyperlipidemia", n.lower()) and ("？" in n or "?" in n or "嗎" in n):
+            return True
+        if re.search(r"hypertension|diabetes", n.lower()) and is_question_like(n):
+            return True
+    if _CHRONIC_QUESTION_RE.search(n) and re.search(r"hypertension|htn|diabetes|高血壓|糖尿病|高血脂", n.lower()):
+        return True
+    return False
 
 
 def is_multi_clause(text: str) -> bool:
@@ -203,8 +383,15 @@ def _is_polluted(text: str, field: str) -> bool:
         if field in ("known_medications", "allergies", "symptom_description", "symptom_onset", "symptom_severity", "chronic_conditions", "family_history"):
             return True
     if is_hypothetical(n) and field in ("known_medications", "allergies", "symptom_description"):
-        # 「如果以後…」「假設…」假設語境不寫入
         return True
+    if field == "chronic_conditions":
+        clauses = _split_into_clauses(text)
+        for cl in clauses:
+            if _clause_is_question(cl) and re.search(r"高血壓|糖尿病|高血脂|hypertension|htn|diabetes|hyperlipidemia", cl.lower()):
+                return True
+            if _CHRONIC_QUESTION_RE.search(cl) and re.search(r"高血壓|糖尿病|高血脂|hypertension|htn|diabetes|hyperlipidemia", cl.lower()):
+                return True
+        return False
     return False
 
 
@@ -324,28 +511,68 @@ def formal_to_candidates(
 
 
 def validate_candidate(c: MergedCandidate) -> tuple[bool, str | None]:
-    """驗證單個候選：provenance、污染、長度等. 回 (ok, reason). 必須嚴格."""
     if not c.value or not c.value.strip():
         return False, "empty_value"
     if len(c.value) > 2000:
         return False, "too_long"
     if not _check_provenance(c.source_quote, c.raw):
         return False, "provenance_fail"
-    if _is_polluted(c.raw, c.target_field) or _is_polluted(c.value, c.target_field) or _is_polluted(c.source_quote, c.target_field):
-        if is_question_like(c.raw) or is_third_party(c.raw) or is_hypothetical(c.raw) or is_question_like(c.source_quote):
+    if c.target_field == "chronic_conditions":
+        # 子句級污染：僅當候選所在子句為問句/他人/假設才攔截，避免整句掃描錯殺另一子句的正向候選
+        _polluted_for_value = False
+        for txt in (c.raw, c.source_quote, c.value):
+            if not txt:
+                continue
+            clauses = _split_into_clauses(txt)
+            for cl in clauses:
+                if not _clause_contains_value(cl, c.value, "chronic_conditions"):
+                    continue
+                if _clause_is_question(cl) or is_third_party(cl) or is_hypothetical(cl):
+                    _polluted_for_value = True
+                if _CHRONIC_QUESTION_RE.search(cl) and re.search(r"高血壓|糖尿病|高血脂|hypertension|htn|diabetes|hyperlipidemia", cl.lower()):
+                    _polluted_for_value = True
+        if _polluted_for_value:
             return False, "polluted_question_or_third_party"
-        # 即使未命中問句指紋，_is_polluted 已判斷假設/他人亦屬污染
-        return False, "polluted_question_or_third_party"
+        # 家人/他人若整句為 third_party 且候選在該句，仍視為污染（單句情況）
+        if is_third_party(c.raw) or is_third_party(c.source_quote):
+            for txt in (c.raw, c.source_quote):
+                if not txt:
+                    continue
+                if is_third_party(txt) and _clause_contains_value(txt, c.value, "chronic_conditions"):
+                    return False, "polluted_question_or_third_party"
+                clauses = _split_into_clauses(txt)
+                for cl in clauses:
+                    if is_third_party(cl) and _clause_contains_value(cl, c.value, "chronic_conditions"):
+                        return False, "polluted_question_or_third_party"
+    else:
+        if _is_polluted(c.raw, c.target_field) or _is_polluted(c.value, c.target_field) or _is_polluted(c.source_quote, c.target_field):
+            if is_question_like(c.raw) or is_third_party(c.raw) or is_hypothetical(c.raw) or is_question_like(c.source_quote):
+                return False, "polluted_question_or_third_party"
+            return False, "polluted_question_or_third_party"
     if c.target_field in ("known_medications", "symptom_description", "symptom_onset", "symptom_severity") and is_question_like(c.raw):
         if is_question_like(c.source_quote):
             return False, "question_pollution"
-        # 若 raw 含問句且候選值來自問句子句，亦視為污染（需子句級 provenance 仍攔截）
         if _QUESTION_INTAKE_RE.search(c.raw) and _QUESTION_INTAKE_RE.search(c.source_quote):
             return False, "question_pollution"
     if c.target_field in ("known_medications", "allergies", "symptom_description") and is_third_party(c.raw):
         return False, "polluted_question_or_third_party"
     if c.target_field == "symptom_description" and is_hypothetical(c.raw):
         return False, "polluted_question_or_third_party"
+    if c.target_field == "chronic_conditions" and c.value.strip() != "無":
+        if _is_chronic_negated(c.raw, c.value) or _is_chronic_negated(c.source_quote, c.value):
+            return False, "polluted_question_or_third_party"
+        if _is_chronic_question(c.raw, c.value) or _is_chronic_question(c.source_quote, c.value) or _is_chronic_question(c.value, c.value):
+            return False, "polluted_question_or_third_party"
+        # 問句以子句為單位：僅當候選所在子句為問句才攔截
+        for txt in (c.raw, c.source_quote, c.value):
+            if not txt:
+                continue
+            clauses = _split_into_clauses(txt)
+            for cl in clauses:
+                if _clause_contains_value(cl, c.value, "chronic_conditions") and is_question_like(cl):
+                    if re.search(r"hypertension|htn|diabetes|高血壓|糖尿病|高血脂", cl.lower()):
+                        if "？" in cl or "?" in cl or "嗎" in cl or "是什麼" in cl or "是甚麼" in cl:
+                            return False, "polluted_question_or_third_party"
     return True, None
 
 
@@ -366,14 +593,43 @@ def merge_candidates(
     clarification_needed 為 [{field, reason, raw}]
     """
     all_cands = list(deterministic) + list(formal)
-    # 按 confidence 降序，讓高信心優先
+    # 欄位限定 canonicalization 在合併層，原始對話不污染
+    canonicalized: list[MergedCandidate] = []
+    for c in all_cands:
+        if c.target_field == "chronic_conditions":
+            try:
+                canon_val = _canonicalize_value(c.target_field, c.value)
+            except Exception:
+                canon_val = c.value
+            if canon_val != c.value:
+                canonicalized.append(
+                    MergedCandidate(
+                        target_field=c.target_field,
+                        value=canon_val,
+                        confidence=c.confidence,
+                        source_quote=c.source_quote,
+                        raw=c.raw,
+                        source=c.source,
+                        explicitly_stated=c.explicitly_stated,
+                        requires_confirmation=c.requires_confirmation,
+                    )
+                )
+            else:
+                canonicalized.append(c)
+        else:
+            # known_medications 等：保留原值供儲存，去重時以 canonical key 判斷
+            canonicalized.append(c)
+    all_cands = canonicalized
     all_cands.sort(key=lambda c: c.confidence, reverse=True)
 
-    # 去重：同欄同值
     seen: set[tuple[str, str]] = set()
     deduped: list[MergedCandidate] = []
     for c in all_cands:
-        key = (c.target_field, re.sub(r"\s+", "", c.value.lower()))
+        try:
+            canon_for_key = _canonicalize_value(c.target_field, c.value)
+        except Exception:
+            canon_for_key = c.value
+        key = (c.target_field, re.sub(r"\s+", "", canon_for_key.lower()))
         if key in seen:
             continue
         seen.add(key)
@@ -464,20 +720,43 @@ def candidates_to_intake_updates(
             vals: list[str] = []
             for c in clist:
                 raw_val = c.value.strip()
-                # list 欄若含分隔符（；、，,等）需拆開；避免「a；b」被當單一藥名
                 if any(sep in raw_val for sep in ("；", ";", "、")):
                     parts = re.split(r"[；;、]", raw_val)
                     for p in parts:
                         p = p.strip()
-                        if p:
+                        if not p:
+                            continue
+                        if field == "chronic_conditions":
+                            try:
+                                vals.append(_canonicalize_value(field, p))
+                            except Exception:
+                                vals.append(p)
+                        else:
                             vals.append(p)
                 else:
-                    vals.append(raw_val)
+                    if field == "chronic_conditions":
+                        try:
+                            vals.append(_canonicalize_value(field, raw_val))
+                        except Exception:
+                            vals.append(raw_val)
+                    else:
+                        vals.append(raw_val)
             merged = list(existing_list)
-            seen_lower = {re.sub(r"\s+", "", x.lower()) for x in merged}
+            try:
+                seen_lower = {re.sub(r"\s+", "", _canonicalize_value(field, x).lower()) for x in merged}
+            except Exception:
+                seen_lower = {re.sub(r"\s+", "", x.lower()) for x in merged}
             for v in vals:
-                key = re.sub(r"\s+", "", v.lower())
+                try:
+                    key = re.sub(r"\s+", "", _canonicalize_value(field, v).lower())
+                except Exception:
+                    key = re.sub(r"\s+", "", v.lower())
                 if key not in seen_lower and len(merged) < 10:
+                    if field == "chronic_conditions":
+                        try:
+                            v = _canonicalize_value(field, v)
+                        except Exception:
+                            pass
                     merged.append(v)
                     seen_lower.add(key)
             updates[field] = merged
