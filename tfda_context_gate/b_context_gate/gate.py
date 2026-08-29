@@ -1,8 +1,33 @@
 from __future__ import annotations
 
+import re
 from typing import Literal, Protocol
 
 from .schemas import CanonicalBInput, CanonicalBResult
+
+
+_RETRIEVED_INSTRUCTION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions?|rules?|prompts?)",
+        r"(?:reveal|print|show|output)\s+(?:the\s+)?(?:system|developer)\s+(?:prompt|message|instructions?)",
+        r"(?:override|bypass|disable)\s+(?:the\s+)?(?:safety|guardrail|policy|instructions?)",
+        r"忽略(?:前面|先前|以上|上述|所有)?(?:的)?(?:規則|指示|提示|系統訊息)",
+        r"(?:輸出|顯示|洩漏|透露)(?:系統|開發者)(?:提示|訊息|指示)",
+        r"(?:繞過|停用|覆蓋)(?:安全|防護|規則|限制)",
+    )
+)
+
+
+def _contains_retrieved_instruction(text: str) -> bool:
+    """Detect instruction-like text in untrusted retrieved evidence.
+
+    This is deliberately narrow and fail-closed for a medical RAG corpus. It
+    supplements, rather than replaces, the upstream warning contract.
+    """
+
+    normalized = " ".join(text.split())
+    return any(pattern.search(normalized) for pattern in _RETRIEVED_INSTRUCTION_PATTERNS)
 
 
 class ContextGate(Protocol):
@@ -88,6 +113,31 @@ class DeterministicContextGate:
                 relevance="NONE",
                 sufficiency="INSUFFICIENT",
                 safety="NOT_ASSESSED",
+            )
+
+        # The RAG service is expected to label indirect prompt injection in
+        # ``warnings``, but B is the final trust boundary and must not depend
+        # on that label being present.  Scan the untrusted chunk text before
+        # either fixture or demo approval can make it executable context.
+        suspicious_ids = [
+            evidence.evidence_id
+            for evidence in request.evidence
+            if _contains_retrieved_instruction(evidence.content)
+        ]
+        if suspicious_ids:
+            return CanonicalBResult(
+                request_id=request.request_id,
+                decision="UNSAFE",
+                approved_evidence_ids=[],
+                evidence=request.evidence,
+                reason_codes=["RETRIEVED_CONTENT_PROMPT_INJECTION"],
+                retrieval_feedback={
+                    "retrieval_queries": request.retrieval_queries,
+                    "suspicious_evidence_ids": suspicious_ids,
+                },
+                relevance="UNKNOWN",
+                sufficiency="UNSAFE",
+                safety="FAIL",
             )
 
         # ── 分支 1：完全沒有證據，直接判 INSUFFICIENT ──
