@@ -91,13 +91,46 @@ def build_semantic_router(
     build.  When ``PYTEST_CURRENT_TEST`` is set or Ollama is unreachable,
     a ``DeterministicFakeEmbedder`` is used and ``degraded=True``.
 
+    For guarded mode, thresholds are bound to approval artifact (fail-closed);
+    env thresholds cannot override approved values.
+
     Args:
-        config: optional config override; defaults to ``from_env()``.
+        config: optional config override; defaults to ``from_env()`` with
+            effective resolution (guarded uses artifact thresholds).
 
     Returns:
         ProductionSemanticRouter ready to route (never raises).
     """
-    cfg = config or SemanticRouterConfig.from_env()
+    if config is None:
+        try:
+            from tfda_context_gate.semantic_router.approval import resolve_effective_config
+
+            eff = resolve_effective_config()
+            cfg = SemanticRouterConfig(
+                mode=eff.effective_mode,  # type: ignore[arg-type]
+                cosine_threshold=eff.cosine_threshold,
+                margin_threshold=eff.margin_threshold,
+                policy=eff.policy,  # type: ignore[arg-type]
+            )
+        except Exception:
+            cfg = SemanticRouterConfig.from_env()
+    else:
+        # If caller passed guarded config but approval not satisfied, downgrade thresholds
+        try:
+            from tfda_context_gate.semantic_router.approval import resolve_effective_config
+
+            eff = resolve_effective_config(requested=config.mode)
+            if eff.effective_mode != config.mode:
+                cfg = SemanticRouterConfig(
+                    mode=eff.effective_mode,  # type: ignore[arg-type]
+                    cosine_threshold=eff.cosine_threshold,
+                    margin_threshold=eff.margin_threshold,
+                    policy=eff.policy,  # type: ignore[arg-type]
+                )
+            else:
+                cfg = config
+        except Exception:
+            cfg = config
 
     if _should_use_fake():
         embedder = DeterministicFakeEmbedder()

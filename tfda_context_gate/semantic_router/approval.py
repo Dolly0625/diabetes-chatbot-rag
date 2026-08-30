@@ -133,6 +133,33 @@ def _parse_timestamp_iso8601(raw: str) -> datetime | None:
         return None
 
 
+def _is_strict_bool(value: Any) -> bool:
+    return value is True or value is False
+
+
+def _is_strict_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_strict_finite_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    import math
+
+    return math.isfinite(float(value))
+
+
+def _strict_parse_json(raw_text: str) -> Any:
+    import math
+
+    def _reject_constant(const: str):
+        raise ValueError(f"non-finite constant {const} not allowed")
+
+    return json.loads(raw_text, parse_constant=_reject_constant)
+
+
 def load_and_validate_approval(
     path: Path | str | None = None,
     current_dataset_sha256: str | None = None,
@@ -168,10 +195,10 @@ def load_and_validate_approval(
         logger.info("guarded approval check: artifact_exists=False guarded_pass=False")
         return False, "GUARDED_DOWNGRADED_MISSING_ARTIFACT", None
 
-    # Load JSON
+    # Load JSON — reject NaN/Infinity via parse_constant
     try:
         raw_text = resolved.read_text(encoding="utf-8")
-        payload = json.loads(raw_text)
+        payload = _strict_parse_json(raw_text)
     except Exception:
         logger.info("guarded approval check: artifact_exists=True guarded_pass=False")
         return False, "GUARDED_DOWNGRADED_MALFORMED_ARTIFACT", None
@@ -180,41 +207,88 @@ def load_and_validate_approval(
         logger.info("guarded approval check: artifact_exists=True guarded_pass=False")
         return False, "GUARDED_DOWNGRADED_MALFORMED_ARTIFACT", None
 
-    # Schema version check
-    schema_version = payload.get("schema_version")
-    if schema_version != SCHEMA_VERSION:
-        # Log only existence + guarded_pass boolean (not content)
-        gp = bool(payload.get("guarded_pass", False))
+    # Extra fields forbid — must be exactly REQUIRED_FIELDS
+    if set(payload.keys()) != set(REQUIRED_FIELDS):
+        gp_raw = payload.get("guarded_pass")
+        gp = gp_raw is True
         logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
         return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
 
-    # Check all required fields present
-    for field in REQUIRED_FIELDS:
-        if field not in payload:
-            gp = bool(payload.get("guarded_pass", False))
+    # Schema version check — strict exact match
+    schema_version = payload.get("schema_version")
+    if schema_version != SCHEMA_VERSION:
+        gp_raw = payload.get("guarded_pass")
+        gp = gp_raw is True
+        logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+        return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+
+    # Strict type checks — booleans must be real JSON booleans
+    for bool_field in ("guarded_pass", "correction_boundary_pass", "subject_boundary_pass"):
+        if not _is_strict_bool(payload[bool_field]):
+            gp_raw = payload.get("guarded_pass")
+            gp = gp_raw is True
             logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
             return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
 
-    # Type / value parsing (fail → invalid schema)
+    # Strict numeric checks — reject string numbers, bool-as-int, NaN/Infinity, out-of-range
+    # cosine_threshold / margin_threshold / mixed_recall: finite 0.0-1.0
+    for num_field in ("cosine_threshold", "margin_threshold", "mixed_recall"):
+        val = payload[num_field]
+        if not _is_strict_finite_number(val):
+            gp = payload["guarded_pass"] is True
+            logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+            return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+        fval = float(val)
+        if not (0.0 <= fval <= 1.0):
+            gp = payload["guarded_pass"] is True
+            logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+            return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+
+    # holdout_size / false_fast: strict int >= thresholds
+    for int_field, min_val in (("holdout_size", 30), ("false_fast", 0)):
+        val = payload[int_field]
+        if not _is_strict_int(val):
+            gp = payload["guarded_pass"] is True
+            logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+            return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+        if int(val) < min_val:
+            gp = payload["guarded_pass"] is True
+            logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+            return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+
+    # Extract validated values
+    raw_sha = payload["dataset_sha256"]
+    if not isinstance(raw_sha, str) or raw_sha != raw_sha.strip().lower() or len(raw_sha.strip()) != 64 or any(c not in "0123456789abcdef" for c in raw_sha.strip()):
+        gp = payload["guarded_pass"] is True
+        logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+        return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+    dataset_sha256 = raw_sha.strip().lower()
+
+    raw_ts = payload["calibration_timestamp"]
+    if not isinstance(raw_ts, str) or not raw_ts.strip():
+        gp = payload["guarded_pass"] is True
+        logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+        return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+    calibration_timestamp = raw_ts.strip()
+    # Must contain timezone (Z or +/-)
+    if not (calibration_timestamp.endswith("Z") or "+" in calibration_timestamp or calibration_timestamp.count("-") > 2):
+        # naive timestamp without timezone
+        gp = payload["guarded_pass"] is True
+        logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
+        return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
+
     try:
-        dataset_sha256 = str(payload["dataset_sha256"]).strip().lower()
-        calibration_timestamp = str(payload["calibration_timestamp"]).strip()
         cosine_threshold = float(payload["cosine_threshold"])
         margin_threshold = float(payload["margin_threshold"])
         holdout_size = int(payload["holdout_size"])
         false_fast = int(payload["false_fast"])
         mixed_recall = float(payload["mixed_recall"])
-        correction_boundary_pass = bool(payload["correction_boundary_pass"])
-        subject_boundary_pass = bool(payload["subject_boundary_pass"])
-        guarded_pass = bool(payload["guarded_pass"])
+        correction_boundary_pass = payload["correction_boundary_pass"] is True
+        subject_boundary_pass = payload["subject_boundary_pass"] is True
+        guarded_pass = payload["guarded_pass"] is True
     except Exception:
-        gp = bool(payload.get("guarded_pass", False))
+        gp = payload.get("guarded_pass") is True
         logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", gp)
-        return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
-
-    # Basic sanity on sha256 format (64 hex)
-    if len(dataset_sha256) != 64 or any(c not in "0123456789abcdef" for c in dataset_sha256):
-        logger.info("guarded approval check: artifact_exists=True guarded_pass=%s", guarded_pass)
         return False, "GUARDED_DOWNGRADED_INVALID_SCHEMA", None
 
     parsed_ts = _parse_timestamp_iso8601(calibration_timestamp)
@@ -342,3 +416,74 @@ def get_effective_route_mode(
     if approved:
         return "guarded", None, artifact
     return "shadow", reason, artifact
+
+
+@dataclass(frozen=True)
+class EffectiveSemanticRouterConfig:
+    requested_mode: str
+    effective_mode: str
+    cosine_threshold: float
+    margin_threshold: float
+    policy: str
+    approval_status: bool
+    fallback_reason: str | None
+    dataset_sha256_short: str | None
+    artifact_version: str | None
+
+
+def resolve_effective_config(
+    requested: str | None = None,
+    artifact_path_override: str | Path | None = None,
+    current_dataset_sha256: str | None = None,
+    max_age_days: int | None = None,
+) -> EffectiveSemanticRouterConfig:
+    from tfda_context_gate.semantic_router.config import SemanticRouterConfig
+
+    if requested is None:
+        try:
+            from tfda_context_gate.semantic_router.config import get_requested_mode
+
+            requested = get_requested_mode()
+        except Exception:
+            requested = os.getenv("SEMANTIC_ROUTER_MODE", "off")
+    req = str(requested or "off").strip().lower()
+    if req not in ("off", "shadow", "guarded"):
+        req = "off"
+    env_cfg = SemanticRouterConfig.from_env()
+    # Override requested with env if caller passed None already handled, else use passed
+    # Use env thresholds as base for shadow/off
+    base_cos = env_cfg.cosine_threshold
+    base_mar = env_cfg.margin_threshold
+    base_policy = env_cfg.policy
+    effective, reason, artifact = get_effective_route_mode(
+        req, artifact_path_override=artifact_path_override, current_dataset_sha256=current_dataset_sha256, max_age_days=max_age_days
+    )
+    if effective == "guarded" and artifact is not None:
+        return EffectiveSemanticRouterConfig(
+            requested_mode=req,
+            effective_mode="guarded",
+            cosine_threshold=float(artifact.cosine_threshold),
+            margin_threshold=float(artifact.margin_threshold),
+            policy=base_policy,
+            approval_status=True,
+            fallback_reason=None,
+            dataset_sha256_short=artifact.dataset_sha256[:8] if artifact.dataset_sha256 else None,
+            artifact_version=artifact.schema_version,
+        )
+    # shadow/off or downgraded: use env thresholds, mark observed
+    short = None
+    ver = None
+    if artifact is not None and artifact.dataset_sha256:
+        short = artifact.dataset_sha256[:8]
+        ver = artifact.schema_version
+    return EffectiveSemanticRouterConfig(
+        requested_mode=req,
+        effective_mode=effective,
+        cosine_threshold=base_cos,
+        margin_threshold=base_mar,
+        policy=base_policy,
+        approval_status=(effective == "guarded"),
+        fallback_reason=reason,
+        dataset_sha256_short=short,
+        artifact_version=ver,
+    )
