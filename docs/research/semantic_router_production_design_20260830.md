@@ -1,10 +1,10 @@
 # 分層快速路由與 Demo 延遲改善 — 生產級語意路由研究與設計決策
 
-> 日期：2026-08-30  
-> 作者：Sisyphus（TFDA Diabetes Agent 專案）  
-> 階段：第一階段 — 網路研究與專案盤點（**嚴禁 production 程式碼**，只提交本研究文件）  
-> 專案位置：`/Users/dolly/Documents/code/tfda-diabetes-agent`（Python 3.10.20，`.venv`，完整測試基準 537 passed @ `91f403b`）  
-> 方法：優先官方文件、原始 repo、正式論文；二手部落格僅作佐證，不單獨作為依據。所有主張均附可點擊網址、發布者、日期/版本。延遲與準確率數據僅引用實測或論文公開值，不捏造。  
+> 日期：2026-08-30
+> 作者：Sisyphus（TFDA Diabetes Agent 專案）
+> 階段：第一階段 — 網路研究與專案盤點（**嚴禁 production 程式碼**，只提交本研究文件）
+> 專案位置：`/Users/dolly/Documents/code/tfda-diabetes-agent`（Python 3.10.20，`.venv`，完整測試基準 537 passed @ `91f403b`）
+> 方法：優先官方文件、原始 repo、正式論文；二手部落格僅作佐證，不單獨作為依據。所有主張均附可點擊網址、發布者、日期/版本。延遲與準確率數據僅引用實測或論文公開值，不捏造。
 > 來源基準：2026-08-30 當日抓取；官方文件以當日 Permalink 為準。
 
 ---
@@ -637,4 +637,3 @@ Layer 4：grounded education（純衛教或 mixed 中衛教子句才 RAG＋C＋D
 
 - `semantic-router` MIT；`vllm-project/semantic-router` Apache 2.0；`sentence-transformers` Apache 2.0；`setfit` Apache 2.0；`RouteLLM` Apache 2.0。引用皆以 Permalink 指向原始 repo/docs/paper，不另行抄襲程式碼。
 - 實驗分支 `semantic-router-eval@747c5f1` 與 `main@91f403b` 的報告與程式碼互不汙染，forensic 可重現（`git show 747c5f1:…`）。
-

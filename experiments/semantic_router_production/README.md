@@ -1,9 +1,9 @@
 # Semantic Router Production 評估集 — PII-free 家族切分
 
-> 位置：`experiments/semantic_router_production/dataset.json`（單一真相來源）  
-> 替代路徑 `data/semantic_router/eval_dataset.json` 已棄用，統一使用 `experiments/semantic_router_production/dataset.json`  
-> 版本：`semantic-router-production.v1`  
-> 生成：`build_dataset.py`（deterministic, 合成語料，無真實病歷）  
+> 位置：`experiments/semantic_router_production/dataset.json`（單一真相來源）
+> 替代路徑 `data/semantic_router/eval_dataset.json` 已棄用，統一使用 `experiments/semantic_router_production/dataset.json`
+> 版本：`semantic-router-production.v1`
+> 生成：`build_dataset.py`（deterministic, 合成語料，無真實病歷）
 > 來源：重新改寫並擴充 `tfda-diabetes-agent-semantic-router-eval/experiments/semantic_router_eval/dataset.json`（84 → 199+20），**不直接複製原文**，僅保留概念
 
 ## 1. 規模
@@ -56,7 +56,7 @@ Boundary 類別：`RED_FLAG 8 / AUTHORIZATION 6 / PRODUCT_COMMAND 6`
 
 ## 3. 家族定義
 
-每個 `family_id` 對應**一個原型語意**的 2–4 條近似改寫（paraphrase），共用同一家族 ID。  
+每個 `family_id` 對應**一個原型語意**的 2–4 條近似改寫（paraphrase），共用同一家族 ID。
 例如：
 
 | family_id | label | 範例改寫 |

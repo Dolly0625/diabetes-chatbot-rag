@@ -1,8 +1,8 @@
 # Semantic Router Production — 最終驗收報告（2026-08-30）
 
-> 工作位置：`worktree /Users/dolly/Documents/code/tfda-diabetes-agent-semantic-router-production`（`branch semantic-router-production @ fcfe69c`，基於 `main@91f403b`）  
-> 三模式：`SEMANTIC_ROUTER_MODE=off|shadow|guarded`（預設 `off`）  
-> 資料：`experiments/semantic_router_production/dataset.json`（PII-free synthetic，199 primary +20 boundary =219，家族 89，family-split，無洩漏）  
+> 工作位置：`worktree /Users/dolly/Documents/code/tfda-diabetes-agent-semantic-router-production`（`branch semantic-router-production @ fcfe69c`，基於 `main@91f403b`）
+> 三模式：`SEMANTIC_ROUTER_MODE=off|shadow|guarded`（預設 `off`）
+> 資料：`experiments/semantic_router_production/dataset.json`（PII-free synthetic，199 primary +20 boundary =219，家族 89，family-split，無洩漏）
 > 結論：**`guarded` BLOCKED，建議僅 `shadow`（或 `off`）** — holdout `false-fast 4` 不滿足 `0`，不得降門檻
 
 ---
@@ -306,4 +306,3 @@ SEMANTIC_ROUTER_MODE=shadow python -m pytest -q -k adversarial  # 對抗式
 python scripts/semantic_router_perf.py  # 50 輪 fixture + 10 輪 live（.env）
 python scripts/demo_replay.py  # 6 情境 A-F
 ```
-
