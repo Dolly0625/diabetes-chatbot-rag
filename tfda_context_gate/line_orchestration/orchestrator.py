@@ -45,6 +45,231 @@ ASYNC_FORMAL_TIMEOUT_S = float(os.getenv("ASYNC_FORMAL_TIMEOUT_S", os.getenv("AS
 ASYNC_FORMAL_TIMEOUT = ASYNC_FORMAL_TIMEOUT_S
 LINE_USE_FORMAL_DEFAULT = os.getenv("LINE_USE_FORMAL", "true").lower() in ("1", "true", "yes")
 
+SEMANTIC_ROUTER_TIMEOUT_S = 0.2
+_SEMANTIC_GUARDED_ALLOWED_ROUTES = {"PURE_EDUCATION", "CHITCHAT", "PURE_INTAKE"}
+_SEMANTIC_GUARDED_BLOCKED_ROUTES = {"MIXED", "CORRECTION", "SUBJECT_CHANGE", "UNKNOWN"}
+_SUBJECT_AMBIGUOUS_RE = re.compile(
+    r"是我媽媽|是我家人|那個是我|不是我|幫家人|是我媽的|帮媽媽問|是我爸爸|是我爸的|家人.*不是我|帮家人問",
+    re.IGNORECASE,
+)
+_CORRECTION_LIKE_RE = re.compile(r"不是|說錯了|更正|改成|其實|喔不對|不對|那邊要改|前面.*要改", re.IGNORECASE)
+
+
+def _get_requested_route_mode() -> str:
+    try:
+        from tfda_context_gate.run_config import env_value as _ev
+
+        raw = _ev("SEMANTIC_ROUTER_MODE", None)
+        if raw is None:
+            raw = os.getenv("SEMANTIC_ROUTER_MODE")
+    except Exception:
+        raw = os.getenv("SEMANTIC_ROUTER_MODE")
+    if raw is None:
+        return "off"
+    cleaned = str(raw).strip().lower()
+    if cleaned in ("off", "shadow", "guarded"):
+        return cleaned
+    return "off"
+
+
+def get_route_mode() -> str:
+    requested = _get_requested_route_mode()
+    if requested != "guarded":
+        return requested
+    try:
+        from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff
+
+        effective, reason, _ = _eff(requested)
+        if effective != "guarded" and reason:
+            logger.info("guarded downgraded to shadow reason=%s", reason)
+        return effective
+    except Exception as _e:
+        logger.warning("guarded approval check failed, downgrading to shadow: %s", _e)
+        return "shadow"
+
+
+def should_use_semantic_router() -> bool:
+    return get_route_mode() != "off"
+
+
+def _resolve_guarded_downgrade() -> tuple[str, str | None]:
+    requested = _get_requested_route_mode()
+    effective = get_route_mode()
+    fallback_reason: str | None = None
+    if requested == "guarded" and effective != "guarded":
+        try:
+            from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff2
+
+            _, reason, _ = _eff2(requested)
+            fallback_reason = reason or "GUARDED_DOWNGRADED_UNKNOWN"
+        except Exception:
+            fallback_reason = "GUARDED_DOWNGRADED_UNKNOWN"
+    return effective, fallback_reason
+
+
+def _record_guarded_downgrade(session_id: str, fallback_reason: str) -> None:
+    try:
+        from tfda_context_gate.e_observability.tracer import TraceRecorder
+
+        tr = TraceRecorder(request_id=f"{session_id}-guarded-downgrade", declared_role=None, original_query=None)
+        tr.record(
+            "SEMANTIC_ROUTER",
+            "GUARDED_DOWNGRADE",
+            "COMPLETED",
+            fallback_reason=fallback_reason,
+            requested_mode="guarded",
+            effective_mode="shadow",
+        )
+        tr.close(status="COMPLETED")
+    except Exception:
+        pass
+
+
+def _is_subject_ambiguous(text: str) -> bool:
+    try:
+        n = unicodedata.normalize("NFKC", text or "").strip()
+    except Exception:
+        n = (text or "").strip()
+    if not n:
+        return False
+    if _SUBJECT_AMBIGUOUS_RE.search(n):
+        return True
+    try:
+        from tfda_context_gate.intake.candidate_merge import is_third_party
+
+        if is_third_party(n):
+            if any(kw in n for kw in ("媽媽", "媽", "爸爸", "爸", "家人", "朋友")):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_correction_like(text: str) -> bool:
+    try:
+        return bool(_CORRECTION_LIKE_RE.search(text or ""))
+    except Exception:
+        return False
+
+
+def _call_semantic_router_with_timeout(router: Any, text: str, timeout_s: float = SEMANTIC_ROUTER_TIMEOUT_S) -> Any | None:
+    if router is None:
+        return None
+    import concurrent.futures
+
+    fn = getattr(router, "predict", None) or getattr(router, "route", None)
+    if fn is None:
+        return None
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(fn, text)
+            try:
+                return fut.result(timeout=timeout_s)
+            except concurrent.futures.TimeoutError:
+                try:
+                    fut.cancel()
+                except Exception:
+                    pass
+                return None
+            except Exception:
+                return None
+    except Exception:
+        try:
+            return fn(text)
+        except Exception:
+            return None
+
+
+def _observation_to_dict(obs: Any) -> dict[str, Any]:
+    if obs is None:
+        return {}
+    try:
+        if hasattr(obs, "to_trace_dict"):
+            return obs.to_trace_dict()
+        if isinstance(obs, dict):
+            return dict(obs)
+        d: dict[str, Any] = {}
+        for k in ("route", "confidence", "margin", "latency_ms", "degraded", "mode", "matched_labels", "scores", "text_length", "text_hash8"):
+            if hasattr(obs, k):
+                d[k] = getattr(obs, k)
+        return d
+    except Exception:
+        return {}
+
+
+def _record_semantic_trace(session_id: str, observation: Any, mode: str) -> None:
+    if observation is None:
+        return
+    try:
+        from tfda_context_gate.e_observability.tracer import TraceRecorder
+
+        obs_dict = _observation_to_dict(observation)
+        route = str(obs_dict.get("route") or getattr(observation, "route", "UNKNOWN"))
+        conf = float(obs_dict.get("confidence") or getattr(observation, "confidence", 0.0) or 0.0)
+        margin = float(obs_dict.get("margin") or getattr(observation, "margin", 0.0) or 0.0)
+        latency = float(obs_dict.get("latency_ms") or getattr(observation, "latency_ms", 0.0) or 0.0)
+        degraded = bool(obs_dict.get("degraded", False) or getattr(observation, "degraded", False))
+        tr = TraceRecorder(request_id=f"{session_id}-semantic", declared_role=None, original_query=None)
+        tr.record(
+            "SEMANTIC_ROUTER",
+            "route",
+            "COMPLETED",
+            semantic_route=route,
+            semantic_confidence=conf,
+            margin=margin,
+            latency_ms=latency,
+            route_mode=mode,
+            degraded=degraded,
+            matched_labels=list(obs_dict.get("matched_labels") or []),
+            text_length=obs_dict.get("text_length"),
+            text_hash8=obs_dict.get("text_hash8"),
+        )
+        tr.close(status="COMPLETED")
+    except Exception:
+        pass
+
+
+def _enrich_orchestrator_result(result: Any, observation: Any | None, mode: str) -> Any:
+    if observation is None or mode == "off":
+        return result
+    try:
+        obs_dict = _observation_to_dict(observation)
+        if not obs_dict:
+            return result
+        updates: dict[str, Any] = {}
+        if "route" in obs_dict:
+            updates["semantic_route"] = str(obs_dict["route"]) if obs_dict["route"] else None
+        if "confidence" in obs_dict:
+            try:
+                updates["semantic_confidence"] = float(obs_dict["confidence"])
+            except Exception:
+                pass
+        if "margin" in obs_dict:
+            try:
+                updates["semantic_margin"] = float(obs_dict["margin"])
+            except Exception:
+                pass
+        if "latency_ms" in obs_dict:
+            try:
+                updates["semantic_latency_ms"] = float(obs_dict["latency_ms"])
+            except Exception:
+                pass
+        if "degraded" in obs_dict:
+            updates["semantic_degraded"] = bool(obs_dict["degraded"])
+        updates["semantic_mode"] = mode
+        updates["metadata"] = {"semantic_observation": obs_dict}
+        try:
+            return result.model_copy(update=updates)
+        except Exception:
+            for k, v in updates.items():
+                try:
+                    setattr(result, k, v)
+                except Exception:
+                    pass
+            return result
+    except Exception:
+        return result
+
 # ── Async formal push: honest fallback + idempotency ─────────────────────────
 HONEST_FALLBACK_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
@@ -622,6 +847,64 @@ class ConversationOrchestrator:
         self.formal_timeout_s = _sync_default
         self.sync_formal_timeout_s = _sync_default
         self.async_formal_timeout_s = async_formal_timeout_s if async_formal_timeout_s is not None else ASYNC_FORMAL_TIMEOUT_S
+        self._semantic_router: Any | None = None
+        self._semantic_router_config: Any | None = None
+        self._semantic_router_degraded_reason: str | None = None
+        self._semantic_router_init_attempted: bool = False
+        try:
+            from tfda_context_gate.semantic_router.config import SemanticRouterConfig as _SRC
+
+            _cfg = _SRC.from_env()
+            self._semantic_router_config = _cfg
+            if _cfg.mode != "off":
+                try:
+                    from tfda_context_gate.semantic_router.factory import build_semantic_router as _bsr
+
+                    self._semantic_router = _bsr(_cfg)
+                except Exception as _e:
+                    logger.warning("semantic router init failed (degraded to interpreter): %s", _e)
+                    self._semantic_router = None
+                    self._semantic_router_degraded_reason = str(_e)
+            self._semantic_router_init_attempted = True
+        except ImportError:
+            self._semantic_router = None
+            self._semantic_router_config = None
+        except Exception as _e:
+            logger.warning("semantic router config failed: %s", _e)
+            self._semantic_router = None
+            self._semantic_router_config = None
+            self._semantic_router_degraded_reason = str(_e)
+            self._semantic_router_init_attempted = True
+        self._last_semantic_observation: Any | None = None
+        self._last_semantic_mode: str = get_route_mode() if hasattr(self, "_semantic_router_config") and self._semantic_router_config else "off"
+        self._last_guarded_fallback_reason: str | None = None
+
+    def _get_semantic_router(self) -> Any | None:
+        if self._semantic_router_init_attempted:
+            return self._semantic_router
+        try:
+            from tfda_context_gate.semantic_router.config import SemanticRouterConfig as _SRC
+
+            _cfg = _SRC.from_env()
+            self._semantic_router_config = _cfg
+            if _cfg.mode != "off":
+                try:
+                    from tfda_context_gate.semantic_router.factory import build_semantic_router as _bsr
+
+                    self._semantic_router = _bsr(_cfg)
+                except Exception as _e:
+                    logger.warning("semantic router lazy init failed: %s", _e)
+                    self._semantic_router = None
+                    self._semantic_router_degraded_reason = str(_e)
+            self._semantic_router_init_attempted = True
+        except ImportError:
+            self._semantic_router_init_attempted = True
+            return None
+        except Exception as _e:
+            logger.warning("semantic router lazy config failed: %s", _e)
+            self._semantic_router_init_attempted = True
+            return None
+        return self._semantic_router
 
     def _call_workflow(self, *args: Any, **kwargs: Any) -> WorkflowResult:
         if not self.use_formal:
@@ -1350,6 +1633,44 @@ class ConversationOrchestrator:
                 if latest is None:
                     raise
                 result = self._process_text(latest, clean_text)
+            # Attach guarded downgrade fallback_reason into metadata (non-PII)
+            try:
+                fb = getattr(self, "_last_guarded_fallback_reason", None)
+                if fb:
+                    meta = dict(getattr(result, "metadata", None) or {})
+                    if "fallback_reason" not in meta:
+                        meta["fallback_reason"] = fb
+                        # also surface as top-level fallback_reason if not set
+                        try:
+                            result = result.model_copy(update={"metadata": meta})
+                        except Exception:
+                            try:
+                                result.metadata = meta  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            if result.semantic_route is None:
+                try:
+                    obs = getattr(self, "_last_semantic_observation", None)
+                    mode = getattr(self, "_last_semantic_mode", "off")
+                    if obs is not None and mode != "off":
+                        result = _enrich_orchestrator_result(result, obs, mode)
+                        # re-attach fallback after enrichment if it was overwritten
+                        try:
+                            fb2 = getattr(self, "_last_guarded_fallback_reason", None)
+                            if fb2:
+                                meta2 = dict(getattr(result, "metadata", None) or {})
+                                if "fallback_reason" not in meta2:
+                                    meta2["fallback_reason"] = fb2
+                                    try:
+                                        result = result.model_copy(update={"metadata": meta2})
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             result = result.model_copy(update={"event_id": event_id})
             self.repository.complete_webhook_event(
                 event_id, result.model_dump(mode="json"), claim_token=claim_token
@@ -1519,10 +1840,148 @@ class ConversationOrchestrator:
                     # Fail open to AI on helper error
                     _skip_ai_for_intake = False
 
-        # 8-9: 建 ConversationEnvelope → Interpreter (always unless narrow fast-path)
+        # 8: L2 semantic router (after L0 red_flag/auth/product/fast_path, before envelope)
+        _semantic_observation: Any | None = None
+        _semantic_mode, _guarded_fallback_reason = _resolve_guarded_downgrade()
+        self._last_guarded_fallback_reason = _guarded_fallback_reason
+        if _guarded_fallback_reason:
+            _record_guarded_downgrade(session.session_id, _guarded_fallback_reason)
+        _semantic_fast_eligible = False
+        _semantic_fast_route: str | None = None
+        if _semantic_mode != "off":
+            try:
+                _router = self._get_semantic_router()
+                if _router is not None:
+                    _raw_obs = _call_semantic_router_with_timeout(_router, text, SEMANTIC_ROUTER_TIMEOUT_S)
+                    if _raw_obs is None:
+                        try:
+                            from tfda_context_gate.semantic_router.telemetry import SemanticRouteObservation as _ObsFallback
+
+                            _raw_obs = _ObsFallback(
+                                route="UNKNOWN",
+                                confidence=0.0,
+                                margin=0.0,
+                                latency_ms=SEMANTIC_ROUTER_TIMEOUT_S * 1000,
+                                mode=_semantic_mode,
+                                degraded=True,
+                            )
+                        except Exception:
+                            _raw_obs = None
+                    if _raw_obs is not None:
+                        _semantic_observation = _raw_obs
+                        _record_semantic_trace(session.session_id, _semantic_observation, _semantic_mode)
+                        if _semantic_mode == "guarded":
+                            try:
+                                _cfg = self._semantic_router_config or getattr(_router, "config", None)
+                                _cos_th = float(getattr(_cfg, "cosine_threshold", 0.62)) if _cfg is not None else 0.62
+                                _mar_th = float(getattr(_cfg, "margin_threshold", 0.10)) if _cfg is not None else 0.10
+                                _route = str(getattr(_semantic_observation, "route", "UNKNOWN"))
+                                _conf = float(getattr(_semantic_observation, "confidence", 0.0) or 0.0)
+                                _margin = float(getattr(_semantic_observation, "margin", 0.0) or 0.0)
+                                _degraded = bool(getattr(_semantic_observation, "degraded", False))
+                                if (
+                                    _route in _SEMANTIC_GUARDED_ALLOWED_ROUTES
+                                    and _route not in _SEMANTIC_GUARDED_BLOCKED_ROUTES
+                                    and not _degraded
+                                    and _conf >= _cos_th
+                                    and _margin >= _mar_th
+                                    and not _is_subject_ambiguous(text)
+                                    and not _is_correction_like(text)
+                                ):
+                                    _semantic_fast_eligible = True
+                                    _semantic_fast_route = _route
+                            except Exception:
+                                _semantic_fast_eligible = False
+                else:
+                    try:
+                        from tfda_context_gate.semantic_router.telemetry import SemanticRouteObservation as _ObsDeg
+
+                        _semantic_observation = _ObsDeg(
+                            route="UNKNOWN",
+                            confidence=0.0,
+                            margin=0.0,
+                            latency_ms=0.0,
+                            mode=_semantic_mode,
+                            degraded=True,
+                        )
+                        _record_semantic_trace(session.session_id, _semantic_observation, _semantic_mode)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        self._last_semantic_observation = _semantic_observation
+        self._last_semantic_mode = _semantic_mode
+        # Guarded fast path for PURE_EDUCATION / CHITCHAT : skip interpreter directly to workflow
+        if _semantic_fast_eligible and _semantic_fast_route in ("PURE_EDUCATION", "CHITCHAT"):
+            context = self.context_manager.append_turn(
+                session.conversation_context,
+                role="user",
+                content=text or "（空白訊息）",
+            )
+            session = session.model_copy(update={"conversation_context": context}, deep=True)
+            workflow = self._call_workflow(
+                {
+                    "request_id": f"{session.session_id}-v{previous_version + 1}",
+                    "schema_version": "a.v0.1",
+                    "user_raw_input": text,
+                    "declared_role": self._declared_role(session.actor_role),
+                    "language": "zh-TW",
+                },
+                task_type=None,
+                intake=None,
+            )
+            try:
+                wf_staged = None
+                if hasattr(workflow, "trace") and isinstance(workflow.trace, dict):
+                    wf_staged = workflow.trace.get("staged_latency")
+                if wf_staged:
+                    for _k in ("rag_retrieval_ms", "answer_generator_ms", "b_gate_ms", "d_gate_ms"):
+                        if _k in wf_staged and isinstance(wf_staged[_k], (int, float)):
+                            recorder.record(_k, float(wf_staged[_k]))
+            except Exception:
+                pass
+            session_updates: dict[str, Any] = {}
+            if workflow.intake_snapshot is not None:
+                try:
+                    session_updates["intake_snapshot"] = PreVisitIntake.model_validate(workflow.intake_snapshot)
+                except Exception:
+                    pass
+            if workflow.intake_stage is not None:
+                session_updates["intake_stage"] = workflow.intake_stage
+            if session_updates:
+                session = session.model_copy(update=session_updates, deep=True)
+            session = self._sync_clinical_context(session)
+            reply = workflow.final_response
+            status = workflow.status
+            intake_stage = workflow.intake_stage if workflow.intake_stage is not None else session.intake_stage
+            context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
+            context, _ = self.context_manager.compact(context, stage_completed=False)
+            session = session.model_copy(update={"conversation_context": context}, deep=True)
+            with recorder.stage("persistence_ms"):
+                saved = self.repository.save(session, expected_version=previous_version)
+            staged = recorder.snapshot()
+            self._last_staged_latency = staged
+            obs_dict = _observation_to_dict(_semantic_observation)
+            return OrchestratorResult(
+                event_id="pending",
+                session_id=saved.session_id,
+                reply=reply,
+                status=status,
+                intake_stage=intake_stage,
+                fallback_reason=getattr(workflow, "fallback_reason", None),
+                semantic_route=str(obs_dict.get("route") or getattr(_semantic_observation, "route", None)) if _semantic_observation is not None else None,
+                semantic_confidence=float(obs_dict.get("confidence") or 0.0) if _semantic_observation is not None else None,
+                semantic_margin=float(obs_dict.get("margin") or 0.0) if _semantic_observation is not None else None,
+                semantic_latency_ms=float(obs_dict.get("latency_ms") or 0.0) if _semantic_observation is not None else None,
+                semantic_degraded=bool(obs_dict.get("degraded", False)) if _semantic_observation is not None else None,
+                semantic_mode=_semantic_mode,
+                metadata={"semantic_observation": obs_dict, "semantic_fast_path": True, "semantic_fast_route": _semantic_fast_route} if _semantic_observation is not None else None,
+            )
+        # 8-9: 建 ConversationEnvelope → Interpreter (always unless narrow fast-path or guarded PURE_INTAKE fast-path)
         envelope = None
         interpretation = None
-        if not _skip_ai_for_intake:
+        _skip_interpreter_due_to_semantic = _semantic_fast_eligible and _semantic_fast_route == "PURE_INTAKE"
+        if not _skip_ai_for_intake and not _skip_interpreter_due_to_semantic:
             with recorder.stage("conversation_interpreter_ms"):
                 try:
                     envelope = build_conversation_envelope(session, text)
@@ -1551,7 +2010,21 @@ class ConversationOrchestrator:
                 context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=reply)
                 context, _ = self.context_manager.compact(context, stage_completed=False)
                 saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
-                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+                _obsd = _observation_to_dict(_semantic_observation) if _semantic_observation is not None else {}
+                return OrchestratorResult(
+                    event_id="pending",
+                    session_id=saved.session_id,
+                    reply=reply,
+                    status="NEEDS_CLARIFICATION",
+                    intake_stage=saved.intake_stage,
+                    semantic_route=str(_obsd.get("route")) if _obsd.get("route") else None,
+                    semantic_confidence=float(_obsd.get("confidence")) if _obsd.get("confidence") is not None else None,
+                    semantic_margin=float(_obsd.get("margin")) if _obsd.get("margin") is not None else None,
+                    semantic_latency_ms=float(_obsd.get("latency_ms")) if _obsd.get("latency_ms") is not None else None,
+                    semantic_degraded=bool(_obsd.get("degraded")) if "degraded" in _obsd else None,
+                    semantic_mode=_semantic_mode if _semantic_observation is not None else None,
+                    metadata={"semantic_observation": _obsd} if _obsd else None,
+                )
         else:
             # Skipped AI for deterministic intake, interpretation remains None
             interpretation = None
@@ -1581,12 +2054,16 @@ class ConversationOrchestrator:
                 session.model_copy(update={"conversation_context": context}, deep=True),
                 expected_version=previous_version,
             )
-            return OrchestratorResult(
-                event_id="pending",
-                session_id=saved.session_id,
-                reply=reply,
-                status="FALLBACK",
-                intake_stage=saved.intake_stage,
+            return _enrich_orchestrator_result(
+                OrchestratorResult(
+                    event_id="pending",
+                    session_id=saved.session_id,
+                    reply=reply,
+                    status="FALLBACK",
+                    intake_stage=saved.intake_stage,
+                ),
+                _semantic_observation,
+                _semantic_mode,
             )
 
         if session.pending_action and session.pending_action.type == "PENDING_CONFIRM_QUESTION":
@@ -1710,9 +2187,13 @@ class ConversationOrchestrator:
                 except Exception:
                     pass
                 self._last_staged_latency = staged
-                return OrchestratorResult(
-                    event_id="pending", session_id=saved.session_id, reply=reply,
-                    status="SIDE_ANSWER", intake_stage=saved.intake_stage,
+                return _enrich_orchestrator_result(
+                    OrchestratorResult(
+                        event_id="pending", session_id=saved.session_id, reply=reply,
+                        status="SIDE_ANSWER", intake_stage=saved.intake_stage,
+                    ),
+                    _semantic_observation,
+                    _semantic_mode,
                 )
 
             old_stage = session.intake_stage
@@ -2022,13 +2503,17 @@ class ConversationOrchestrator:
             except Exception:
                 pass
             self._last_staged_latency = staged
-            return OrchestratorResult(
-                event_id="pending",
-                session_id=saved.session_id,
-                reply=reply,
-                status=status,
-                intake_stage=intake_stage,
-                fallback_reason=getattr(workflow, "fallback_reason", None),
+            return _enrich_orchestrator_result(
+                OrchestratorResult(
+                    event_id="pending",
+                    session_id=saved.session_id,
+                    reply=reply,
+                    status=status,
+                    intake_stage=intake_stage,
+                    fallback_reason=getattr(workflow, "fallback_reason", None),
+                ),
+                _semantic_observation,
+                _semantic_mode,
             )
 
         session = self._sync_clinical_context(session)
@@ -2039,13 +2524,17 @@ class ConversationOrchestrator:
             saved = self.repository.save(session, expected_version=previous_version)
         staged = recorder.snapshot()
         self._last_staged_latency = staged
-        return OrchestratorResult(
-            event_id="pending",
-            session_id=saved.session_id,
-            reply=reply,
-            status=status,
-            intake_stage=intake_stage,
-            fallback_reason=getattr(workflow, "fallback_reason", None),
+        return _enrich_orchestrator_result(
+            OrchestratorResult(
+                event_id="pending",
+                session_id=saved.session_id,
+                reply=reply,
+                status=status,
+                intake_stage=intake_stage,
+                fallback_reason=getattr(workflow, "fallback_reason", None),
+            ),
+            _semantic_observation,
+            _semantic_mode,
         )
 
     _PROXY_FUZZY_RE = re.compile(r"幫.{0,10}問|代.{0,10}整理|幫.{0,10}整理|替.{0,10}問", re.IGNORECASE)

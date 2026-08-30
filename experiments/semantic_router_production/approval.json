@@ -1,0 +1,13 @@
+{
+  "schema_version": "v1",
+  "dataset_sha256": "4247a95a13f9108bd867d3ee0f55173cc49a0b2061425e46e4f9a653578459af",
+  "calibration_timestamp": "2026-08-30T03:40:28.919734Z",
+  "cosine_threshold": 0.68,
+  "margin_threshold": 0.0,
+  "holdout_size": 34,
+  "false_fast": 4,
+  "mixed_recall": 0.2,
+  "correction_boundary_pass": false,
+  "subject_boundary_pass": false,
+  "guarded_pass": false
+}

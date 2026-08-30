@@ -67,6 +67,151 @@ _text_dedup_lock = threading.Lock()
 import re as _re_dup
 _EMPATHY_DUP_RE = _re_dup.compile(r"不人性化|好笨|很怪|無言|敷衍|不友善|冷淡|機械", _re_dup.IGNORECASE)
 
+SEMANTIC_ROUTER_TIMEOUT_S = 0.2
+_app_semantic_router: Any | None = None
+_app_semantic_router_config: Any | None = None
+_app_semantic_router_init_attempted = False
+
+
+def _get_app_requested_route_mode() -> str:
+    try:
+        from tfda_context_gate.run_config import env_value as _ev
+
+        raw = _ev("SEMANTIC_ROUTER_MODE", None)
+        if raw is None:
+            raw = os.getenv("SEMANTIC_ROUTER_MODE")
+    except Exception:
+        raw = os.getenv("SEMANTIC_ROUTER_MODE")
+    if raw is None:
+        return "off"
+    cleaned = str(raw).strip().lower()
+    if cleaned in ("off", "shadow", "guarded"):
+        return cleaned
+    return "off"
+
+
+def _get_app_route_mode() -> str:
+    requested = _get_app_requested_route_mode()
+    if requested != "guarded":
+        return requested
+    try:
+        from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff
+
+        effective, reason, _ = _eff(requested)
+        if effective != "guarded" and reason:
+            logger.info("guarded downgraded to shadow reason=%s", reason)
+        return effective
+    except Exception as _e:
+        logger.warning("guarded approval check failed, downgrading to shadow: %s", _e)
+        return "shadow"
+
+
+def _app_guarded_fallback_reason() -> str | None:
+    requested = _get_app_requested_route_mode()
+    effective = _get_app_route_mode()
+    if requested == "guarded" and effective != "guarded":
+        try:
+            from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff2
+
+            _, reason, _ = _eff2(requested)
+            return reason or "GUARDED_DOWNGRADED_UNKNOWN"
+        except Exception:
+            return "GUARDED_DOWNGRADED_UNKNOWN"
+    return None
+
+
+def _app_record_guarded_downgrade(fallback_reason: str) -> None:
+    try:
+        from tfda_context_gate.e_observability.tracer import TraceRecorder
+
+        tr = TraceRecorder(request_id="app-guarded-downgrade", declared_role=None, original_query=None)
+        tr.record(
+            "SEMANTIC_ROUTER",
+            "GUARDED_DOWNGRADE",
+            "COMPLETED",
+            fallback_reason=fallback_reason,
+            requested_mode="guarded",
+            effective_mode="shadow",
+        )
+        tr.close(status="COMPLETED")
+    except Exception:
+        pass
+
+
+def _app_should_use_semantic_router() -> bool:
+    return _get_app_route_mode() != "off"
+
+
+def _get_app_semantic_router() -> Any | None:
+    global _app_semantic_router, _app_semantic_router_config, _app_semantic_router_init_attempted
+    if _app_semantic_router_init_attempted:
+        return _app_semantic_router
+    try:
+        from tfda_context_gate.semantic_router.config import SemanticRouterConfig as _SRC
+
+        _cfg = _SRC.from_env()
+        _app_semantic_router_config = _cfg
+        if _cfg.mode != "off":
+            try:
+                from tfda_context_gate.semantic_router.factory import build_semantic_router as _bsr
+
+                _app_semantic_router = _bsr(_cfg)
+            except Exception as _e:
+                logger.warning("app semantic router init failed (degraded): %s", _e)
+                _app_semantic_router = None
+        _app_semantic_router_init_attempted = True
+    except ImportError:
+        _app_semantic_router = None
+        _app_semantic_router_init_attempted = True
+    except Exception as _e:
+        logger.warning("app semantic router config failed: %s", _e)
+        _app_semantic_router = None
+        _app_semantic_router_init_attempted = True
+    return _app_semantic_router
+
+
+def _app_semantic_predict_with_timeout(text: str, timeout_s: float = SEMANTIC_ROUTER_TIMEOUT_S) -> Any | None:
+    if not _app_should_use_semantic_router():
+        return None
+    router = _get_app_semantic_router()
+    if router is None:
+        return None
+    import concurrent.futures
+
+    fn = getattr(router, "predict", None) or getattr(router, "route", None)
+    if fn is None:
+        return None
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(fn, text)
+            try:
+                return fut.result(timeout=timeout_s)
+            except concurrent.futures.TimeoutError:
+                try:
+                    fut.cancel()
+                except Exception:
+                    pass
+                try:
+                    from tfda_context_gate.semantic_router.telemetry import SemanticRouteObservation as _Obs
+
+                    return _Obs(
+                        route="UNKNOWN",
+                        confidence=0.0,
+                        margin=0.0,
+                        latency_ms=timeout_s * 1000,
+                        mode=_get_app_route_mode(),
+                        degraded=True,
+                    )
+                except Exception:
+                    return None
+            except Exception:
+                return None
+    except Exception:
+        try:
+            return fn(text)
+        except Exception:
+            return None
+
 
 def _is_short_ttl_text(text: str) -> bool:
     try:
@@ -1474,6 +1619,47 @@ async def callback(
 
             if msg_type == "text":
                 text = message.get("text", "") or ""
+                try:
+                    _downgrade = _app_guarded_fallback_reason()
+                    if _downgrade:
+                        _app_record_guarded_downgrade(_downgrade)
+                except Exception:
+                    pass
+                try:
+                    _app_obs = _app_semantic_predict_with_timeout(text)
+                    if _app_obs is not None:
+                        try:
+                            from tfda_context_gate.e_observability.tracer import TraceRecorder as _AppTrace
+
+                            _app_dict = {}
+                            try:
+                                if hasattr(_app_obs, "to_trace_dict"):
+                                    _app_dict = _app_obs.to_trace_dict()
+                                elif isinstance(_app_obs, dict):
+                                    _app_dict = dict(_app_obs)
+                                else:
+                                    for _k in ("route", "confidence", "margin", "latency_ms", "degraded", "mode"):
+                                        if hasattr(_app_obs, _k):
+                                            _app_dict[_k] = getattr(_app_obs, _k)
+                            except Exception:
+                                _app_dict = {}
+                            _tr = _AppTrace(request_id=f"line-webhook-{text[:8]}", declared_role=None, original_query=None)
+                            _tr.record(
+                                "SEMANTIC_ROUTER",
+                                "webhook",
+                                "COMPLETED",
+                                semantic_route=str(_app_dict.get("route") or getattr(_app_obs, "route", "UNKNOWN")),
+                                semantic_confidence=float(_app_dict.get("confidence") or 0.0),
+                                margin=float(_app_dict.get("margin") or 0.0),
+                                latency_ms=float(_app_dict.get("latency_ms") or 0.0),
+                                route_mode=str(_app_dict.get("mode") or _get_app_route_mode()),
+                                degraded=bool(_app_dict.get("degraded", False)),
+                            )
+                            _tr.close(status="COMPLETED")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 orchestrator = _get_conversation_orchestrator()
                 webhook_event_id = ev.get("webhookEventId") or message.get("id")
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":

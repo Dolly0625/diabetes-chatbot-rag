@@ -39,13 +39,59 @@ import time
 import tempfile
 
 # Load .env early (override False to respect real env, but allow explicit override)
-try:
-    from dotenv import load_dotenv
-    from tfda_context_gate.run_config import PROJECT_ROOT
+# Worktree 的 PROJECT_ROOT/.env 可能不存在（gitignored），自動 fallback 到主專案 .env
+_MAIN_PROJECT_ENV = Path("/Users/dolly/Documents/code/tfda-diabetes-agent/.env")
 
-    load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
+def _load_env_files(env_file: Path | str | None = None) -> None:
+    """安全載入 .env 到當前 process（不寫檔、不複製），僅用 load_dotenv。
+
+    - 若指定 env_file：只載入該檔 (override=False)
+    - 未指定時：依序嘗試 worktree PROJECT_ROOT/.env 與主專案 _MAIN_PROJECT_ENV
+      （worktree 優先，主專案作為 fallback；override=False 保證不覆蓋已存在的真實 env）
+    """
+    try:
+        from dotenv import load_dotenv
+        from tfda_context_gate.run_config import PROJECT_ROOT as _PR  # type: ignore
+        proj_root = _PR
+    except ImportError:
+        try:
+            from dotenv import load_dotenv  # type: ignore
+        except ImportError:
+            return
+        proj_root = Path(__file__).resolve().parents[1]
+        for _p in ([Path(env_file)] if env_file else [proj_root / ".env", _MAIN_PROJECT_ENV]):
+            try:
+                if _p.exists():
+                    load_dotenv(dotenv_path=_p, override=False)
+            except Exception:
+                continue
+        return
+    try:
+        from dotenv import load_dotenv as _ld  # type: ignore
+    except ImportError:
+        return
+    candidates: list[Path]
+    if env_file is not None and str(env_file).strip():
+        candidates = [Path(str(env_file)).expanduser()]
+    else:
+        candidates = [proj_root / ".env", _MAIN_PROJECT_ENV]
+    for _p in candidates:
+        try:
+            if _p.exists():
+                _ld(dotenv_path=_p, override=False)
+        except Exception:
+            continue
+
+try:
+    from tfda_context_gate.run_config import PROJECT_ROOT
 except ImportError:
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# 匯入時即嘗試自動載入（worktree .env → 主專案 .env），確保後續 env_value 能讀到 ROUTER_LLM_MODEL
+try:
+    _load_env_files(None)
+except Exception:
+    pass
 
 from tfda_context_gate.product_session import SQLiteProductSessionRepository
 from tfda_context_gate.line_orchestration import ConversationOrchestrator
@@ -62,11 +108,21 @@ WARM_FOLLOWUP_TEXT = "晚上常跑廁所會是糖尿病嗎？"
 WARM_FOLLOWUP_TEXT_FALLBACK = "糖尿病適合吃什麼水果比較好？"
 
 
+def _redacted_secret(val: str) -> str:
+    if not val:
+        return "***REDACTED***"
+    v = str(val).strip()
+    if len(v) <= 4:
+        return "***REDACTED***"
+    return v[:4] + "***REDACTED***"
+
+
 def _masked_model() -> str:
     raw = env_value("CONVERSATION_LLM_MODEL", "") or env_value("ROUTER_LLM_MODEL", "") or ""
     if not raw:
         return "(deterministic)"
-    return raw.split("/")[-1] if "/" in raw else raw
+    short = raw.split("/")[-1] if "/" in raw else raw
+    return short
 
 
 def _desensitized_snapshot(snapshot) -> dict:
@@ -143,9 +199,14 @@ def _create_formal_orchestrator(tmp: Path):
     model_name = _masked_model()
     timeout = os.getenv("CONVERSATION_LLM_TIMEOUT_S", "8")
     print(f"[Factory] interpreter={interp.__class__.__name__} is_formal={is_formal} model={model_name} timeout={timeout}s")
+    init_err = getattr(interp, "_init_error", None)
+    if init_err:
+        print(f"[ERROR] 依賴失敗：無法建立 FormalConversationInterpreter / provider unreachable: {_redacted_secret(str(init_err)[:200])}")
     if not is_formal:
-        print("[WARN] Expected FormalConversationInterpreter but got", interp.__class__.__name__)
-        print("       Check .env CONVERSATION_LLM_MODEL / ROUTER_LLM_MODEL / OPENCODE_API_KEY presence")
+        if not init_err:
+            print("[WARN] Expected FormalConversationInterpreter but got", interp.__class__.__name__)
+            print("       Check .env CONVERSATION_LLM_MODEL / ROUTER_LLM_MODEL / OPENCODE_API_KEY presence")
+        print("[ERROR] 依賴失敗：無法建立 FormalConversationInterpreter / provider unreachable")
     orch = ConversationOrchestrator(repo, identity_hash_key="p2a-live-smoke-key-12345678901234", interpreter=interp)
     return repo, orch, is_formal, model_name, interp
 
@@ -595,7 +656,12 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="不需真模型，以 Fake 路徑演練（CI 用）")
     parser.add_argument("-q", "--quiet", action="store_true", help="簡潔輸出")
     parser.add_argument("--json", dest="json_out", action="store_true", help="額外輸出 JSON 到 stdout")
+    parser.add_argument("--env-file", dest="env_file", type=str, default=None, help="指定 .env 路徑（預設自動嘗試 worktree PROJECT_ROOT/.env 與主專案 /Users/dolly/Documents/code/tfda-diabetes-agent/.env）")
     args, _ = parser.parse_known_args()
+    try:
+        _load_env_files(args.env_file)
+    except Exception:
+        pass
 
     dry_run = args.dry_run
     quiet = args.quiet
@@ -813,6 +879,11 @@ def main():
     if args.json_out:
         print("\n[JSON]")
         print(json.dumps({"mode": mode, "is_formal": is_formal_summary, "model": model_summary, "p50_ms": p50, "p95_ms": p95, "total_fallbacks": f"{fallback_count}/{total}", "fallback_categories": fallback_counts, "system_failure_rate": f"{system_fallback_count}/{total}", "observed_model_calls": total_model_calls, "session_first_turn": session_first_count, "session_warm_turn": session_warm_count, "process_first_measurement_in_report": process_first_count, "session_first_p50_ms": cold_p50, "session_first_p95_ms": cold_p95, "session_warm_p50_ms": warm_p50, "session_warm_p95_ms": warm_p95, "per_stage": per_stage_stats, "per_stage_session_first": per_stage_cold_stats, "per_stage_session_warm": per_stage_warm_stats, "results": results}, ensure_ascii=False, indent=2))
+
+    if not dry_run and not is_formal_summary:
+        print("\n[ERROR] 依賴失敗：無法建立 FormalConversationInterpreter / provider unreachable — live smoke 未真正連到 OpenCode (mimo-v2.5)，誠實報告為非 live")
+        print("[RESULT] LIVE smoke 未就緒（非 Fake 冒充）— 以 non-zero 誠實報告")
+        sys.exit(2)
 
     if not all_passed:
         print("\n[RESULT] SOME CHECKS FAILED")
