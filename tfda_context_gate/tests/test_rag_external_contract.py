@@ -15,7 +15,9 @@ from tfda_context_gate.rag.external_contract import (
     retrieval_request_from_results,
     retrieval_response_to_rag_result,
 )
+from tfda_context_gate.rag.external_retriever import ExternalContractRetriever
 from tfda_context_gate.rag.schemas import rag_to_b_input
+from tfda_context_gate.workflow.runner import run_workflow
 
 
 def _allowed_request():
@@ -207,3 +209,106 @@ def test_retrieval_error_maps_to_b_fallback():
     response = RetrievalResponse(request_id=request.request_id, retrieval_status="ERROR")
     b_input = rag_to_b_input(retrieval_response_to_rag_result(response, request=request))
     assert DeterministicContextGate(approval_mode="all_retrieved").evaluate(b_input).decision == "FALLBACK"
+
+
+def test_external_contract_is_wired_through_production_workflow():
+    captured = []
+
+    def transport(request):
+        captured.append(request)
+        return {
+            "request_id": request.request_id,
+            "retrieval_status": "SUCCESS",
+            "retrieval_route": "HYBRID",
+            "chunks": [
+                {
+                    "chunk_id": "external-live-1",
+                    "source": "RAG_TEAM",
+                    "content": "一般糖尿病飲食應注意均衡飲食。",
+                }
+            ],
+        }
+
+    result = run_workflow(
+        {
+            "request_id": "external-workflow-1",
+            "user_raw_input": "請說明糖尿病一般飲食原則。",
+            "declared_role": "PATIENT",
+            "language": "zh-TW",
+        },
+        retriever=ExternalContractRetriever(
+            "http://localhost:9999/retrieve", transport=transport
+        ),
+        context_gate=DeterministicContextGate(approval_mode="all_retrieved"),
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.rag_result["retrieval_status"] == "SUCCESS"
+    assert result.b_result["decision"] == "PASS"
+    assert len(captured) == 1
+    assert set(captured[0].model_dump(mode="json")) == {
+        "request_id",
+        "schema_version",
+        "user_raw_input",
+        "retrieval_queries",
+        "guardrail_result",
+        "language",
+        "timestamp",
+    }
+
+
+def test_external_transport_failure_reaches_b_as_fallback():
+    def broken_transport(_request):
+        raise TimeoutError("synthetic timeout body must not leak")
+
+    request = _allowed_request()
+    retriever = ExternalContractRetriever(
+        "https://rag.invalid/retrieve", transport=broken_transport
+    )
+    rag_result = retriever.retrieve_with_guardrail(
+        route_request(
+            RequestContext(
+                request_id=request.request_id,
+                user_raw_input=request.user_raw_input,
+                declared_role="PATIENT",
+                language="zh-TW",
+            )
+        ),
+        IdentityQueryExpander().expand(
+            from_a_result(
+                route_request(
+                    RequestContext(
+                        request_id=request.request_id,
+                        user_raw_input=request.user_raw_input,
+                        declared_role="PATIENT",
+                        language="zh-TW",
+                    )
+                )
+            )
+        ),
+    )
+
+    assert rag_result.retrieval_status == "ERROR"
+    assert rag_result.evidence == []
+    assert all("synthetic timeout" not in warning for warning in rag_result.warnings)
+    b_result = DeterministicContextGate(approval_mode="all_retrieved").evaluate(
+        rag_to_b_input(rag_result)
+    )
+    assert b_result.decision == "FALLBACK"
+
+
+def test_external_endpoint_rejects_plain_http_off_localhost():
+    with pytest.raises(ValueError, match="HTTPS"):
+        ExternalContractRetriever("http://rag.example/retrieve")
+
+
+def test_formal_factory_does_not_silently_fixture_invalid_external_url(monkeypatch):
+    from tfda_context_gate.workflow.formal_factory import _build_formal_retriever
+
+    _build_formal_retriever.cache_clear()
+    monkeypatch.setenv("RAG_RETRIEVAL_URL", "http://rag.example/retrieve")
+    try:
+        with pytest.raises(ValueError, match="HTTPS"):
+            _build_formal_retriever()
+    finally:
+        _build_formal_retriever.cache_clear()

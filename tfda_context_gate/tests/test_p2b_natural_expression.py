@@ -223,4 +223,5 @@ def test_unseen_intake_confirmation_does_not_add_claims(tmp_path: Path):
     assert "metformin" in result.reply.lower() or "記為" in result.reply
     assert "對嗎？" in result.reply
     assert "如果不對" in result.reply
+    assert result.reply.count("我記為「metformin」") == 1
     assert not any(token in result.reply for token in ("診斷", "劑量", "療效承諾", "治癒"))

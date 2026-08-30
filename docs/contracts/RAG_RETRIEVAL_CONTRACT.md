@@ -71,3 +71,19 @@
 `retrieval_response_to_rag_result()` 會把 `chunks[]` 經 `normalize_evidence()` 轉成
 `CanonicalEvidence[]`，並將 status / route / warnings 透過 `RAGResult` 帶入
 `CanonicalBInput.tool_context`。檢索結果仍須 B PASS 才能給 C，並須 D PASS 才能輸出。
+
+## 正式 workflow 接線
+
+設定以下環境變數後，formal workflow 會改用 `ExternalContractRetriever`，實際送出
+上述 `RetrievalRequest` 並解析 `RetrievalResponse`：
+
+```env
+RAG_RETRIEVAL_URL=https://rag-service.example/retrieve
+RAG_RETRIEVAL_TIMEOUT_S=3
+```
+
+未設定 `RAG_RETRIEVAL_URL` 時保留既有本機 bge-m3 retriever。外部 endpoint 必須使用
+HTTPS；只有 localhost 開發允許 HTTP。HTTP、JSON、schema 或 request-id 驗證失敗都會
+轉成 `retrieval_status=ERROR`，並由 B gate fail-closed 為 `FALLBACK`。正式 workflow
+會把 A result 一併交給 adapter；直接呼叫缺少 A result 的 `retrieve()` 會拒絕執行，
+避免繞過 `guardrail_result`。

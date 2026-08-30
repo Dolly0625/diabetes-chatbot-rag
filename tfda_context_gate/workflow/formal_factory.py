@@ -16,10 +16,34 @@ def _build_formal_extractor():
 
 @lru_cache(maxsize=1)
 def _build_formal_retriever():
+    from tfda_context_gate.run_config import env_value
+
+    external_url = (env_value("RAG_RETRIEVAL_URL", "") or "").strip()
+    if external_url:
+        from tfda_context_gate.rag.external_retriever import ExternalContractRetriever
+
+        timeout_raw = env_value("RAG_RETRIEVAL_TIMEOUT_S", "3") or "3"
+        try:
+            timeout_s = float(timeout_raw)
+        except (TypeError, ValueError):
+            timeout_s = 3.0
+        # An explicitly configured external trust boundary must never degrade
+        # silently to fixture evidence because of a typo or unsafe URL.
+        return ExternalContractRetriever(external_url, timeout_s=timeout_s)
+
     try:
         from tfda_context_gate.rag.tfda_retriever import TFDADrugSafetyRetriever
 
-        retriever = TFDADrugSafetyRetriever(embedding_model="ollama/bge-m3:latest")
+        embedding_model = (
+            env_value("EMBED_MODEL", "")
+            or env_value("OLLAMA_EMBED_MODEL", "")
+            or ""
+        ).strip()
+        if not embedding_model:
+            raise RuntimeError("EMBED_MODEL or OLLAMA_EMBED_MODEL is required for formal retrieval")
+        if "/" not in embedding_model and embedding_model.startswith("bge-"):
+            embedding_model = f"ollama/{embedding_model}"
+        retriever = TFDADrugSafetyRetriever(embedding_model=embedding_model)
         retriever._ensure_store()
         return retriever
     except Exception:

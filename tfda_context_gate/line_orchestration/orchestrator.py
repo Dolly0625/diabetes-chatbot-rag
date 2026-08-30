@@ -1795,7 +1795,12 @@ class ConversationOrchestrator:
                             _merged_valid = _valid
                         except Exception:
                             _merged_valid = None
-                    session, intake_note = self._normalize_intake_answer(session, intake_text_for_normalize, merged_valid=_merged_valid)
+                    session, intake_note = self._normalize_intake_answer(
+                        session,
+                        intake_text_for_normalize,
+                        merged_valid=_merged_valid,
+                        allow_cross_stage_symptom_description=bool(is_multi_early),
+                    )
                 if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
                     session = self._sync_clinical_context(session)
                     context = self.context_manager.append_turn(session.conversation_context, role="assistant", content=intake_note or "請問程度大約是輕度、中度、重度，或 1–10 分中的幾分？")
@@ -1883,6 +1888,16 @@ class ConversationOrchestrator:
             resulting_intake = PreVisitIntake.model_validate(
                 workflow.intake_snapshot or session.intake_snapshot
             )
+            # Do not let an education-looking doctor question strand a fully
+            # collected intake in stage3.  The local intake normalizer is the
+            # source of truth for writes; once all eight fields exist we can
+            # deterministically enter Review even if the downstream workflow
+            # classified the same sentence as general education.
+            completed_stage3_locally = (
+                old_stage == "stage3"
+                and bool(resulting_intake.questions_for_doctor)
+                and self._next_pending_field(resulting_intake) is None
+            )
             # P1.1: general education should not create pending intake (active_task should be general_education)
             if self._is_intake_active(session, text) and session.status in ("ACTIVE", "AWAITING_CONFIRMATION"):
                 updates["pending_field"] = self._next_pending_field(resulting_intake)
@@ -1893,6 +1908,16 @@ class ConversationOrchestrator:
                 updates["pending_question"] = None
             if workflow.status == "NEEDS_CONFIRMATION":
                 updates["status"] = "AWAITING_CONFIRMATION"
+            if completed_stage3_locally:
+                updates.update(
+                    {
+                        "status": "AWAITING_CONFIRMATION",
+                        "intake_stage": "review",
+                        "pending_field": None,
+                        "pending_question": None,
+                        "pending_action": None,
+                    }
+                )
             if not resulting_intake.questions_for_doctor and updates.get("intake_stage") == "review":
                 from tfda_context_gate.intake.schemas import INTAKE_FIELD_QUESTIONS as _QMAP
                 updates["intake_stage"] = "stage3"
@@ -1922,6 +1947,14 @@ class ConversationOrchestrator:
                     status = "NEEDS_CLARIFICATION" if session.pending_field else status
                     if session.pending_question:
                         reply = session.pending_question
+            if completed_stage3_locally and workflow.status != "NEEDS_CONFIRMATION":
+                status = "NEEDS_CONFIRMATION"
+                intake_stage = "review"
+                review_prompt = (
+                    "看診前資料已整理完成。請先查看摘要；內容正確請回覆「確認完成」，"
+                    "需要調整則回覆「修改看診資料」。"
+                )
+                reply = f"{reply}\n\n{review_prompt}" if reply else review_prompt
             if not resulting_intake.questions_for_doctor and intake_stage == "review":
                 from tfda_context_gate.intake.schemas import INTAKE_FIELD_QUESTIONS as _QMAP2
                 intake_stage = "stage3"
@@ -1943,7 +1976,22 @@ class ConversationOrchestrator:
                 elif intake_note.strip() in reply:
                     reply = reply
                 else:
-                    reply = f"{intake_note}\n\n{reply}"
+                    # The workflow may repeat the same implicit confirmation
+                    # without P2B's repair hint and then append the next
+                    # question. Replace that leading duplicate instead of
+                    # stacking two near-identical confirmations.
+                    confirmation_core = re.sub(
+                        r"\s*如果不對[，,]?.*$", "", intake_note.strip()
+                    ).strip()
+                    if confirmation_core and reply.strip().startswith(confirmation_core):
+                        remainder = reply.strip()[len(confirmation_core):].strip()
+                        reply = (
+                            f"{intake_note}\n\n{remainder}"
+                            if remainder
+                            else intake_note
+                        )
+                    else:
+                        reply = f"{intake_note}\n\n{reply}"
             elif checkpoint:
                 reply = f"{checkpoint}\n\n{reply}"
             # P1 multi: deterministically append next intake question after education answer
@@ -2310,7 +2358,12 @@ class ConversationOrchestrator:
 
     @classmethod
     def _normalize_intake_answer(
-        cls, session: ProductSession, text: str, merged_valid: list[Any] | None = None
+        cls,
+        session: ProductSession,
+        text: str,
+        merged_valid: list[Any] | None = None,
+        *,
+        allow_cross_stage_symptom_description: bool = False,
     ) -> tuple[ProductSession, str | None]:
         field = session.pending_field or cls._next_pending_field(session.intake_snapshot)
         if field is None and not _CORRECTION_RE.search(text) and not _WANT_QUESTION_RE.search(text):
@@ -2510,7 +2563,21 @@ class ConversationOrchestrator:
             elif isinstance(v, str) and len(v) > limit:
                 v = v[:limit]
             if k == "symptom_description" and "symptom_onset" in candidates and str(v).strip() == text.strip()[:limit] and field != "symptom_description":
-                continue
+                # A full-clause description such as 「我最近常口渴」 is
+                # still real symptom data even when the same clause also
+                # yields onset=最近.  Only suppress a duplicated time-only
+                # clause that contains no symptom semantics.
+                has_distinct_symptom = bool(
+                    re.search(
+                        r"口渴|口乾|頻尿|尿尿|跑廁所|頭暈|疼痛|麻|視力|疲倦|很累|餓|手抖|發抖|喘",
+                        str(v),
+                    )
+                )
+                if not (
+                    allow_cross_stage_symptom_description
+                    and has_distinct_symptom
+                ):
+                    continue
             if k == "questions_for_doctor" and isinstance(v, list):
                 if any("我要繼續整理看診前資料" in str(x) for x in v):
                     continue

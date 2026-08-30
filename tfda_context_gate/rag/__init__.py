@@ -9,12 +9,15 @@ from .external_contract import (
     retrieval_request_from_results,
     retrieval_response_to_rag_result,
 )
+from .external_retriever import ExternalContractRetriever, ExternalRetrievalTransport
 from .retriever import FixtureRetriever, Retriever, adapt_legacy_retrieval
 from .schemas import RAG_SCHEMA_VERSION, RAGResult
 from .tfda_retriever import TFDADrugSafetyRetriever, TFDADatasetError, load_tfda_rows
 
 __all__ = [
     "FixtureRetriever",
+    "ExternalContractRetriever",
+    "ExternalRetrievalTransport",
     "HPADietRetriever",
     "MultiSourceRetriever",
     "TFDADrugSafetyRetriever",

@@ -139,6 +139,52 @@ def test_mixed_thirst_fruit_writes_intake_and_education(tmp_path: Path):
     assert sess.pending_field is not None or sess.intake_stage in ("stage2", "stage3", "review")
 
 
+def test_live_shape_onset_and_full_symptom_clause_both_survive_from_stage1(tmp_path: Path):
+    """重現 live formal：ASCII resolved query + onset/description 同子句。"""
+
+    text = "我最近常口渴，糖尿病一天可以吃幾份水果？"
+    interpretation = ConversationTurnInterpretation(
+        intents=["INTAKE_ANSWER", "EDUCATION_QUESTION"],
+        resolved_education_query="糖尿病一天可以吃幾份水果?",
+        intake_candidates=[
+            IntakeCandidate(
+                field_name="symptom_onset",
+                candidate_value="最近",
+                source_quote="最近",
+                confidence=0.88,
+                explicitly_stated=True,
+                requires_confirmation=False,
+            ),
+            IntakeCandidate(
+                field_name="symptom_description",
+                candidate_value="我最近常口渴",
+                source_quote="我最近常口渴",
+                confidence=0.88,
+                explicitly_stated=True,
+                requires_confirmation=False,
+            ),
+        ],
+        confidence=0.88,
+    )
+    fake_interp = FakeConversationInterpreter(preset={text: interpretation})
+    fake_wf = _fake_workflow_factory("水果份量請依個別狀況與醫療人員討論。")
+    _repo, orch = _new_orchestrator(
+        tmp_path, interpreter=fake_interp, workflow_runner=fake_wf
+    )
+    _activate_intake(orch, "U-live-shape")
+
+    result = orch.handle_text(
+        event_id="live-shape-1", line_user_id="U-live-shape", text=text
+    )
+    session = orch.session_for_user("U-live-shape")
+
+    assert session is not None
+    assert session.intake_snapshot.symptom_onset == "最近"
+    assert "口渴" in (session.intake_snapshot.symptom_description or "")
+    assert "水果" not in (session.intake_snapshot.symptom_description or "")
+    assert result.status != "SIDE_ANSWER"
+
+
 # ── 2. Mixed: metformin + side effect ───────────────────────────────
 
 def test_mixed_metformin_side_effect_medication_recorded(tmp_path: Path):

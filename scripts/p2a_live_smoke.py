@@ -380,12 +380,18 @@ def _run_single_case(orch, repo, case: dict, dry_run: bool = False):
             notes.append(f"intents={intents} resolved={resolved!r}")
             sd = sess.intake_snapshot.symptom_description or "" if sess else ""
             if sd:
-                notes.append(f"OK: multi-intent 口渴落地 sd={sd!r}")
-            else:
-                if not dry_run:
-                    notes.append("WARN: multi-intent symptom 未落地（formal 可能將問句視為純衛教）")
+                if "口渴" not in sd and "口乾" not in sd and "很渴" not in sd:
+                    passed = False
+                    notes.append(f"FAIL: multi-intent 症狀內容不符預期 sd={sd!r}")
+                elif "水果" in sd or "幾份" in sd:
+                    passed = False
+                    polluted = True
+                    notes.append(f"FAIL: 衛教問句污染 symptom_description sd={sd!r}")
                 else:
-                    notes.append(f"OK (dry-run): sd={sd!r}")
+                    notes.append(f"OK: multi-intent 口渴落地 sd={sd!r}")
+            else:
+                passed = False
+                notes.append("FAIL: multi-intent symptom_description 未落地")
     else:
         passed = False
         notes.append("FAIL: session not found")

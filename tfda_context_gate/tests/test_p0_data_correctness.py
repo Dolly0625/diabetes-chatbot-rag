@@ -83,6 +83,49 @@ def test_p0_01_full_eight_field_stage_sequence(tmp_path):
     assert snap.questions_for_doctor, "questions_for_doctor 不可為空"
 
 
+def test_stage3_doctor_wording_cannot_strand_completed_intake(tmp_path):
+    """「醫生」也必須收斂到 review，不能被衛教路由卡在 stage3。"""
+
+    orch, repo = _new_orch(tmp_path, "p0_doctor_wording.sqlite3")
+    turns = [
+        "為自己整理",
+        "metformin",
+        "沒有過敏",
+        "高血壓",
+        "無家族史",
+        "三天前開始",
+        "常常口渴 晚上頻尿",
+        "中度",
+        "想問醫生飲食怎麼控制",
+    ]
+    result = None
+    for index, text in enumerate(turns):
+        result = orch.handle_text(
+            event_id=f"doctor-wording-{index}",
+            line_user_id="U-doctor-wording",
+            text=text,
+        )
+
+    assert result is not None
+    session = repo.get(result.session_id)
+    assert session is not None
+    assert session.intake_snapshot.questions_for_doctor == ["想問醫生飲食怎麼控制"]
+    assert session.intake_stage == "review"
+    assert session.status == "AWAITING_CONFIRMATION"
+    assert result.status == "NEEDS_CONFIRMATION"
+    assert "確認完成" in result.reply
+
+    submitted = orch.handle_text(
+        event_id="doctor-wording-confirm",
+        line_user_id="U-doctor-wording",
+        text="確認完成",
+    )
+    final_session = repo.get(submitted.session_id)
+    assert final_session is not None
+    assert final_session.status == "SUBMITTED"
+    assert final_session.intake_stage == "submitted"
+
+
 # ── 2. questions_for_doctor 不可含內部控制句 ────────────────
 
 def test_p0_02_questions_for_doctor_excludes_internal_control_sentence(tmp_path):

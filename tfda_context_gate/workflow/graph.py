@@ -680,7 +680,13 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
                 result = tool_result_to_rag_result(tool_result, original_query=state["query_expansion"].original_query)
                 span.set(retrieval_query=q, retrieved_count=len(result.evidence), retrieved_evidence_ids=[item.evidence_id for item in result.evidence], retrieved_evidence=_retrieved_evidence_trace(result.evidence), retrieval_latency_ms=result.retrieval_latency_ms, retrieval_attempt=attempt, tool_name=tool_result.tool_name, reason_codes=[tool_result.status, tool_result.source_id] if tool_result.source_id else [tool_result.status], decision=tool_result.status)
             else:
-                result = retriever.retrieve(state["query_expansion"])
+                retrieve_with_guardrail = getattr(retriever, "retrieve_with_guardrail", None)
+                if callable(retrieve_with_guardrail):
+                    result = retrieve_with_guardrail(
+                        state["a_result"], state["query_expansion"]
+                    )
+                else:
+                    result = retriever.retrieve(state["query_expansion"])
                 span.set(retrieval_query=state["query_expansion"].retrieval_queries[0], retrieved_count=len(result.evidence), retrieved_evidence_ids=[item.evidence_id for item in result.evidence], retrieved_evidence=_retrieved_evidence_trace(result.evidence), retrieval_latency_ms=result.retrieval_latency_ms, retrieval_attempt=attempt)
         return {"rag_result": result, "retrieval_attempt": attempt}
 
