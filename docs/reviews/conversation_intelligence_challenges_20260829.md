@@ -105,6 +105,39 @@ Conversation Interpreter（理解與結構化候選）
 
 真正的延遲上限需要使用 HTTP／SDK 原生 timeout、可傳遞的 deadline，以及確保超時工作不再寫入 session 或推送 LINE 回覆。單純提高 45／120 秒上限不算修復。
 
+### 2.9 產品設計失誤：讓所有訊息共用同一條最高成本管線
+
+本階段最重要的架構反省，不是「規則用得太多」或「AI 用得太少」，而是早期把聊天、看診前資料蒐集、衛教問答、上下文修正、本人／家屬辨識與醫療安全判斷都視為同一種對話問題。系統因此傾向讓一則訊息依序經過完整理解、抽取、狀態驗證、RAG、答案生成與安全閘門，即使使用者只回答「沒有過敏」、「metformin」、「先不要填了」或「謝謝」。
+
+這個設計造成四項直接影響：
+
+1. **簡單訊息支付複雜訊息的成本。** 原本可由規則或狀態機在數毫秒完成的封閉答案，也可能等待 6～8 秒的 Conversation Interpreter。
+2. **混合意圖形成串行雙模型延遲。** 「我最近常口渴，糖尿病一天可以吃幾份水果？」必須先由 interpreter 抽取症狀與解析問題，再執行 RAG 與 Formal C Generator；兩次遠端模型呼叫無法直接重疊，單輪可達 14～17 秒。
+3. **泛化修補擴大回歸面。** 每新增一種口語變體、否定句、問句、家屬指代或跨輪修正，都可能同時影響資料寫入、intake stage、衛教路由與安全邊界。
+4. **測試成熟度一度超過產品旅程成熟度。** 函式與 Fake interpreter 測試全綠，仍曾遮蔽正式模型無法啟動 intake、mixed-intent 漏存症狀、timeout 後繼續等待，以及 schema 已存在但 production 尚未接線等問題。
+
+這不代表既有安全設計錯誤。紅旗優先、PendingAction、provenance、本人／家屬隔離、確認後分享、醫護唯讀，以及 B／D gate 都應保留。真正需要修正的是執行分層：
+
+```text
+Layer 0：deterministic safety
+紅旗、授權、subject 與身份邊界；任何路由不得繞過。
+
+Layer 1：deterministic product fast path
+明確短答案、暫停／繼續、確認、身份詢問；目標 <200ms。
+
+Layer 2：local semantic routing
+只判斷 PURE_INTAKE／PURE_EDUCATION／MIXED／CHITCHAT／UNKNOWN，
+不直接寫入病患資料；低信心一律升級。
+
+Layer 3：complex interpretation
+自然 intake、跨輪修正、本人／家屬切換、指代不明與 mixed intent 才使用 LLM。
+
+Layer 4：grounded education
+純衛教或 mixed 中的衛教子句才執行 RAG＋C＋D；必要時非同步 push。
+```
+
+因此，後續優化原則應是「大型生成模型作為複雜情境的升級路徑，而不是每輪預設入口」。Semantic Router 的角色是安全地減少不必要的 interpreter 呼叫，不是取代醫療安全閘門或取得資料寫入權。Demo 階段則應先以分輪 intake、獨立衛教問題、模型暖機與 deterministic 備援驗證完整使用者旅程，再擴大自由混合對話範圍。
+
 ## 3. 架構決策：混合式路由，但 Semantic Router 暫不上線
 
 經討論後，不建議讓每一句都直接進生成式 AI，也不建議完全以 Semantic Router 取代 interpreter。較合適的目標架構為：
