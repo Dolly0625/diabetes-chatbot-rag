@@ -772,7 +772,9 @@ def _push_text(
                         p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
                     ):
                         if event_id:
-                            kwargs["x_line_retry_key"] = uuid.uuid5(uuid.NAMESPACE_URL, event_id).hex
+                            from tfda_context_gate.line_orchestration.retry_key import make_line_retry_key
+
+                            kwargs["x_line_retry_key"] = make_line_retry_key(event_id)
                     if "_request_timeout" in params or any(
                         p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
                     ):
@@ -894,6 +896,29 @@ def _should_use_async_formal(text: str, task_type: str | None = None) -> bool:
         return _orch_should_use_formal(text, task_type)
     except Exception:
         return False
+
+
+def _should_schedule_formal_push(orchestrator: Any, line_user_id: str, text: str) -> bool:
+    """Keep active-intake answers inside the product state machine.
+
+    The webhook-level keyword check cannot distinguish a medication answer
+    (for example, ``沒有打胰島素``) from a medication education request.  The
+    orchestrator owns that distinction because it can see the persisted
+    intake state.  On any lookup error we fail closed to the synchronous
+    orchestrator path instead of bypassing intake through async RAG.
+    """
+
+    if orchestrator is None or not getattr(orchestrator, "use_formal", False):
+        return False
+    try:
+        session = orchestrator.session_for_user(line_user_id)
+        if session is not None:
+            eligible = getattr(orchestrator, "_is_async_narrow_eligible", None)
+            if callable(eligible):
+                return bool(eligible(session, text))
+    except Exception:
+        return False
+    return _should_use_async_formal(text, None)
 
 
 def _schedule_formal_push(
@@ -1732,7 +1757,7 @@ async def callback(
                             pass
                         _send(reply_token, "此訊息已在處理中，請稍候。")
                         continue
-                    if orchestrator.use_formal and _should_use_async_formal(text, None):
+                    if _should_schedule_formal_push(orchestrator, str(user_id), text):
                         if _is_text_duplicate(str(user_id), text):
                             _send(reply_token, _dedup_reply_for(text))
                             continue

@@ -41,19 +41,18 @@ def compose_intake_question(field: str | None) -> str | None:
 
 
 def compose_side_answer(answer: str | None, pending_question: str | None) -> str:
-    """Attach an explicit, conversational return to the saved intake.
+    """Answer the user's detour without immediately pulling them back to a form.
 
     ``answer`` is generated upstream and is therefore not rewritten here.  We
-    only add navigation text and the already-selected next question.
+    only reassure the user that progress is safe and let them choose when to
+    resume.  ``pending_question`` remains accepted for API compatibility; it
+    is deliberately not appended to every education answer.
     """
 
     base = (answer or "").strip() or "這題我先回答到這裡。"
     if not pending_question:
         return base
-    return (
-        f"{base}\n\n資料已保留。這題先到這裡；想繼續整理時按「繼續整理」就好。\n"
-        f"下一步是：{pending_question}"
-    )
+    return f"{base}\n\n看診資料我先幫你留著；想繼續整理時，跟我說「繼續整理」就好。"
 
 
 def compose_single_confirmation(raw: str, label: str) -> str:

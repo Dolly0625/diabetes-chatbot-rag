@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import threading
+import uuid
 from pathlib import Path
 
 from tfda_context_gate.conversation.interpreter import DeterministicConversationInterpreter
@@ -61,6 +62,19 @@ def test_line_push_marks_only_after_api_success_and_deduplicates(monkeypatch):
     assert line_app._push_text("U-once", "answer", event_id="line-push-once") is True
     assert line_app._push_text("U-once", "answer", event_id="line-push-once") is False
     assert len(calls) == 1
+    retry_key = calls[0][1]["x_line_retry_key"]
+    assert len(retry_key) == 36
+    assert str(uuid.UUID(retry_key)) == retry_key
+
+
+def test_line_retry_key_is_stable_canonical_uuid():
+    from tfda_context_gate.line_orchestration.retry_key import make_line_retry_key
+
+    first = make_line_retry_key("same-line-event")
+    second = make_line_retry_key("same-line-event")
+    assert first == second
+    assert str(uuid.UUID(first)) == first
+    assert "-" in first
 
 
 def test_line_push_failure_releases_reservation_for_safe_retry(monkeypatch):

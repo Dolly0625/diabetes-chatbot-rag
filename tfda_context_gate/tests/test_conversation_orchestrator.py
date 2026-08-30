@@ -166,9 +166,10 @@ def test_general_education_digression_answers_then_returns_to_saved_intake(tmp_p
 
     assert result.status == "SIDE_ANSWER"
     assert "一般糖尿病飲食原則" in result.reply
-    assert "資料已保留" in result.reply
-    assert "過敏" in result.reply and "第" not in result.reply  # INTAKE_FIELD_QUESTIONS["allergies"] 防漂移
+    assert "看診資料我先幫你留著" in result.reply
+    assert "下一步" not in result.reply
     assert session is not None and session.pending_field == "allergies"
+    assert session.status == "PAUSED"
     assert session.intake_snapshot.known_medications == ["不清楚（待看診確認）"]
 
 

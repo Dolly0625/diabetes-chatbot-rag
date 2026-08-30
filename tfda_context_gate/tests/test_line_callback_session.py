@@ -90,6 +90,32 @@ def test_quick_reply_actions_support_unknown_skip_pause_and_resume():
     assert [item["text"] for item in resume_actions] == ["繼續整理"]
 
 
+def test_active_intake_medication_answer_never_bypasses_to_async_rag(tmp_path, monkeypatch):
+    """Regression for the real LINE phrase that was mistaken for education."""
+
+    line_app, _client, _replies = _setup(tmp_path, monkeypatch)
+    orchestrator = line_app._get_conversation_orchestrator()
+    assert orchestrator is not None
+    orchestrator.use_formal = True
+    orchestrator.handle_text(
+        event_id="intake-routing-start",
+        line_user_id="U-intake-routing",
+        text="我要準備看診",
+    )
+    orchestrator.handle_text(
+        event_id="intake-routing-self",
+        line_user_id="U-intake-routing",
+        text="為自己整理",
+    )
+
+    assert line_app._should_use_async_formal("有固定吃藥 沒有打胰島素", None) is True
+    assert line_app._should_schedule_formal_push(
+        orchestrator,
+        "U-intake-routing",
+        "有固定吃藥 沒有打胰島素",
+    ) is False
+
+
 def test_callback_to_patient_share_to_clinician_read_only_end_to_end(tmp_path, monkeypatch):
     line_app, client, _replies = _setup(tmp_path, monkeypatch)
     monkeypatch.setenv("LINE_DEMO_ALLOW_ID_HEADERS", "true")

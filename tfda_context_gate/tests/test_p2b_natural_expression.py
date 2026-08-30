@@ -92,12 +92,13 @@ def test_questions_are_focused_natural_and_safe():
     assert "什麼時候開始" in compose_intake_question("symptom_onset")
 
 
-def test_side_answer_keeps_existing_answer_and_returns_to_saved_question():
+def test_side_answer_keeps_existing_answer_without_forcing_saved_question():
     result = compose_side_answer("糖尿病飲食衛教內容。", "接著想確認過敏：有沒有藥物或食物過敏？")
     assert result.startswith("糖尿病飲食衛教內容。")
-    assert "資料已保留" in result
+    assert "看診資料我先幫你留著" in result
     assert "繼續整理" in result
-    assert "下一步是：接著想確認過敏" in result
+    assert "下一步" not in result
+    assert "過敏" not in result
     assert "第" not in result
 
 
@@ -122,11 +123,44 @@ def test_production_path_naturalizes_cross_turn_side_answer(tmp_path: Path):
     )
     session = repository.get(result.session_id)
     assert result.status == "SIDE_ANSWER"
-    assert "資料已保留" in result.reply
+    assert "看診資料我先幫你留著" in result.reply
     assert "繼續整理" in result.reply
-    assert "過敏" in result.reply
+    assert "下一步" not in result.reply
     assert "第" not in result.reply
     assert session is not None and session.pending_field == "allergies"
+    assert session.status == "PAUSED"
+
+
+def test_rephrase_followup_uses_previous_education_topic_without_intake_clarification(tmp_path: Path):
+    queries: list[str] = []
+
+    def workflow(request, **_kwargs):
+        queries.append(request["user_raw_input"])
+        return _workflow("可以，這裡是比較白話的解釋。")(request)
+
+    repository, orchestrator = _new_orchestrator(tmp_path, workflow_runner=workflow)
+    user_id = "U-p2b-rephrase"
+    orchestrator.handle_text(event_id="rephrase-1", line_user_id=user_id, text="為自己整理")
+    orchestrator.handle_text(event_id="rephrase-2", line_user_id=user_id, text="我不太知道欸")
+    first = orchestrator.handle_text(
+        event_id="rephrase-3",
+        line_user_id=user_id,
+        text="我想知道糖尿病平常飲食為什麼要注意？",
+    )
+    second = orchestrator.handle_text(
+        event_id="rephrase-4",
+        line_user_id=user_id,
+        text="可以口語化講解嗎？",
+    )
+
+    assert first.status == second.status == "SIDE_ANSWER"
+    assert "比較白話的解釋" in second.reply
+    assert "還是希望" not in second.reply
+    assert "下一步" not in second.reply
+    assert "請用一般人容易理解的白話" in queries[-1]
+    assert "糖尿病平常飲食" in queries[-1]
+    session = repository.get(second.session_id)
+    assert session is not None and session.status == "PAUSED"
 
 
 def test_identity_rotation_is_early_and_does_not_call_interpreter_or_workflow(tmp_path: Path):

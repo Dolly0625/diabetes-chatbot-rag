@@ -575,6 +575,7 @@ from tfda_context_gate.conversation import ConversationContextManager
 from tfda_context_gate.conversation.envelope import build_conversation_envelope, envelope_to_model_context
 from tfda_context_gate.conversation.interpreter import (
     ConversationInterpreter,
+    ConversationTurnInterpretation,
     DeterministicConversationInterpreter,
 )
 from tfda_context_gate.intake.schemas import PreVisitIntake
@@ -587,6 +588,31 @@ from tfda_context_gate.workflow.schemas import WorkflowResult
 from tfda_context_gate.workflow.fallbacks import fallback_response
 
 from .schemas import OrchestratorResult
+
+
+_REPHRASE_FOLLOWUP_RE = re.compile(
+    r"(?:口語|白話|簡單|容易懂|聽不懂|看不懂|再解釋|再說一次|舉例|換個方式).{0,12}(?:講|說|解釋|一點|嗎|呢|？|\?)?",
+    re.IGNORECASE,
+)
+
+
+def _resolve_rephrase_followup(session: ProductSession, text: str) -> str | None:
+    """Resolve an elliptical rewrite request to the latest education topic."""
+
+    if not _REPHRASE_FOLLOWUP_RE.search(text.strip()):
+        return None
+    try:
+        for turn in reversed(session.conversation_context.recent_turns):
+            if turn.role != "user":
+                continue
+            previous = turn.content.strip()
+            if not previous or _REPHRASE_FOLLOWUP_RE.search(previous):
+                continue
+            if _orch_should_use_formal(previous, None):
+                return f"{previous} 請用一般人容易理解的白話簡短解釋，不新增沒有依據的內容。"
+    except Exception:
+        return None
+    return None
 
 # ── P0 structured pending regexes ─────────────────────────────────────
 _HEDGE_RE = re.compile(r"有點|稍微|好像|吧$|大概")
@@ -1157,7 +1183,9 @@ class ConversationOrchestrator:
                     params = inspect.signature(api.push_message).parameters
                     has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
                     if "x_line_retry_key" in params or has_kwargs:
-                        kwargs["x_line_retry_key"] = uuid.uuid5(uuid.NAMESPACE_URL, text + line_user_id).hex
+                        from tfda_context_gate.line_orchestration.retry_key import make_line_retry_key
+
+                        kwargs["x_line_retry_key"] = make_line_retry_key(text + line_user_id)
                     guard = current_deadline_guard()
                     if guard is not None and ("_request_timeout" in params or has_kwargs):
                         remaining = guard.remaining_s()
@@ -1995,6 +2023,18 @@ class ConversationOrchestrator:
                         interpretation = _maybe_apply_mixed_backstop(text, interpretation)
                     except Exception:
                         pass
+                    # "白話一點／可以口語化嗎" refers to the latest
+                    # education topic, not the pending intake field.  Resolve
+                    # it before a generic clarification pulls the user back
+                    # into the form.
+                    _rephrase_query = _resolve_rephrase_followup(session, text)
+                    if _rephrase_query:
+                        interpretation = ConversationTurnInterpretation(
+                            intents=["EDUCATION_QUESTION"],
+                            resolved_education_query=_rephrase_query,
+                            references_resolved=True,
+                            confidence=0.99,
+                        )
                     self._last_interpretation = interpretation
                 except Exception:
                     interpretation = None
@@ -2177,7 +2217,10 @@ class ConversationOrchestrator:
                 context, _ = self.context_manager.compact(context, stage_completed=False)
                 with recorder.stage("persistence_ms"):
                     saved = self.repository.save(
-                        session.model_copy(update={"conversation_context": context}, deep=True),
+                        session.model_copy(
+                            update={"conversation_context": context, "status": "PAUSED"},
+                            deep=True,
+                        ),
                         expected_version=previous_version,
                     )
                 staged = recorder.snapshot()
