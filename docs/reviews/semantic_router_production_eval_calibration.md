@@ -1,6 +1,6 @@
 # Semantic Router 生產校準報告（calibration）
 
-> 產生時間：2026-08-30T02:55:36Z  |  資料集：`experiments/semantic_router_production/dataset.json`  |  版本：`semantic-router-production.v1`
+> 產生時間：2026-08-30T03:33:25Z  |  資料集：`/Users/dolly/Documents/code/tfda-diabetes-agent-semantic-router-production/experiments/semantic_router_production/dataset.json`  |  版本：`semantic-router-production.v1`
 > 指令：`python scripts/semantic_router_calibrate.py --dataset experiments/semantic_router_production/dataset.json --output docs/reviews/semantic_router_production_eval_calibration.md --json-output /tmp/semantic_router_calibration.json`
 
 ✅ 本次使用專案既有本機 Ollama embedding；沒有呼叫生成式 LLM。
@@ -26,8 +26,8 @@
 
 | phase | p50 | p95 | rounds |
 |---|---:|---:|---:|
-| cold first query | 170.4 ms | 170.4 ms | 1 |
-| warm query | 161.2 ms | 180.2 ms | 25 |
+| cold first query | 171.3 ms | 171.3 ms | 1 |
+| warm query | 160.0 ms | 165.0 ms | 25 |
 
 ## 3. 校準閾值擇優（calibration split，四階規則）
 
@@ -68,7 +68,7 @@ Per-class 指標（chosen hybrid 在 calibration 集）：
 
 - 推薦 policy：`hybrid`
 - `cosine_threshold=0.68, margin_threshold=0.00`
-- 建議後續以此閾值執行：`python scripts/semantic_router_evaluate.py --dataset experiments/semantic_router_production/dataset.json --cosine-threshold 0.68 --margin-threshold 0.00 --policy hybrid --split holdout`
+- 建議後續以此閾值執行：`python scripts/semantic_router_evaluate.py --dataset /Users/dolly/Documents/code/tfda-diabetes-agent-semantic-router-production/experiments/semantic_router_production/dataset.json --cosine-threshold 0.68 --margin-threshold 0.00 --policy hybrid --split holdout`
 
 ## 4. 混淆案例（calibration 集，chosen hybrid）
 
@@ -102,8 +102,8 @@ Per-class 指標（chosen hybrid 在 calibration 集）：
 ## 6. 復現指令
 
 ```bash
-python scripts/semantic_router_calibrate.py --dataset experiments/semantic_router_production/dataset.json --output docs/reviews/semantic_router_production_eval_calibration.md --json-output /tmp/semantic_router_calibration.json
-python scripts/semantic_router_evaluate.py --dataset experiments/semantic_router_production/dataset.json --split holdout --json-output /tmp/semantic_router_holdout.json --output docs/reviews/semantic_router_production_eval_holdout.md
+python scripts/semantic_router_calibrate.py --dataset /Users/dolly/Documents/code/tfda-diabetes-agent-semantic-router-production/experiments/semantic_router_production/dataset.json --output docs/reviews/semantic_router_production_eval_calibration.md --json-output /tmp/semantic_router_calibration.json
+python scripts/semantic_router_evaluate.py --dataset /Users/dolly/Documents/code/tfda-diabetes-agent-semantic-router-production/experiments/semantic_router_production/dataset.json --split holdout --json-output /tmp/semantic_router_holdout.json --output docs/reviews/semantic_router_production_eval_holdout.md
 PYTEST_CURRENT_TEST=1 python scripts/semantic_router_calibrate.py --json-output /tmp/calib_fake.json  # fake 模式複現
 ```
 

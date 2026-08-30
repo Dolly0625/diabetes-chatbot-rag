@@ -12,9 +12,11 @@ When Ollama is unavailable, falls back to DeterministicFakeEmbedder and marks BL
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure project root on sys.path when run as `python scripts/...`
@@ -33,6 +35,7 @@ from tfda_context_gate.semantic_router.eval_common import (
     top_confusions,
 )
 from tfda_context_gate.semantic_router.factory import build_semantic_router
+from tfda_context_gate.semantic_router.eval_common import evaluate_boundary, guarded_checks, label_from_scores, metrics_for
 
 
 def _resolve_production_dataset_arg(value: str | None) -> Path | None:
@@ -248,12 +251,59 @@ def render_calibration_markdown(results) -> str:
     return "\n".join(lines)
 
 
+def _compute_dataset_sha256(dataset_path: str | Path) -> str:
+    return hashlib.sha256(Path(dataset_path).read_bytes()).hexdigest()
+
+
+def _build_approval_artifact(
+    dataset_path: str | Path,
+    chosen: dict,
+    chosen_policy: str,
+    holdout_rows: list,
+    scored_holdout: list,
+    boundary_result: dict,
+    guarded: dict,
+    holdout_metrics: dict,
+) -> dict:
+    """Build 11-field approval artifact dict."""
+    # Split sc_fast into per-label for artifact booleans
+    correction_fast = sum(
+        1
+        for r, p in zip(holdout_rows, [label_from_scores(row, policy=chosen_policy, cosine_threshold=float(chosen.get("cosine_threshold", chosen.get("threshold", 0.62))), margin_threshold=float(chosen.get("margin_threshold", chosen.get("threshold", 0.10)))) for row in scored_holdout])
+        if str(r.get("label")) == "CORRECTION" and p != "UNKNOWN"
+    )
+    subject_fast = sum(
+        1
+        for r, p in zip(holdout_rows, [label_from_scores(row, policy=chosen_policy, cosine_threshold=float(chosen.get("cosine_threshold", chosen.get("threshold", 0.62))), margin_threshold=float(chosen.get("margin_threshold", chosen.get("threshold", 0.10)))) for row in scored_holdout])
+        if str(r.get("label")) == "SUBJECT_CHANGE" and p != "UNKNOWN"
+    )
+    # Prefer guarded dict counts if available (same logic); guard against mismatch
+    # Use computed above for artifact
+    cos_th = float(chosen.get("cosine_threshold", chosen.get("threshold", 0.62)))
+    mar_th = float(chosen.get("margin_threshold", chosen.get("threshold", 0.10)))
+    return {
+        "schema_version": "v1",
+        "dataset_sha256": _compute_dataset_sha256(dataset_path),
+        "calibration_timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "cosine_threshold": round(cos_th, 4),
+        "margin_threshold": round(mar_th, 4),
+        "holdout_size": len(holdout_rows),
+        "false_fast": int(guarded.get("false_fast", 0)),
+        "mixed_recall": round(float(holdout_metrics.get("mixed_recall", 0.0)), 6),
+        "correction_boundary_pass": bool(correction_fast == 0),
+        "subject_boundary_pass": bool(subject_fast == 0),
+        "guarded_pass": bool(guarded.get("guarded_pass", False)),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=str, default=None, help="path to dataset.json (default: experiments/semantic_router_production/dataset.json)")
     parser.add_argument("--output", type=Path, default=None, help="write Markdown report")
     parser.add_argument("--json-output", type=Path, default=None, help="write machine-readable metrics")
     parser.add_argument("--policy", type=str, default="hybrid", choices=["cosine", "margin", "hybrid", "all"], help="which policy to report as chosen (default hybrid)")
+    parser.add_argument("--approval-output", type=Path, default=None, help="write approval artifact JSON (default: tfda_context_gate/semantic_router/approval.json)")
+    parser.add_argument("--no-approval", action="store_true", help="skip writing approval artifact")
     args = parser.parse_args()
 
     dataset_path = _resolve_production_dataset_arg(args.dataset)
@@ -330,7 +380,6 @@ def main() -> int:
 
     if args.json_output:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        # dump full results (sweeps may be large)
         args.json_output.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[calibrate] JSON written to {args.json_output}", file=sys.stderr)
 
@@ -338,6 +387,36 @@ def main() -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(render_calibration_markdown(results), encoding="utf-8")
         print(f"[calibrate] Markdown written to {args.output}", file=sys.stderr)
+
+    if not args.no_approval:
+        try:
+            scored_holdout = score_rows(router, holdout_rows) if holdout_rows else []
+            if scored_holdout and holdout_rows:
+                holdout_boundary = [r for r in boundary if str(r.get("split", "")) == "holdout"] if any("split" in r for r in boundary) else list(boundary)
+                boundary_result = evaluate_boundary(holdout_boundary if holdout_boundary else boundary)
+                preds_holdout = [
+                    label_from_scores(row, policy=chosen_policy, cosine_threshold=float(chosen.get("cosine_threshold", chosen.get("threshold", 0.62))), margin_threshold=float(chosen.get("margin_threshold", chosen.get("threshold", 0.10))))
+                    for row in scored_holdout
+                ]
+                holdout_metrics = metrics_for(holdout_rows, preds_holdout)
+                guarded = guarded_checks(holdout_rows, preds_holdout, boundary_result)
+                artifact = _build_approval_artifact(
+                    dataset["_path"], chosen, chosen_policy, holdout_rows, scored_holdout, boundary_result, guarded, holdout_metrics
+                )
+                out_paths: list[Path] = []
+                if args.approval_output:
+                    out_paths.append(Path(args.approval_output))
+                else:
+                    out_paths.append(Path(__file__).resolve().parents[1] / "tfda_context_gate" / "semantic_router" / "approval.json")
+                    out_paths.append(Path(__file__).resolve().parents[1] / "experiments" / "semantic_router_production" / "approval.json")
+                for p in out_paths:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+                    print(f"[calibrate] approval artifact written to {p} guarded_pass={artifact['guarded_pass']}", file=sys.stderr)
+            else:
+                print("[calibrate] skip approval artifact: no holdout rows", file=sys.stderr)
+        except Exception as _e:
+            print(f"[calibrate] approval artifact write failed: {_e}", file=sys.stderr)
 
     # Exit code: 0 unless leakage
     if leakage["has_leak"]:

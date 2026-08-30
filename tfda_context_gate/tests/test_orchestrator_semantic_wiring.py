@@ -128,7 +128,33 @@ def test_shadow_does_not_change_output_and_version(tmp_path, monkeypatch):
 
 # ── guarded 只有核准類型 early exit（spy interpreter：PURE_EDUCATION 在 guarded 且高信心時 interpreter called==0；mixed 仍 called==1）──
 
+def _write_synthetic_pass_artifact(tmp_path, monkeypatch):
+    from tfda_context_gate.semantic_router.approval import compute_dataset_sha256
+    import json as _json
+    from datetime import datetime, timezone
+    sha = compute_dataset_sha256()
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "schema_version": "v1",
+        "dataset_sha256": sha,
+        "calibration_timestamp": now,
+        "cosine_threshold": 0.62,
+        "margin_threshold": 0.10,
+        "holdout_size": 34,
+        "false_fast": 0,
+        "mixed_recall": 0.75,
+        "correction_boundary_pass": True,
+        "subject_boundary_pass": True,
+        "guarded_pass": True,
+    }
+    p = tmp_path / f"synthetic_approval_{os.urandom(4).hex()}.json"
+    p.write_text(_json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("SEMANTIC_ROUTER_APPROVAL_PATH", str(p))
+    return p
+
+
 def test_guarded_only_approved_early_exit(tmp_path, monkeypatch):
+    p = _write_synthetic_pass_artifact(tmp_path, monkeypatch)
     monkeypatch.setenv("SEMANTIC_ROUTER_MODE", "guarded")
     class HighEdu:
         def route(self, t):
@@ -147,16 +173,17 @@ def test_guarded_only_approved_early_exit(tmp_path, monkeypatch):
     _activate(orch_edu, user_id="U-guarded-edu")
     counter_edu, _ = _spy_interpreter(orch_edu)
     res_edu = orch_edu.handle_text(event_id="evt-guarded-edu", line_user_id="U-guarded-edu", text="糖尿病一天可以吃幾份水果？")
-    assert counter_edu["called"] == 0, "PURE_EDUCATION 在 guarded 且高信心時 interpreter called==0"
+    assert counter_edu["called"] == 0, "PURE_EDUCATION 在 guarded 且高信心且有合法 PASS artifact 時 interpreter called==0"
     assert res_edu.metadata is not None and res_edu.metadata.get("semantic_fast_path") is True
 
     orch_mix, _, db_mix = _make_orch(tmp_path, mode="guarded", router_mock=MixedHigh(), use_formal=False)
     _activate(orch_mix, user_id="U-guarded-mix")
     counter_mix, _ = _spy_interpreter(orch_mix)
     _ = orch_mix.handle_text(event_id="evt-guarded-mix", line_user_id="U-guarded-mix", text="我最近常口渴，糖尿病一天可以吃幾份水果？")
-    assert counter_mix["called"] == 1, "mixed 仍 called==1（guarded 阻擋 MIXED）"
+    assert counter_mix["called"] == 1, "mixed 仍 called==1（guarded 阻擋 MIXED 即使有 PASS artifact）"
     Path(db_edu).unlink(missing_ok=True)
     Path(db_mix).unlink(missing_ok=True)
+    Path(p).unlink(missing_ok=True)
 
 
 # ── 正式 factory construction 測試（build_semantic_router() 不在 import 時打網路，且 PYTEST_CURRENT_TEST=>fake）──

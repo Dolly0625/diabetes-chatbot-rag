@@ -55,7 +55,7 @@ _SUBJECT_AMBIGUOUS_RE = re.compile(
 _CORRECTION_LIKE_RE = re.compile(r"不是|說錯了|更正|改成|其實|喔不對|不對|那邊要改|前面.*要改", re.IGNORECASE)
 
 
-def get_route_mode() -> str:
+def _get_requested_route_mode() -> str:
     try:
         from tfda_context_gate.run_config import env_value as _ev
 
@@ -72,8 +72,57 @@ def get_route_mode() -> str:
     return "off"
 
 
+def get_route_mode() -> str:
+    requested = _get_requested_route_mode()
+    if requested != "guarded":
+        return requested
+    try:
+        from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff
+
+        effective, reason, _ = _eff(requested)
+        if effective != "guarded" and reason:
+            logger.info("guarded downgraded to shadow reason=%s", reason)
+        return effective
+    except Exception as _e:
+        logger.warning("guarded approval check failed, downgrading to shadow: %s", _e)
+        return "shadow"
+
+
 def should_use_semantic_router() -> bool:
     return get_route_mode() != "off"
+
+
+def _resolve_guarded_downgrade() -> tuple[str, str | None]:
+    requested = _get_requested_route_mode()
+    effective = get_route_mode()
+    fallback_reason: str | None = None
+    if requested == "guarded" and effective != "guarded":
+        try:
+            from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff2
+
+            _, reason, _ = _eff2(requested)
+            fallback_reason = reason or "GUARDED_DOWNGRADED_UNKNOWN"
+        except Exception:
+            fallback_reason = "GUARDED_DOWNGRADED_UNKNOWN"
+    return effective, fallback_reason
+
+
+def _record_guarded_downgrade(session_id: str, fallback_reason: str) -> None:
+    try:
+        from tfda_context_gate.e_observability.tracer import TraceRecorder
+
+        tr = TraceRecorder(request_id=f"{session_id}-guarded-downgrade", declared_role=None, original_query=None)
+        tr.record(
+            "SEMANTIC_ROUTER",
+            "GUARDED_DOWNGRADE",
+            "COMPLETED",
+            fallback_reason=fallback_reason,
+            requested_mode="guarded",
+            effective_mode="shadow",
+        )
+        tr.close(status="COMPLETED")
+    except Exception:
+        pass
 
 
 def _is_subject_ambiguous(text: str) -> bool:
@@ -828,6 +877,7 @@ class ConversationOrchestrator:
             self._semantic_router_init_attempted = True
         self._last_semantic_observation: Any | None = None
         self._last_semantic_mode: str = get_route_mode() if hasattr(self, "_semantic_router_config") and self._semantic_router_config else "off"
+        self._last_guarded_fallback_reason: str | None = None
 
     def _get_semantic_router(self) -> Any | None:
         if self._semantic_router_init_attempted:
@@ -1583,12 +1633,42 @@ class ConversationOrchestrator:
                 if latest is None:
                     raise
                 result = self._process_text(latest, clean_text)
+            # Attach guarded downgrade fallback_reason into metadata (non-PII)
+            try:
+                fb = getattr(self, "_last_guarded_fallback_reason", None)
+                if fb:
+                    meta = dict(getattr(result, "metadata", None) or {})
+                    if "fallback_reason" not in meta:
+                        meta["fallback_reason"] = fb
+                        # also surface as top-level fallback_reason if not set
+                        try:
+                            result = result.model_copy(update={"metadata": meta})
+                        except Exception:
+                            try:
+                                result.metadata = meta  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             if result.semantic_route is None:
                 try:
                     obs = getattr(self, "_last_semantic_observation", None)
                     mode = getattr(self, "_last_semantic_mode", "off")
                     if obs is not None and mode != "off":
                         result = _enrich_orchestrator_result(result, obs, mode)
+                        # re-attach fallback after enrichment if it was overwritten
+                        try:
+                            fb2 = getattr(self, "_last_guarded_fallback_reason", None)
+                            if fb2:
+                                meta2 = dict(getattr(result, "metadata", None) or {})
+                                if "fallback_reason" not in meta2:
+                                    meta2["fallback_reason"] = fb2
+                                    try:
+                                        result = result.model_copy(update={"metadata": meta2})
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             result = result.model_copy(update={"event_id": event_id})
@@ -1762,7 +1842,10 @@ class ConversationOrchestrator:
 
         # 8: L2 semantic router (after L0 red_flag/auth/product/fast_path, before envelope)
         _semantic_observation: Any | None = None
-        _semantic_mode = get_route_mode()
+        _semantic_mode, _guarded_fallback_reason = _resolve_guarded_downgrade()
+        self._last_guarded_fallback_reason = _guarded_fallback_reason
+        if _guarded_fallback_reason:
+            _record_guarded_downgrade(session.session_id, _guarded_fallback_reason)
         _semantic_fast_eligible = False
         _semantic_fast_route: str | None = None
         if _semantic_mode != "off":

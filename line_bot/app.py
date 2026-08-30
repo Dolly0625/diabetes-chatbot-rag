@@ -73,7 +73,7 @@ _app_semantic_router_config: Any | None = None
 _app_semantic_router_init_attempted = False
 
 
-def _get_app_route_mode() -> str:
+def _get_app_requested_route_mode() -> str:
     try:
         from tfda_context_gate.run_config import env_value as _ev
 
@@ -88,6 +88,54 @@ def _get_app_route_mode() -> str:
     if cleaned in ("off", "shadow", "guarded"):
         return cleaned
     return "off"
+
+
+def _get_app_route_mode() -> str:
+    requested = _get_app_requested_route_mode()
+    if requested != "guarded":
+        return requested
+    try:
+        from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff
+
+        effective, reason, _ = _eff(requested)
+        if effective != "guarded" and reason:
+            logger.info("guarded downgraded to shadow reason=%s", reason)
+        return effective
+    except Exception as _e:
+        logger.warning("guarded approval check failed, downgrading to shadow: %s", _e)
+        return "shadow"
+
+
+def _app_guarded_fallback_reason() -> str | None:
+    requested = _get_app_requested_route_mode()
+    effective = _get_app_route_mode()
+    if requested == "guarded" and effective != "guarded":
+        try:
+            from tfda_context_gate.semantic_router.approval import get_effective_route_mode as _eff2
+
+            _, reason, _ = _eff2(requested)
+            return reason or "GUARDED_DOWNGRADED_UNKNOWN"
+        except Exception:
+            return "GUARDED_DOWNGRADED_UNKNOWN"
+    return None
+
+
+def _app_record_guarded_downgrade(fallback_reason: str) -> None:
+    try:
+        from tfda_context_gate.e_observability.tracer import TraceRecorder
+
+        tr = TraceRecorder(request_id="app-guarded-downgrade", declared_role=None, original_query=None)
+        tr.record(
+            "SEMANTIC_ROUTER",
+            "GUARDED_DOWNGRADE",
+            "COMPLETED",
+            fallback_reason=fallback_reason,
+            requested_mode="guarded",
+            effective_mode="shadow",
+        )
+        tr.close(status="COMPLETED")
+    except Exception:
+        pass
 
 
 def _app_should_use_semantic_router() -> bool:
@@ -1571,6 +1619,12 @@ async def callback(
 
             if msg_type == "text":
                 text = message.get("text", "") or ""
+                try:
+                    _downgrade = _app_guarded_fallback_reason()
+                    if _downgrade:
+                        _app_record_guarded_downgrade(_downgrade)
+                except Exception:
+                    pass
                 try:
                     _app_obs = _app_semantic_predict_with_timeout(text)
                     if _app_obs is not None:
