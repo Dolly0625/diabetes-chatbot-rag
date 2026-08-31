@@ -230,3 +230,140 @@ def test_line_trigger_creates_token():
     flex = app_mod._build_previsit_flex_message(f"https://example.com/patient/previsit-room?token={raw}")
     assert flex["type"] == "flex"
     assert "開啟看診前對談室" in str(flex)
+
+
+def _parse_sse_events(text: str) -> list[dict]:
+    """Parse SSE wire 'event: X\\ndata: JSON' into list of (event, payload)."""
+    import json as _j
+    events: list[dict] = []
+    # SSE blocks are separated by blank line
+    for block in text.strip().split("\n\n"):
+        if not block.strip():
+            continue
+        evt = None
+        data = None
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                evt = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data = line.split(":", 1)[1].strip()
+        if data is not None:
+            try:
+                payload = _j.loads(data)
+            except Exception:
+                payload = {"_raw": data}
+            payload["_event"] = evt
+            events.append(payload)
+    return events
+
+
+def test_stream_success_final_only_not_sliced():
+    client, app_mod, tmp = _make_client()
+    raw, sess = _create_session_and_token(client, app_mod, "streamA")
+    ver = sess.version
+    r = client.post(
+        "/api/patient/previsit-room/chat/stream",
+        headers={"X-Intake-Token": raw},
+        json={"message": "沒有過敏", "version": ver, "client_message_id": "s-1"},
+    )
+    assert r.status_code == 200
+    assert r.headers.get("content-type", "").startswith("text/event-stream")
+    events = _parse_sse_events(r.text)
+    assert len(events) == 3
+    assert events[0].get("type") == "phase"
+    assert events[0].get("stream_mode") == "final_only"
+    assert events[0].get("_event") == "phase"
+    assert events[1].get("type") == "delta"
+    assert events[1].get("stream_mode") == "final_only"
+    assert events[1].get("_event") == "delta"
+    # only one delta
+    assert sum(1 for e in events if e.get("type") == "delta") == 1
+    assert events[2].get("type") == "complete"
+    assert events[2].get("stream_mode") == "final_only"
+    assert events[2].get("_event") == "complete"
+    # delta content must equal complete reply — no slicing / fake verbatim
+    assert events[1].get("content") == events[2].get("reply")
+    assert "reply" in events[2] and "version" in events[2]
+
+
+def test_stream_red_flag():
+    client, app_mod, tmp = _make_client()
+    raw, sess = _create_session_and_token(client, app_mod, "streamRed")
+    ver = sess.version
+    before = sess.intake_snapshot.model_dump(mode="json")
+    r = client.post(
+        "/api/patient/previsit-room/chat/stream",
+        headers={"X-Intake-Token": raw},
+        json={"message": "我胸痛胸悶喘不過氣", "version": ver, "client_message_id": "s-red"},
+    )
+    assert r.status_code == 200
+    events = _parse_sse_events(r.text)
+    complete = [e for e in events if e.get("type") == "complete"][0]
+    assert complete.get("status") == "FALLBACK"
+    assert "119" in complete.get("reply", "")
+    assert complete.get("stream_mode") == "final_only"
+    assert complete.get("intake_snapshot") == before or complete["intake_snapshot"]["symptom_description"] == before["symptom_description"]
+
+
+def test_stream_education_not_advancing():
+    client, app_mod, tmp = _make_client()
+    raw, sess = _create_session_and_token(client, app_mod, "streamEdu")
+    ver = sess.version
+    stage = sess.intake_stage
+    r = client.post(
+        "/api/patient/previsit-room/chat/stream",
+        headers={"X-Intake-Token": raw},
+        json={"message": "請說明糖尿病的一般飲食原則。", "version": ver, "client_message_id": "s-edu"},
+    )
+    assert r.status_code == 200
+    events = _parse_sse_events(r.text)
+    complete = [e for e in events if e.get("type") == "complete"][0]
+    assert "衛教" in complete.get("reply", "") or "回 LINE" in complete.get("reply", "")
+    assert complete.get("intake_stage") == stage
+    assert complete.get("version") == ver
+    assert all(e.get("stream_mode") == "final_only" for e in events)
+
+
+def test_stream_replay_idempotent():
+    client, app_mod, tmp = _make_client()
+    raw, sess = _create_session_and_token(client, app_mod, "streamReplay")
+    ver = sess.version
+    payload = {"message": "沒有過敏", "version": ver, "client_message_id": "s-replay"}
+    r1 = client.post("/api/patient/previsit-room/chat/stream", headers={"X-Intake-Token": raw}, json=payload)
+    assert r1.status_code == 200
+    e1 = _parse_sse_events(r1.text)
+    c1 = [e for e in e1 if e.get("type") == "complete"][0]
+    # second with stale version but same client_message_id should replay same stream (200)
+    payload2 = {"message": "沒有過敏", "version": 999, "client_message_id": "s-replay"}
+    r2 = client.post("/api/patient/previsit-room/chat/stream", headers={"X-Intake-Token": raw}, json=payload2)
+    assert r2.status_code == 200
+    e2 = _parse_sse_events(r2.text)
+    c2 = [e for e in e2 if e.get("type") == "complete"][0]
+    assert c1.get("reply") == c2.get("reply")
+    assert c1.get("version") == c2.get("version")
+    assert e1[1].get("content") == e2[1].get("content")
+
+
+def test_stream_409_and_submitted_locked():
+    client, app_mod, tmp = _make_client()
+    raw, sess = _create_session_and_token(client, app_mod, "stream409")
+    # stale version → 409 (not SSE)
+    r = client.post(
+        "/api/patient/previsit-room/chat/stream",
+        headers={"X-Intake-Token": raw},
+        json={"message": "我有吃藥", "version": 999, "client_message_id": "s-409a"},
+    )
+    assert r.status_code == 409
+    # SUBMITTED locked → 409
+    orch = app_mod._get_conversation_orchestrator()
+    cur = orch.repository.get(sess.session_id)
+    cur2 = cur.model_copy(update={"status": "SUBMITTED", "intake_stage": "submitted"}, deep=True)
+    orch.repository.save(cur2, expected_version=cur.version)
+    updated = orch.repository.get(sess.session_id)
+    r2 = client.post(
+        "/api/patient/previsit-room/chat/stream",
+        headers={"X-Intake-Token": raw},
+        json={"message": "繼續整理", "version": updated.version, "client_message_id": "s-409b"},
+    )
+    assert r2.status_code == 409
+    assert "SUBMITTED" in r2.json().get("detail", "")

@@ -1612,32 +1612,20 @@ class PrevisitChatRequest(BaseModel):
     client_message_id: str | None = Field(default=None, max_length=128)
 
 
-@app.post("/api/patient/previsit-room/chat")
-def post_previsit_chat(
-    body: PrevisitChatRequest,
-    request: Request,
-    authorization: str = Header(default="", alias="Authorization"),
-    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
-    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
-    intake_token: str = "",
-) -> JSONResponse:
-    token_q = ""
-    try:
-        token_q = request.query_params.get("token") or request.query_params.get("intake_token") or ""
-    except Exception:
-        token_q = ""
-    token = x_intake_token or intake_token or token_q
-    sess = _get_previsit_session(authorization, x_line_user_id, token)
-    orch = _get_conversation_orchestrator()
-    if orch is None:
-        raise HTTPException(status_code=503, detail="ProductSession is not configured")
-    # idempotency before version check
+def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any) -> dict[str, Any]:
+    """Shared core for chat and chat/stream: all safety checks, no HTTP layer.
+
+    Reuses exact validation order of the original post_previsit_chat:
+    idempotency(replay) → 409 SUBMITTED → 409 version → 422 empty → RED_FLAG → education → normal intake.
+    Caller is responsible for auth/session retrieval and 503 orch check.
+    """
+    # idempotency before version check — cached reply is replay verbatim
     if body.client_message_id:
         key = (sess.session_id, body.client_message_id)
         with _web_chat_lock:
             cached = _web_chat_dedup.get(key)
             if cached is not None:
-                return JSONResponse(content=cached)
+                return cached
     if sess.status == "SUBMITTED":
         raise HTTPException(status_code=409, detail="Cannot modify SUBMITTED session")
     if body.version != sess.version:
@@ -1663,19 +1651,17 @@ def post_previsit_chat(
             if body.client_message_id:
                 with _web_chat_lock:
                     _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
-            return JSONResponse(content=resp)
+            return resp
     except HTTPException:
         raise
     except Exception:
         pass
-    # general education pollution prevention in web chat path
     if _is_general_education_in_previsit(text):
         resp = {"reply": "這個問題比較偏一般衛教，建議回 LINE 聊天問衛教小幫手，我這裡先幫你保留看診前整理的進度。你可以繼續整理看診資料。", "status": sess.status, "intake_stage": sess.intake_stage, "version": sess.version, "intake_snapshot": sess.intake_snapshot.model_dump(mode="json")}
         if body.client_message_id:
             with _web_chat_lock:
                 _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
-        return JSONResponse(content=resp)
-    # Normal intake flow via orchestrator
+        return resp
     try:
         result = orch._process_text(sess, text)
     except Exception as exc:
@@ -1692,7 +1678,77 @@ def post_previsit_chat(
     if body.client_message_id:
         with _web_chat_lock:
             _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+    return resp
+
+
+@app.post("/api/patient/previsit-room/chat")
+def post_previsit_chat(
+    body: PrevisitChatRequest,
+    request: Request,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> JSONResponse:
+    token_q = ""
+    try:
+        token_q = request.query_params.get("token") or request.query_params.get("intake_token") or ""
+    except Exception:
+        token_q = ""
+    token = x_intake_token or intake_token or token_q
+    sess = _get_previsit_session(authorization, x_line_user_id, token)
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+    resp = _execute_previsit_chat_core(sess, body, orch)
     return JSONResponse(content=resp)
+
+
+@app.post("/api/patient/previsit-room/chat/stream")
+def post_previsit_chat_stream(
+    body: PrevisitChatRequest,
+    request: Request,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> StreamingResponse:
+    """Minimal SSE variant: reuses all safety/processing of post_previsit_chat, streams final_only events.
+
+    Sequence: phase → delta (single, full reply) → complete.  NOT a token stream: no character slicing,
+    no fake verbatim; each event JSON contains stream_mode:"final_only".
+    """
+    import json as _json
+
+    token_q = ""
+    try:
+        token_q = request.query_params.get("token") or request.query_params.get("intake_token") or ""
+    except Exception:
+        token_q = ""
+    token = x_intake_token or intake_token or token_q
+    sess = _get_previsit_session(authorization, x_line_user_id, token)
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+    # All validation + processing reused; on 409/422 etc this raises before streaming (no SSE body).
+    resp = _execute_previsit_chat_core(sess, body, orch)
+
+    def _sse_event(payload: dict[str, Any], *, event: str) -> str:
+        # Use same SSE wire format as callback/stream; payload already contains stream_mode
+        data = _json.dumps(payload, ensure_ascii=False)
+        # event + data + blank line
+        return f"event: {event}\ndata: {data}\n\n"
+
+    def _gen() -> Iterator[str]:
+        # Phase event (processing start)
+        yield _sse_event({"type": "phase", "phase": "processing", "stream_mode": "final_only"}, event="phase")
+        # Single delta — full reply, not sliced
+        yield _sse_event({"type": "delta", "content": resp.get("reply", ""), "stream_mode": "final_only"}, event="delta")
+        # Complete — full final result with final_only marker
+        complete_payload: dict[str, Any] = {**resp, "type": "complete", "stream_mode": "final_only"}
+        yield _sse_event(complete_payload, event="complete")
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 _PATIENT_REVIEW_FIELDS: tuple[tuple[str, str], ...] = (
