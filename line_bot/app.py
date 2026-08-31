@@ -1496,20 +1496,11 @@ def _portal_available() -> bool:
 
 
 def _build_previsit_flex_message(previsit_url: str) -> dict:
-    return {
-        "type": "flex",
-        "altText": "看診前對談室 — 開啟專用對談",
-        "contents": {
-            "type": "bubble",
-            "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "看診前對談室", "weight": "bold", "size": "lg", "color": "#17352f"}]},
-            "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [
-                {"type": "text", "text": "這是專用看診前 AI 對談室。一般衛教請回 LINE 詢問，點下方按鈕開啟網頁對談。", "wrap": True, "size": "sm", "color": "#5f746d"},
-            ]},
-            "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
-                {"type": "button", "style": "primary", "color": "#087f67", "action": {"type": "uri", "label": "開啟看診前對談室", "uri": previsit_url}},
-            ]},
-        },
-    }
+    # UI payload has one source of truth; this transport layer only supplies the
+    # already-authorized short-lived URL.
+    from line_bot.ui import build_previsit_room_flex_message
+
+    return build_previsit_room_flex_message(room_url=previsit_url)
 
 
 # Web chat idempotency (dedup by client_message_id, in-memory per process)
