@@ -1,5 +1,18 @@
 """LINE Rich Menu／Quick Reply 的穩定產品動作，不含醫療決策。"""
 
+from line_bot.intake_entry import (
+    INTAKE_ENTRY_EXPLANATION,
+    RESUME_CHOICE_ACTIONS,
+    RESUME_CONTRACT_TEXT_CANCEL,
+    RESUME_CONTRACT_TEXT_RESUME,
+    RESUME_CONTRACT_TEXT_RESTART,
+    build_intake_entry_message,
+    build_resume_choice_actions,
+)
+
+INTAKE_ENTRY_ACTIONS = RESUME_CHOICE_ACTIONS
+
+
 PATIENT_FAMILY_ACTIONS = [
     {"label": "健康諮詢", "text": "開始健康諮詢"},
     {"label": "準備看診", "text": "我要準備看診"},

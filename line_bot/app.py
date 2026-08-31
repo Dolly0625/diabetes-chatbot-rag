@@ -1238,6 +1238,26 @@ def _enrich_reply_with_stage_progress(reply: str, status: str, intake: Any | Non
     return reply
 
 
+def _resolve_resume_quick_actions(product_result: Any) -> list[dict[str, str]] | None:
+    try:
+        from line_bot.intake_entry import get_resume_actions_for_result
+
+        return get_resume_actions_for_result(product_result)
+    except Exception:
+        return None
+
+
+def _maybe_enrich_entry_reply(reply: str, original_text: str) -> str:
+    try:
+        from line_bot.intake_entry import build_entry_enriched_reply, is_entry_trigger
+
+        if is_entry_trigger(original_text):
+            return build_entry_enriched_reply(reply, is_entry=True)
+    except Exception:
+        pass
+    return reply
+
+
 def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, str]] | None:
     from line_bot.ui import PROXY_SOURCE_ACTIONS, REVIEW_ACTIONS, SUBJECT_SELECTION_ACTIONS
     if status == "NEEDS_ROLE_SELECTION":
@@ -1750,7 +1770,12 @@ async def callback(
                                     reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
                                 except Exception:
                                     pass
-                                quick_actions = _quick_actions_for_status(product_result.status, reply)
+                                resume_actions = _resolve_resume_quick_actions(product_result)
+                                if resume_actions is not None:
+                                    quick_actions = resume_actions
+                                else:
+                                    reply = _maybe_enrich_entry_reply(reply, text)
+                                    quick_actions = _quick_actions_for_status(product_result.status, reply)
                                 _send(reply_token, reply, quick_actions=quick_actions)
                                 continue
                         except Exception:
@@ -1837,7 +1862,12 @@ async def callback(
                         reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
                     except Exception:
                         pass
-                    quick_actions = _quick_actions_for_status(product_result.status, reply)
+                    resume_actions = _resolve_resume_quick_actions(product_result)
+                    if resume_actions is not None:
+                        quick_actions = resume_actions
+                    else:
+                        reply = _maybe_enrich_entry_reply(reply, text)
+                        quick_actions = _quick_actions_for_status(product_result.status, reply)
                     _send(reply_token, reply, quick_actions=quick_actions)
                     _mark_text_dedup(str(user_id), text)
                 else:
@@ -1901,7 +1931,11 @@ async def callback(
                         reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
                     except Exception:
                         pass
-                    quick_actions = _quick_actions_for_status(product_result.status, reply)
+                    resume_actions = _resolve_resume_quick_actions(product_result)
+                    if resume_actions is not None:
+                        quick_actions = resume_actions
+                    else:
+                        quick_actions = _quick_actions_for_status(product_result.status, reply)
                 else:
                     # P0.5 fail-closed: no ProductSession → image/OCR must not start intake
                     reply = "目前無法安全開始整理，請先完成身分與授權設定後再試。"

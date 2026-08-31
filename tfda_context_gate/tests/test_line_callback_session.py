@@ -37,10 +37,11 @@ def test_callback_uses_persistent_orchestrator_and_replays_duplicate(tmp_path, m
     duplicate = client.post("/callback", json=_text_event("evt-1", "不同內容"))
 
     assert first.status_code == duplicate.status_code == 200
-    assert replies == [
-        "我是 AI 看診前整理助理，只協助衛教與資料整理，不做診斷，也不是緊急醫療服務。Demo session 最多保存 7 天；確認前不會分享給醫護。這份資料是為誰整理？請選擇「為自己整理」或「代家人整理」。",
-        "我是 AI 看診前整理助理，只協助衛教與資料整理，不做診斷，也不是緊急醫療服務。Demo session 最多保存 7 天；確認前不會分享給醫護。這份資料是為誰整理？請選擇「為自己整理」或「代家人整理」。",
-    ]
+    assert len(replies) == 2
+    assert "將為你開啟「看診前整理」專用流程" in replies[0]
+    assert "不會悄悄沿用舊資料" in replies[0]
+    assert "為自己整理" in replies[0] and "代家人整理" in replies[0]
+    assert "為自己整理" in replies[1] and "代家人整理" in replies[1]
     session = line_app._get_conversation_orchestrator().session_for_user("U-callback")
     assert session is not None and len(session.conversation_context.recent_turns) == 2
 
