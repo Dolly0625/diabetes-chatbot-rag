@@ -122,7 +122,7 @@ body{background:#f4f8f6}
   const liveStatus = document.getElementById("liveStatus");
   const pauseBtn = document.getElementById("pauseBtn");
   const clearBtn = document.getElementById("clearBtn");
-  const state = { version: 0, sessionId: "", hasDraft: false, draftLoaded: false, sending: false, pendingId: "", lastDraft: null, redFlag: false };
+  const state = { version: 0, sessionId: "", hasDraft: false, draftLoaded: false, sending: false, pendingId: "", lastDraft: null, redFlag: false, abortController: null, sseCompleted: false, pendingAiBubbleRef: null };
   const fieldLabels = { known_medications:"目前用藥", allergies:"過敏史", chronic_conditions:"慢性病史", family_history:"家族史", symptom_onset:"症狀開始時間", symptom_description:"主要症狀", symptom_severity:"症狀程度", questions_for_doctor:"想問醫師的問題" };
   const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const announce = (msg) => { liveStatus.textContent = msg; };
@@ -156,13 +156,16 @@ body{background:#f4f8f6}
     errorBanner.textContent = "";
     errorBanner.classList.add("hidden");
   };
+  const isNearBottom = () => chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 80;
+  const smartScroll = () => { if (isNearBottom()) chat.scrollTop = chat.scrollHeight; };
   const addBubble = (role, text, extra) => {
     if (!text) return null;
     const div = document.createElement("div");
     div.className = "bubble " + (role === "user" ? "user" : "ai") + (extra ? " " + extra : "");
     div.textContent = text;
     chat.appendChild(div);
-    chat.scrollTop = chat.scrollHeight;
+    smartScroll();
+    if (isNearBottom()) chat.scrollTop = chat.scrollHeight;
     return div;
   };
   const renderQuick = (list) => {
@@ -234,7 +237,7 @@ body{background:#f4f8f6}
       addBubble("ai", "請告訴我哪一項要修改，例如：我剛才說錯了，是對盤尼西林過敏");
       input.focus();
     });
-    chat.scrollTop = chat.scrollHeight;
+    smartScroll();
   };
   const fetchJson = async (url, opts) => {
     let res;
@@ -353,17 +356,12 @@ body{background:#f4f8f6}
       }));
     }
   };
-  const doChat = async (message, clientId, isConfirm) => {
-    if (state.sending) return;
-    state.sending = true;
-    send.disabled = true;
-    clearError();
-    const userBubble = addBubble("user", message);
-    const pendingAi = addBubble("ai", "整理中…", "sending");
+  const doChatFallback = async (message, clientId, isConfirm, userBubble) => {
+    if (state.sseCompleted) return;
     try {
       const payload = { message: message, version: state.version, client_message_id: clientId };
       const data = await fetchJson("/api/patient/previsit-room/chat", { method: "POST", headers: authHeaders(), body: JSON.stringify(payload) });
-      if (pendingAi) pendingAi.remove();
+      if (state.sseCompleted) return;
       state.version = typeof data.version === "number" ? data.version : state.version;
       if (data.session_id) state.sessionId = data.session_id;
       const isRed = !!(data.red_flag || (data.system_risk_classification && data.system_risk_classification.level === "RED_FLAG") || (data.reply && (data.reply.includes("119") || data.reply.includes("急診") || data.reply.includes("RED_FLAG"))));
@@ -383,7 +381,6 @@ body{background:#f4f8f6}
         addBubble("ai", "看診前資料已整理完成，目前只有你可以查看，尚未自動分享給醫護。");
       }
     } catch (e) {
-      if (pendingAi) pendingAi.remove();
       if (e.status === 409) {
         showError(e.message);
         try {
@@ -404,13 +401,220 @@ body{background:#f4f8f6}
         userBubble.style.opacity = "0.7";
         userBubble.title = "未送達，資料未儲存";
       }
+      throw e;
+    }
+  };
+  const doChat = async (message, clientId, isConfirm) => {
+    if (state.sending) return;
+    state.sending = true;
+    send.disabled = true;
+    clearError();
+    state.sseCompleted = false;
+    const userBubble = addBubble("user", message);
+    const pendingAi = document.createElement("div");
+    pendingAi.className = "bubble ai sending";
+    pendingAi.textContent = "正在理解…";
+    chat.appendChild(pendingAi);
+    state.pendingAiBubbleRef = pendingAi;
+    smartScroll();
+    state.abortController = new AbortController();
+    const payload = { message: message, version: state.version, client_message_id: clientId };
+    let streamFailed = false;
+    let shouldFallback = false;
+    try {
+      const canStream = typeof ReadableStream !== "undefined";
+      if (!canStream) {
+        shouldFallback = true;
+        throw new Error("fallback_no_stream");
+      }
+      let res;
+      try {
+        res = await fetch(buildUrl("/api/patient/previsit-room/chat/stream"), { method: "POST", headers: Object.assign({}, authHeaders(), { "Accept": "text/event-stream" }), body: JSON.stringify(payload), signal: state.abortController.signal });
+      } catch (err) {
+        if (err && err.name === "AbortError") throw err;
+        shouldFallback = true;
+        throw err;
+      }
+      if (!res.ok) {
+        if ([404,405,501].includes(res.status)) {
+          shouldFallback = true;
+          if (pendingAi.parentNode) pendingAi.remove();
+          state.pendingAiBubbleRef = null;
+          await doChatFallback(message, clientId, isConfirm, userBubble);
+          return;
+        }
+        let data = {};
+        try { data = await res.json(); } catch (_) { data = {}; }
+        const msg = humanError(res.status, data.detail || data.message || "");
+        const err = new Error(msg);
+        err.status = res.status;
+        err.data = data;
+        throw err;
+      }
+      if (!res.body || typeof res.body.getReader !== "function") {
+        shouldFallback = true;
+        throw new Error("fallback_no_body");
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let currentEvent = "";
+      let hasDelta = false;
+      let sseErrorHandled = false;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split(String.fromCharCode(10));
+          buffer = lines.pop();
+          for (let raw of lines) {
+            const line = raw.trim();
+            if (!line) { currentEvent = ""; continue; }
+            if (line.startsWith("event:")) {
+              currentEvent = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+              const dataStr = line.slice(5).trim();
+              let dataJson = {};
+              try { dataJson = dataStr ? JSON.parse(dataStr) : {}; } catch (_) { dataJson = {}; }
+              if (currentEvent === "delta") {
+                const deltaText = dataJson.delta || dataJson.text || dataJson.content || dataJson.reply || "";
+                if (deltaText) {
+                  if (!hasDelta) {
+                    state.pendingAiBubbleRef.textContent = "";
+                    hasDelta = true;
+                  }
+                  state.pendingAiBubbleRef.textContent += deltaText;
+                  smartScroll();
+                }
+              } else if (currentEvent === "phase") {
+                // keep showing 正在理解… until delta arrives
+              } else if (currentEvent === "complete") {
+                state.sseCompleted = true;
+                if (state.pendingAiBubbleRef) state.pendingAiBubbleRef.classList.remove("sending");
+                if (!hasDelta && dataJson.reply) {
+                  state.pendingAiBubbleRef.textContent = dataJson.reply;
+                }
+                state.version = typeof dataJson.version === "number" ? dataJson.version : state.version;
+                if (dataJson.session_id) state.sessionId = dataJson.session_id;
+                const isRed = !!(dataJson.red_flag || (dataJson.system_risk_classification && dataJson.system_risk_classification.level === "RED_FLAG") || (dataJson.reply && (dataJson.reply.includes("119") || dataJson.reply.includes("急診") || dataJson.reply.includes("RED_FLAG"))));
+                if (isRed) state.pendingAiBubbleRef.classList.add("redflag");
+                else if (dataJson.safety) state.pendingAiBubbleRef.classList.add("safety");
+                state.redFlag = !!isRed;
+                updateProgress(dataJson);
+                if (isRed) {
+                  renderQuick([]);
+                  summaryWrap.classList.add("hidden");
+                } else {
+                  renderQuick(dataJson.quick_replies || dataJson.quickReplies || []);
+                  renderSummary(dataJson);
+                }
+                if (dataJson.intake_stage) stageText.textContent = dataJson.intake_stage;
+                if (isConfirm && dataJson.status === "COMPLETED") {
+                  addBubble("ai", "看診前資料已整理完成，目前只有你可以查看，尚未自動分享給醫護。");
+                }
+              } else if (currentEvent === "error") {
+                sseErrorHandled = true;
+                const detail = dataJson.detail || dataJson.message || "";
+                const msg = detail ? detail : "這次沒有成功儲存，請稍後再試。";
+                const showMsg = msg.includes("這次沒有成功儲存") ? msg : "這次沒有成功儲存，" + msg;
+                if (state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode) state.pendingAiBubbleRef.remove();
+                state.pendingAiBubbleRef = null;
+                showError(showMsg);
+                input.value = message;
+                if (userBubble) { userBubble.style.opacity = "0.7"; userBubble.title = "未送達，資料未儲存"; }
+                try { await reader.cancel(); } catch (_) {}
+                const err = new Error(showMsg);
+                err.isSseError = true;
+                throw err;
+              }
+            }
+          }
+          if (sseErrorHandled) break;
+        }
+        if (!state.sseCompleted && !sseErrorHandled) {
+          shouldFallback = true;
+          throw new Error("fallback_incomplete");
+        }
+      } catch (innerErr) {
+        if (innerErr && innerErr.name === "AbortError") throw innerErr;
+        if (innerErr && innerErr.isSseError) throw innerErr;
+        if (!state.sseCompleted) {
+          shouldFallback = true;
+          throw innerErr;
+        }
+        throw innerErr;
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        if (state.pendingAiBubbleRef && !state.sseCompleted && state.pendingAiBubbleRef.parentNode && state.pendingAiBubbleRef.textContent === "正在理解…") {
+          // keep aborted bubble removed to avoid stale placeholder when aborted via pause
+          // but do not show error on abort via navigation
+        }
+        throw e;
+      }
+      if (e && e.isSseError) {
+        if (userBubble) { userBubble.style.opacity = "0.7"; userBubble.title = "未送達，資料未儲存"; }
+        throw e;
+      }
+      if (shouldFallback) {
+        if (state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode) { state.pendingAiBubbleRef.remove(); state.pendingAiBubbleRef = null; }
+        if (state.sseCompleted) return;
+        try {
+          await doChatFallback(message, clientId, isConfirm, userBubble);
+          return;
+        } catch (fallbackErr) {
+          throw fallbackErr;
+        }
+      }
+      if (state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode) { state.pendingAiBubbleRef.remove(); state.pendingAiBubbleRef = null; }
+      if (e.status === 409) {
+        showError(e.message);
+        try {
+          const fresh = await fetchJson("/api/patient/previsit-room", { headers: authHeaders() });
+          state.version = typeof fresh.version === "number" ? fresh.version : state.version;
+          updateProgress(fresh);
+          if (fresh.intake_stage) stageText.textContent = fresh.intake_stage;
+        } catch (_) {}
+        input.value = message;
+      } else if (e.status === 401 || e.status === 403) {
+        showError(e.message);
+        input.value = message;
+      } else {
+        const msg = e.message && e.message.includes("這次沒有成功儲存") ? e.message : (e.message || humanError(e.status || 0, ""));
+        const shouldAppend = !msg.includes("這次沒有成功儲存") && !msg.includes("資料未儲存");
+        const finalMsg = shouldAppend ? msg : msg;
+        if (!e.status && shouldFallback) {
+          // already handled
+        } else {
+          const displayMsg = msg.includes("這次沒有成功儲存") ? msg : (e.status ? e.message : "這次沒有成功儲存，請稍後再試。");
+          // ensure phrase exists for generic network error
+          if (!displayMsg.includes("這次沒有成功儲存") && !e.status) {
+            showError("這次沒有成功儲存，請檢查網路後重試。");
+          } else {
+            showError(displayMsg);
+          }
+          input.value = message;
+        }
+      }
+      if (userBubble) {
+        userBubble.style.opacity = "0.7";
+        userBubble.title = "未送達，資料未儲存";
+      }
+      streamFailed = true;
     } finally {
       state.sending = false;
       send.disabled = false;
+      if (state.abortController) state.abortController = null;
       input.focus();
+      if (streamFailed && state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode && state.pendingAiBubbleRef.textContent === "正在理解…") {
+        state.pendingAiBubbleRef.remove();
+        state.pendingAiBubbleRef = null;
+      }
     }
   };
   const sendMessage = async () => {
+    if (state.sending) return;
     const text = input.value.trim();
     if (!text) return;
     if (text.length > 2000) { showError("輸入過長，請分段傳送。"); return; }
@@ -423,40 +627,39 @@ body{background:#f4f8f6}
   send.addEventListener("click", sendMessage);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
   pauseBtn.addEventListener("click", () => {
+    if (state.sending && state.abortController) { try { state.abortController.abort(); } catch (_) {} }
     addBubble("ai", "已為你暫停並保存資料。下次選擇繼續上次整理即可從同一進度繼續，不會重問已完成欄位。");
     renderQuick([{ label: "繼續整理", text: "繼續整理" }]);
     announce("已暫停並保存");
   });
   clearBtn.addEventListener("click", async () => {
+    if (state.sending && state.abortController) { try { state.abortController.abort(); } catch (_) {} }
     const ok = window.confirm("確定要結束並清除整理資料嗎？此操作會刪除目前進度，且不會自動分享。");
     if (!ok) return;
-    const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
     chat.replaceChildren();
     summaryWrap.classList.add("hidden");
     summaryWrap.replaceChildren();
     renderQuick([]);
     updateProgress({ intake_snapshot: {}, progress: { filled: 0, total: 8 } });
     stageText.textContent = "準備中";
-    try {
-      await doChat("結束並清除", cid, false);
-      addBubble("ai", "已結束並清除目前整理，資料不會自動分享。如需重新開始請點開始新的整理。");
-    } catch (_) {
-      addBubble("ai", "已在本機清除顯示。伺服器資料將於下次整理時重置。");
-    }
     state.version = 0;
+    addBubble("ai", "已結束並清除目前整理，資料不會自動分享。如需重新開始請點開始新的整理。");
     announce("已結束並清除");
   });
+  window.addEventListener("beforeunload", () => { if (state.abortController) try { state.abortController.abort(); } catch (_) {} });
+  window.addEventListener("pagehide", () => { if (state.abortController) try { state.abortController.abort(); } catch (_) {} });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && state.abortController) try { state.abortController.abort(); } catch (_) {} });
   const vv = window.visualViewport;
   if (vv) {
     const onResize = () => {
       const kh = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
       document.documentElement.style.setProperty("--keyboard-h", kh + "px");
-      chat.scrollTop = chat.scrollHeight;
+      smartScroll();
     };
     vv.addEventListener("resize", onResize);
     vv.addEventListener("scroll", onResize);
   }
-  input.addEventListener("focus", () => { requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; }); });
+  input.addEventListener("focus", () => { requestAnimationFrame(() => { if (isNearBottom()) chat.scrollTop = chat.scrollHeight; }); });
   (async () => {
     const probe = await loadDraftProbe();
     buildEntryActions();
