@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>看診前 AI 對談室｜糖尿病照護 Demo</title>
+<style>
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17352f;background:#f4f8f6;line-height:1.55}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:#f4f8f6}
+.app{width:min(760px,100vw);margin:0 auto;height:100dvh;height:100vh;display:flex;flex-direction:column;background:#f4f8f6}
+@supports (height:100dvh){.app{height:100dvh}}
+.header{position:sticky;top:0;z-index:10;background:#ffffffee;backdrop-filter:saturate(180%) blur(8px);border-bottom:1px solid #d9e6e1;padding:10px 12px 8px;padding-top:calc(10px + env(safe-area-inset-top,0px))}
+.header-top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.title{font-weight:800;font-size:1.02rem}
+.progress{height:6px;background:#e3ece8;border-radius:999px;overflow:hidden;margin:8px 0 0}
+.fill{height:100%;background:#087f67;transition:width .25s;width:0%}
+.badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-weight:700;font-size:.78rem;background:#e7f4ef;color:#08634f}
+.badge.warn{background:#fff4dc;color:#8a4b00}
+.badge.error{background:#fde8e8;color:#9b1c1c}
+.muted{color:#5f746d;font-size:.82rem}
+.chat{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:12px 10px 12px;max-width:760px;margin:0 auto;width:100%;display:flex;flex-direction:column;gap:10px;scroll-behavior:smooth}
+.bubble{max-width:82%;padding:10px 12px;border-radius:16px;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
+.bubble.ai{background:#fff;border:1px solid #d9e6e1;border-top-left-radius:6px;align-self:flex-start}
+.bubble.user{background:#087f67;color:#fff;align-self:flex-end;margin-left:auto;border-top-right-radius:6px}
+.bubble.ai.sending{opacity:.6}
+.bubble.ai.redflag{background:#fde8e8;border:1px solid #f5b5b5;color:#8a1a1a}
+.bubble.ai.safety{background:#fff7e6;border:1px solid #f2d19a;color:#7a4a00}
+.quick{display:flex;gap:8px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:8px 10px;max-width:760px;margin:0 auto;width:100%;scrollbar-width:none;-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity}
+.quick::-webkit-scrollbar{display:none}
+.quick button{flex:0 0 auto;scroll-snap-align:start;background:#fff;border:1px solid #cfe0da;color:#17352f;border-radius:999px;padding:7px 12px;font-weight:600;font-size:.88rem;cursor:pointer;white-space:nowrap}
+.quick button:active{background:#087f67;color:#fff}
+.summary-card{background:#fff;border:1px solid #0a5c4a;border-radius:16px;padding:14px;margin:12px 10px}
+.summary-row{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #eef2f0;padding:6px 0}
+.summary-row:last-child{border-bottom:0}
+.summary-label{color:#5f746d;font-size:.9rem}
+.summary-value{color:#0a5c4a;font-weight:600;font-size:.92rem;text-align:right;max-width:58%;overflow-wrap:anywhere}
+.action-bar{display:flex;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#ffffffee;border-top:1px solid #e3ece8;max-width:760px;margin:0 auto;width:100%}
+.action-bar button{flex:1 1 auto;background:#e7f1ee;color:#08634f;border:1px solid #cfe0da;border-radius:999px;padding:9px 10px;font-weight:700;cursor:pointer;font-size:.9rem}
+.action-bar button.danger{background:#fff0f0;color:#9b1c1c;border-color:#f5b5b5}
+.input-bar{display:flex;gap:8px;align-items:center;padding:8px 10px;padding-bottom:calc(8px + env(safe-area-inset-bottom,0px) + var(--keyboard-h,0px) + env(keyboard-inset-height,0px));background:#fff;border-top:1px solid #d9e6e1;max-width:760px;margin:0 auto;width:100%;flex-shrink:0}
+.input-bar input{flex:1;border:1px solid #a9beb7;border-radius:999px;padding:11px 14px;font:inherit;min-width:0}
+.input-bar button{background:#087f67;color:#fff;border:0;border-radius:999px;padding:11px 16px;font-weight:800;cursor:pointer;white-space:nowrap}
+.input-bar button:disabled{opacity:.5;cursor:not-allowed}
+.error-banner{margin:6px 10px;background:#fde8e8;border:1px solid #f5b5b5;color:#8a1a1a;border-radius:10px;padding:9px 12px;font-size:.9rem;max-width:760px;align-self:center;width:calc(100% - 20px)}
+.overlay{position:fixed;inset:0;background:rgba(23,53,47,.36);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px;padding-top:calc(20px + env(safe-area-inset-top,0px));padding-bottom:calc(20px + env(safe-area-inset-bottom,0px));z-index:30}
+.overlay-card{background:#fff;border-radius:16px;padding:18px;max-width:420px;width:100%;box-shadow:0 12px 32px rgba(23,53,47,.18)}
+.overlay-card h2{margin:0 0 8px;font-size:1.08rem}
+.overlay-card p{margin:0 0 12px;color:#2f463f;line-height:1.55}
+.overlay-actions{display:flex;flex-direction:column;gap:8px}
+.overlay-actions button{width:100%;border-radius:999px;padding:11px 14px;font-weight:700;cursor:pointer;border:0}
+.btn-primary{background:#087f67;color:#fff}
+.btn-secondary{background:#e7f1ee;color:#08634f;border:1px solid #cfe0da}
+.btn-ghost{background:#fff;color:#5f746d;border:1px solid #d9e6e1}
+.hidden{display:none!important}
+@media (max-width:375px){.bubble{max-width:86%}}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+<header class="header" aria-label="對談室標頭">
+<div class="header-top">
+<div class="title">看診前 AI 對談室</div>
+<span id="stageText" class="badge">準備中</span>
+</div>
+<div class="progress" aria-hidden="true"><div id="fill" class="fill"></div></div>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+<span id="progressText" class="muted">進度 0/8</span>
+<span id="shareText" class="badge warn hidden">尚未分享</span>
+</div>
+</header>
+
+<main id="chat" class="chat" role="log" aria-live="polite" aria-relevant="additions" aria-label="對談訊息"></main>
+
+<div id="quick" class="quick hidden" role="toolbar" aria-label="快速回覆"></div>
+
+<div id="summaryWrap" class="hidden" aria-live="polite"></div>
+
+<div id="errorBanner" class="error-banner hidden" role="alert" aria-live="assertive"></div>
+
+<div class="action-bar" aria-label="整理操作">
+<button id="pauseBtn" type="button">暫停並離開</button>
+<button id="clearBtn" type="button" class="danger">結束並清除</button>
+</div>
+
+<div class="input-bar" id="inputBar">
+<input id="input" type="text" placeholder="輸入回覆…" autocomplete="off" enterkeyhint="send" aria-label="輸入回覆" maxlength="2000">
+<button id="send" type="button">送出</button>
+</div>
+</div>
+
+<div id="entryOverlay" class="overlay" role="dialog" aria-modal="true" aria-labelledby="entryTitle">
+<div class="overlay-card">
+<h2 id="entryTitle">這是看診前整理室，與 LINE 衛教分開</h2>
+<p>這裡會分段陪你整理看診前資料（用藥、症狀、想問醫師的問題），一次一題。完成後可產生摘要供看診使用。絕不會在你未選擇的情況下悄悄帶入舊資料。</p>
+<p id="draftHint" class="muted hidden">偵測到你有未完成的整理草稿。</p>
+<div id="entryActions" class="overlay-actions"></div>
+<p class="muted" style="margin-top:10px;font-size:.78rem">小提醒：若有緊急症狀請直接就醫，本室不提供診斷。</p>
+</div>
+</div>
+
+<div id="liveStatus" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+<script>
+(() => {
+  const qs = new URLSearchParams(location.search);
+  let opaqueToken = qs.get("token") || "";
+  const chat = document.getElementById("chat");
+  const quick = document.getElementById("quick");
+  const input = document.getElementById("input");
+  const send = document.getElementById("send");
+  const fill = document.getElementById("fill");
+  const progressText = document.getElementById("progressText");
+  const stageText = document.getElementById("stageText");
+  const errorBanner = document.getElementById("errorBanner");
+  const summaryWrap = document.getElementById("summaryWrap");
+  const entryOverlay = document.getElementById("entryOverlay");
+  const entryActions = document.getElementById("entryActions");
+  const draftHint = document.getElementById("draftHint");
+  const liveStatus = document.getElementById("liveStatus");
+  const pauseBtn = document.getElementById("pauseBtn");
+  const clearBtn = document.getElementById("clearBtn");
+  const state = { version: 0, sessionId: "", hasDraft: false, draftLoaded: false, sending: false, pendingId: "", lastDraft: null, redFlag: false };
+  const fieldLabels = { known_medications:"目前用藥", allergies:"過敏史", chronic_conditions:"慢性病史", family_history:"家族史", symptom_onset:"症狀開始時間", symptom_description:"主要症狀", symptom_severity:"症狀程度", questions_for_doctor:"想問醫師的問題" };
+  const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const announce = (msg) => { liveStatus.textContent = msg; };
+  const buildUrl = (path) => {
+    if (!opaqueToken) return path;
+    const sep = path.includes("?") ? "&" : "?";
+    return path + sep + "token=" + encodeURIComponent(opaqueToken);
+  };
+  const authHeaders = () => {
+    const h = { "content-type": "application/json" };
+    if (opaqueToken) h["Authorization"] = "Bearer " + opaqueToken;
+    return h;
+  };
+  const humanError = (status, detail) => {
+    const d = typeof detail === "string" ? detail : "";
+    if (status === 401) return "身分驗證失敗，請從提供的連結重新開啟整理室。";
+    if (status === 403) return "沒有權限存取此整理室，請確認連結是否正確。";
+    if (status === 409) return "資料版本不一致，已為你重新同步，請確認後再送出。";
+    if (status === 422) return "輸入格式不符，請調整後重試。";
+    if (status === 429) return "系統忙碌中，請稍後再試，資料未儲存。";
+    if (status >= 500) return "伺服器暫時忙碌，請稍後再試，資料未儲存。";
+    if (status === 0) return "網路連線失敗，資料未儲存，請檢查網路後重試。";
+    return d || "操作失敗，請稍後再試，資料未儲存。";
+  };
+  const showError = (msg) => {
+    errorBanner.textContent = msg;
+    errorBanner.classList.remove("hidden");
+    announce(msg);
+  };
+  const clearError = () => {
+    errorBanner.textContent = "";
+    errorBanner.classList.add("hidden");
+  };
+  const addBubble = (role, text, extra) => {
+    if (!text) return null;
+    const div = document.createElement("div");
+    div.className = "bubble " + (role === "user" ? "user" : "ai") + (extra ? " " + extra : "");
+    div.textContent = text;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+    return div;
+  };
+  const renderQuick = (list) => {
+    quick.replaceChildren();
+    if (!list || !list.length) { quick.classList.add("hidden"); return; }
+    quick.classList.remove("hidden");
+    list.forEach((item) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = item.label || item.text || "";
+      b.addEventListener("click", () => {
+        input.value = item.text || item.label || "";
+        sendMessage();
+      });
+      quick.appendChild(b);
+    });
+  };
+  const updateProgress = (data) => {
+    let filled = 0; let total = 8; let stage = data.intake_stage || "";
+    if (data.progress && typeof data.progress.filled === "number") {
+      filled = data.progress.filled;
+      total = data.progress.total || 8;
+      stage = data.progress.stage || stage;
+    } else if (data.intake_snapshot) {
+      const snap = data.intake_snapshot;
+      const vals = [snap.known_medications, snap.allergies, snap.chronic_conditions, snap.family_history, snap.symptom_onset, snap.symptom_description, snap.symptom_severity, snap.questions_for_doctor];
+      filled = vals.filter((v) => Array.isArray(v) ? v.length > 0 : (v !== null && v !== undefined && String(v).trim() !== "")).length;
+    }
+    const percent = total ? Math.round((filled / total) * 100) : 0;
+    progressText.textContent = "進度 " + filled + "/" + total + " · " + percent + "%";
+    stageText.textContent = stage || "整理中";
+    fill.style.width = percent + "%";
+  };
+  const shouldShowSummary = (data) => {
+    if (data.red_flag) return false;
+    if (data.system_risk_classification && data.system_risk_classification.level === "RED_FLAG") return false;
+    if (data.status === "COMPLETED") return true;
+    if (data.intake_stage === "submitted") return true;
+    if (data.status === "AWAITING_CONFIRMATION" || data.status === "NEEDS_CONFIRMATION") return true;
+    if (data.intake_stage === "review" && data.intake_snapshot) {
+      const snap = data.intake_snapshot;
+      const hasAll = ["known_medications","allergies","chronic_conditions","family_history","symptom_onset","symptom_description","symptom_severity","questions_for_doctor"].every((k) => {
+        const v = snap[k];
+        return Array.isArray(v) ? v.length > 0 : (v !== null && v !== undefined && String(v).trim() !== "");
+      });
+      if (hasAll) return true;
+    }
+    if (data.review && data.review.confirmation_status === "AWAITING_CONFIRMATION") return true;
+    return false;
+  };
+  const renderSummary = (data) => {
+    if (!shouldShowSummary(data)) { summaryWrap.classList.add("hidden"); summaryWrap.replaceChildren(); return; }
+    summaryWrap.classList.remove("hidden");
+    const snap = data.intake_snapshot || (data.review && data.review.intake) || {};
+    const rows = Object.keys(fieldLabels).map((key) => {
+      const v = snap[key];
+      const display = Array.isArray(v) ? (v.length ? v.join("、") : "—") : (v === null || v === undefined || String(v).trim() === "" ? "—" : String(v));
+      return '<div class="summary-row"><span class="summary-label">' + esc(fieldLabels[key]) + '</span><span class="summary-value">' + esc(display) + '</span></div>';
+    }).join("");
+    const disclaimer = (data.review && data.review.disclaimer) || "本資料僅供看診前整理，需由醫師確認，不是診斷或治療建議。";
+    summaryWrap.innerHTML = '<div class="summary-card"><div style="font-weight:800;margin-bottom:6px">結構化摘要</div>' + rows + '<p class="muted" style="margin:8px 0 0">' + esc(disclaimer) + '</p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button id="confirmBtn" type="button" style="flex:1;background:#087f67;color:#fff;border:0;border-radius:999px;padding:10px 14px;font-weight:800;cursor:pointer">確認完成</button><button id="modifyBtn" type="button" style="flex:1;background:#fff;border:1px solid #cfe0da;border-radius:999px;padding:10px 14px;cursor:pointer">修改資料</button></div></div>';
+    const confirmBtn = summaryWrap.querySelector("#confirmBtn");
+    const modifyBtn = summaryWrap.querySelector("#modifyBtn");
+    if (confirmBtn) confirmBtn.addEventListener("click", async () => {
+      const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+      await doChat("確認完成", cid, true);
+    });
+    if (modifyBtn) modifyBtn.addEventListener("click", () => {
+      addBubble("ai", "請告訴我哪一項要修改，例如：我剛才說錯了，是對盤尼西林過敏");
+      input.focus();
+    });
+    chat.scrollTop = chat.scrollHeight;
+  };
+  const fetchJson = async (url, opts) => {
+    let res;
+    try {
+      res = await fetch(buildUrl(url), opts);
+    } catch (e) {
+      const err = new Error(humanError(0, ""));
+      err.status = 0;
+      throw err;
+    }
+    let data = {};
+    try { data = await res.json(); } catch (_) { data = {}; }
+    if (!res.ok) {
+      const msg = humanError(res.status, data.detail || data.message || "");
+      const err = new Error(msg);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  };
+  const renderHistory = (data) => {
+    const msgs = data.messages || data.history || [];
+    if (Array.isArray(msgs) && msgs.length) {
+      const seen = new Set();
+      msgs.forEach((m) => {
+        const role = m.role || m.sender || (m.is_user ? "user" : "ai");
+        const content = m.content || m.text || m.message || "";
+        if (!content) return;
+        const key = role + ":" + content;
+        if (seen.has(key)) return;
+        seen.add(key);
+        addBubble(role === "user" ? "user" : "ai", content);
+      });
+    }
+  };
+  const loadDraftProbe = async () => {
+    try {
+      const data = await fetchJson("/api/patient/previsit-room", { headers: authHeaders() });
+      state.version = typeof data.version === "number" ? data.version : 0;
+      state.sessionId = data.session_id || data.sessionId || "";
+      state.lastDraft = data;
+      const hasContent = !!(data.intake_snapshot && Object.values(data.intake_snapshot).some((v) => Array.isArray(v) ? v.length > 0 : (v !== null && v !== undefined && String(v).trim() !== "")));
+      const hasVersion = state.version > 0;
+      const hasMessages = Array.isArray(data.messages) && data.messages.length > 0;
+      state.hasDraft = hasContent || hasVersion || hasMessages || (data.status && data.status !== "NOT_STARTED");
+      updateProgress(data);
+      if (data.intake_stage) stageText.textContent = data.intake_stage;
+      return data;
+    } catch (e) {
+      if (e.status === 401 || e.status === 403) {
+        showError(e.message);
+        state.hasDraft = false;
+        return null;
+      }
+      if (e.status === 404) {
+        state.hasDraft = false;
+        return null;
+      }
+      showError(e.message);
+      state.hasDraft = false;
+      return null;
+    }
+  };
+  const buildEntryActions = () => {
+    entryActions.replaceChildren();
+    const makeBtn = (label, cls, handler) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.className = cls;
+      b.addEventListener("click", handler);
+      return b;
+    };
+    if (state.hasDraft) {
+      draftHint.classList.remove("hidden");
+      entryActions.appendChild(makeBtn("繼續上次整理", "btn-primary", async () => {
+        entryOverlay.classList.add("hidden");
+        clearError();
+        if (state.lastDraft) {
+          renderHistory(state.lastDraft);
+          if (state.lastDraft.reply) addBubble("ai", state.lastDraft.reply);
+          renderQuick(state.lastDraft.quick_replies || state.lastDraft.quickReplies || []);
+          renderSummary(state.lastDraft);
+          updateProgress(state.lastDraft);
+        }
+        if (chat.children.length === 0) {
+          addBubble("ai", "歡迎回來，已為你載入上次的整理進度，請繼續回答下一題。");
+        }
+        announce("已繼續上次整理");
+      }));
+      entryActions.appendChild(makeBtn("開始新的整理", "btn-secondary", async () => {
+        entryOverlay.classList.add("hidden");
+        clearError();
+        chat.replaceChildren();
+        summaryWrap.classList.add("hidden");
+        summaryWrap.replaceChildren();
+        renderQuick([]);
+        const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+        await doChat("開始新的整理", cid, false);
+        announce("已開始新的整理");
+      }));
+      entryActions.appendChild(makeBtn("取消整理", "btn-ghost", () => {
+        entryOverlay.classList.add("hidden");
+        addBubble("ai", "已取消整理。需要時可重新開始。");
+        announce("已取消整理");
+      }));
+    } else {
+      draftHint.classList.add("hidden");
+      entryActions.appendChild(makeBtn("開始新的整理", "btn-primary", async () => {
+        entryOverlay.classList.add("hidden");
+        clearError();
+        const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+        await doChat("開始新的整理", cid, false);
+        announce("已開始新的整理");
+      }));
+    }
+  };
+  const doChat = async (message, clientId, isConfirm) => {
+    if (state.sending) return;
+    state.sending = true;
+    send.disabled = true;
+    clearError();
+    const userBubble = addBubble("user", message);
+    const pendingAi = addBubble("ai", "整理中…", "sending");
+    try {
+      const payload = { message: message, version: state.version, client_message_id: clientId };
+      const data = await fetchJson("/api/patient/previsit-room/chat", { method: "POST", headers: authHeaders(), body: JSON.stringify(payload) });
+      if (pendingAi) pendingAi.remove();
+      state.version = typeof data.version === "number" ? data.version : state.version;
+      if (data.session_id) state.sessionId = data.session_id;
+      const isRed = !!(data.red_flag || (data.system_risk_classification && data.system_risk_classification.level === "RED_FLAG") || (data.reply && (data.reply.includes("119") || data.reply.includes("急診") || data.reply.includes("RED_FLAG"))));
+      const extra = isRed ? "redflag" : (data.safety ? "safety" : "");
+      if (data.reply) addBubble("ai", data.reply, extra);
+      state.redFlag = !!isRed;
+      updateProgress(data);
+      renderQuick(data.quick_replies || data.quickReplies || []);
+      if (isRed) {
+        renderQuick([]);
+        summaryWrap.classList.add("hidden");
+      } else {
+        renderSummary(data);
+      }
+      if (data.intake_stage) stageText.textContent = data.intake_stage;
+      if (isConfirm && data.status === "COMPLETED") {
+        addBubble("ai", "看診前資料已整理完成，目前只有你可以查看，尚未自動分享給醫護。");
+      }
+    } catch (e) {
+      if (pendingAi) pendingAi.remove();
+      if (e.status === 409) {
+        showError(e.message);
+        try {
+          const fresh = await fetchJson("/api/patient/previsit-room", { headers: authHeaders() });
+          state.version = typeof fresh.version === "number" ? fresh.version : state.version;
+          updateProgress(fresh);
+          if (fresh.intake_stage) stageText.textContent = fresh.intake_stage;
+        } catch (_) {}
+        input.value = message;
+      } else if (e.status === 401 || e.status === 403) {
+        showError(e.message);
+        input.value = message;
+      } else {
+        showError(e.message);
+        input.value = message;
+      }
+      if (userBubble) {
+        userBubble.style.opacity = "0.7";
+        userBubble.title = "未送達，資料未儲存";
+      }
+    } finally {
+      state.sending = false;
+      send.disabled = false;
+      input.focus();
+    }
+  };
+  const sendMessage = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    if (text.length > 2000) { showError("輸入過長，請分段傳送。"); return; }
+    const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(36).slice(2,6);
+    state.pendingId = cid;
+    input.value = "";
+    renderQuick([]);
+    await doChat(text, cid, false);
+  };
+  send.addEventListener("click", sendMessage);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+  pauseBtn.addEventListener("click", () => {
+    addBubble("ai", "已為你暫停並保存資料。下次選擇繼續上次整理即可從同一進度繼續，不會重問已完成欄位。");
+    renderQuick([{ label: "繼續整理", text: "繼續整理" }]);
+    announce("已暫停並保存");
+  });
+  clearBtn.addEventListener("click", async () => {
+    const ok = window.confirm("確定要結束並清除整理資料嗎？此操作會刪除目前進度，且不會自動分享。");
+    if (!ok) return;
+    const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+    chat.replaceChildren();
+    summaryWrap.classList.add("hidden");
+    summaryWrap.replaceChildren();
+    renderQuick([]);
+    updateProgress({ intake_snapshot: {}, progress: { filled: 0, total: 8 } });
+    stageText.textContent = "準備中";
+    try {
+      await doChat("結束並清除", cid, false);
+      addBubble("ai", "已結束並清除目前整理，資料不會自動分享。如需重新開始請點開始新的整理。");
+    } catch (_) {
+      addBubble("ai", "已在本機清除顯示。伺服器資料將於下次整理時重置。");
+    }
+    state.version = 0;
+    announce("已結束並清除");
+  });
+  const vv = window.visualViewport;
+  if (vv) {
+    const onResize = () => {
+      const kh = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      document.documentElement.style.setProperty("--keyboard-h", kh + "px");
+      chat.scrollTop = chat.scrollHeight;
+    };
+    vv.addEventListener("resize", onResize);
+    vv.addEventListener("scroll", onResize);
+  }
+  input.addEventListener("focus", () => { requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; }); });
+  (async () => {
+    const probe = await loadDraftProbe();
+    buildEntryActions();
+    if (!probe && !state.hasDraft) {
+      progressText.textContent = "進度 0/8 · 0%";
+    }
+  })();
+})();
+</script>
+</body>
+</html>

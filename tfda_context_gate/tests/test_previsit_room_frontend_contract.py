@@ -14,6 +14,8 @@ import re
 
 HTML_PATH = Path(__file__).resolve().parents[2] / "line_bot" / "static" / "previsit_room.html"
 HTML = HTML_PATH.read_text(encoding="utf-8") if HTML_PATH.is_file() else ""
+HTML_DASH_PATH = Path(__file__).resolve().parents[2] / "line_bot" / "static" / "previsit-room.html"
+HTML_DASH = HTML_DASH_PATH.read_text(encoding="utf-8") if HTML_DASH_PATH.is_file() else ""
 
 def _has(pattern: str) -> bool:
     return re.search(pattern, HTML, re.S) is not None
@@ -160,3 +162,11 @@ def test_token_propagation_via_query_or_header():
     # 確保 buildUrl 同時支援 query/header 沿用
     assert 'buildUrl' in HTML
     assert 'authHeaders' in HTML
+
+def test_dash_file_exists_and_matches_contract():
+    assert HTML_DASH_PATH.is_file(), "line_bot/static/previsit-room.html 必須存在（橫線命名，唯一擁有）"
+    assert len(HTML_DASH) > 2000
+    assert HTML_DASH == HTML, "previsit-room.html 與 previsit_room.html 應一致，避免路由分歧"
+    assert "\\n" not in HTML_DASH
+    assert "opaqueToken" in HTML_DASH
+    assert "/api/patient/previsit-room/chat" in HTML_DASH
