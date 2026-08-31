@@ -815,6 +815,12 @@ class ConversationOrchestrator:
     PAUSE_COMMANDS = {"暫停整理", "先不要填", "先不要填了", "等一下再填"}
     CANCEL_COMMANDS = {"不填了", "取消整理"}
     RESUME_COMMANDS = {"繼續整理", "繼續填寫", "回到看診整理", "接著填"}
+    # 不自動續填：明確字串命令契約（不靠回覆文字猜測、不只靠 regex）
+    RESUME_CHOICE_CONTINUE = "繼續上次整理"
+    RESUME_CHOICE_NEW = "開始新的整理"
+    RESUME_CHOICE_COMMANDS = {RESUME_CHOICE_CONTINUE, RESUME_CHOICE_NEW}
+    # 明確狀態：等待使用者在「繼續上次整理 / 開始新的整理」二選一
+    PENDING_RESUME_CHOICE = "PENDING_RESUME_CHOICE"
     INTAKE_FIELD_ORDER = (
         "known_medications", "allergies", "chronic_conditions", "family_history",
         "symptom_onset", "symptom_description", "symptom_severity", "questions_for_doctor",
@@ -1836,6 +1842,98 @@ class ConversationOrchestrator:
                 saved = self.repository.save(session.model_copy(update={"conversation_context": ctx_assistant}, deep=True), expected_version=previous_version)
             self._last_staged_latency = recorder.snapshot()
             return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply, status="INFORMATION", intake_stage=saved.intake_stage)
+
+        if session.pending_action and session.pending_action.type == self.PENDING_RESUME_CHOICE:
+            stripped = text.strip()
+            ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
+            session_with_user = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
+            if stripped == self.RESUME_CHOICE_CONTINUE:
+                pending_field = session.pending_field or self._next_pending_field(session.intake_snapshot)
+                next_q = session.pending_question or self._question_for_field(pending_field)
+                new_status = "ACTIVE" if session.status == "PAUSED" else session.status
+                updated = session_with_user.model_copy(update={"pending_action": None, "status": new_status}, deep=True)
+                updated = self._sync_clinical_context(updated)
+                reply_text = next_q or "請繼續提供下一項資料。"
+                ctx_assistant = self.context_manager.append_turn(updated.conversation_context, role="assistant", content=reply_text)
+                ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+                updated = updated.model_copy(update={"conversation_context": ctx_assistant}, deep=True)
+                with recorder.stage("persistence_ms"):
+                    saved = self.repository.save(updated, expected_version=previous_version)
+                self._last_staged_latency = recorder.snapshot()
+                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_text, status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+            if stripped == self.RESUME_CHOICE_NEW:
+                if session.status == "SUBMITTED":
+                    updated = session_with_user.model_copy(update={"pending_action": None}, deep=True)
+                    updated = self._sync_clinical_context(updated)
+                    reply_text = "已提交的資料已保留，不會被清除。如需開始新的整理，請先選擇「為自己整理」或「代家人整理」。"
+                    ctx_assistant = self.context_manager.append_turn(updated.conversation_context, role="assistant", content=reply_text)
+                    ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+                    updated = updated.model_copy(update={"conversation_context": ctx_assistant}, deep=True)
+                    with recorder.stage("persistence_ms"):
+                        saved = self.repository.save(updated, expected_version=previous_version)
+                    self._last_staged_latency = recorder.snapshot()
+                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_text, status="NEEDS_ROLE_SELECTION", intake_stage=saved.intake_stage)
+                reset = self._new_subject_state(session_with_user, text)
+                cleared = session_with_user.model_copy(update={**reset, "actor_role": ActorRole.PATIENT, "authorization_status": AuthorizationStatus.UNVERIFIED, "permission_scopes": [], "subject_id_hash": None, "information_source": None, "status": "CLOSED", "pending_action": None, "pending_field": None, "pending_question": None, "pending_severity_raw": None, "pending_question_proposal": None, "stage_transition_flag": None}, deep=True)
+                cleared = self._sync_clinical_context(cleared)
+                reply_text = "已清除未提交的草稿，請選擇「為自己整理」或「代家人整理」以開始新的整理。"
+                ctx_assistant = self.context_manager.append_turn(cleared.conversation_context, role="assistant", content=reply_text)
+                ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+                cleared = cleared.model_copy(update={"conversation_context": ctx_assistant}, deep=True)
+                with recorder.stage("persistence_ms"):
+                    saved = self.repository.save(cleared, expected_version=previous_version)
+                self._last_staged_latency = recorder.snapshot()
+                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_text, status="NEEDS_ROLE_SELECTION", intake_stage=saved.intake_stage)
+            if stripped in self.CANCEL_COMMANDS:
+                reset = self._new_subject_state(session_with_user, text)
+                cancelled = session_with_user.model_copy(update={**reset, "actor_role": ActorRole.PATIENT, "authorization_status": AuthorizationStatus.UNVERIFIED, "permission_scopes": [], "subject_id_hash": None, "information_source": None, "status": "CLOSED", "pending_action": None, "pending_field": None, "pending_question": None, "pending_severity_raw": None, "pending_question_proposal": None, "stage_transition_flag": None}, deep=True)
+                cancelled = self._sync_clinical_context(cancelled)
+                reply_text = "已結束這次看診資料整理，尚未提交的內容已清除。需要時可再輸入「準備看診」重新開始。"
+                ctx_assistant = self.context_manager.append_turn(cancelled.conversation_context, role="assistant", content=reply_text)
+                ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+                cancelled = cancelled.model_copy(update={"conversation_context": ctx_assistant}, deep=True)
+                with recorder.stage("persistence_ms"):
+                    saved = self.repository.save(cancelled, expected_version=previous_version)
+                self._last_staged_latency = recorder.snapshot()
+                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_text, status="CANCELLED", intake_stage=saved.intake_stage)
+            choice_prompt = self._compose_resume_choice_prompt()
+            updated = session_with_user.model_copy(update={}, deep=True)
+            updated = self._sync_clinical_context(updated)
+            ctx_assistant = self.context_manager.append_turn(updated.conversation_context, role="assistant", content=choice_prompt)
+            ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+            updated = updated.model_copy(update={"conversation_context": ctx_assistant}, deep=True)
+            with recorder.stage("persistence_ms"):
+                saved = self.repository.save(updated, expected_version=previous_version)
+            self._last_staged_latency = recorder.snapshot()
+            return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=choice_prompt, status="NEEDS_RESUME_CHOICE", intake_stage=saved.intake_stage, metadata={"requires_resume_decision": True, "has_existing_draft": True})
+
+        if self._is_start_intake_trigger(text) and self._has_unsubmitted_draft(session):
+            ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
+            session_with_user = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
+            now = datetime.now(timezone.utc)
+            pending = PendingAction(type=self.PENDING_RESUME_CHOICE, created_at=now)
+            choice_prompt = self._compose_resume_choice_prompt()
+            ctx_assistant = self.context_manager.append_turn(session_with_user.conversation_context, role="assistant", content=choice_prompt)
+            ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+            updated = session_with_user.model_copy(update={"pending_action": pending, "conversation_context": ctx_assistant}, deep=True)
+            updated = self._sync_clinical_context(updated)
+            with recorder.stage("persistence_ms"):
+                saved = self.repository.save(updated, expected_version=previous_version)
+            self._last_staged_latency = recorder.snapshot()
+            return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=choice_prompt, status="NEEDS_RESUME_CHOICE", intake_stage=saved.intake_stage, metadata={"requires_resume_decision": True, "has_existing_draft": True})
+
+        if self._is_start_intake_trigger(text) and session.status == "SUBMITTED":
+            ctx_user = self.context_manager.append_turn(session.conversation_context, role="user", content=text or "（空白訊息）")
+            session_with_user = session.model_copy(update={"conversation_context": ctx_user}, deep=True)
+            reply_text = "已提交的看診資料已保留，不會被清除。如需開始新的整理，請選擇「為自己整理」或「代家人整理」。"
+            ctx_assistant = self.context_manager.append_turn(session_with_user.conversation_context, role="assistant", content=reply_text)
+            ctx_assistant, _ = self.context_manager.compact(ctx_assistant, stage_completed=False)
+            updated = session_with_user.model_copy(update={"conversation_context": ctx_assistant}, deep=True)
+            updated = self._sync_clinical_context(updated)
+            with recorder.stage("persistence_ms"):
+                saved = self.repository.save(updated, expected_version=previous_version)
+            self._last_staged_latency = recorder.snapshot()
+            return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply=reply_text, status="NEEDS_ROLE_SELECTION", intake_stage=saved.intake_stage)
 
         # 6: Explicit product control fast path (before AI) — spec 6
         _explicit_product_texts = self.SELF_COMMANDS | self.PROXY_COMMANDS | self.PAUSE_COMMANDS | self.CANCEL_COMMANDS | self.RESUME_COMMANDS | self.CONFIRM_COMMANDS | self.START_INTAKE_COMMANDS | self.SHARE_COMMANDS | self.SUMMARY_COMMANDS | self.MODIFY_COMMANDS | {"使用說明", "使用說明與緊急協助"}
@@ -3504,3 +3602,22 @@ class ConversationOrchestrator:
             AuthorizationStatus.LEGAL_GUARDIAN,
         }
         return authorized and session.status in {"ACTIVE", "PAUSED", "AWAITING_CONFIRMATION"}
+
+    def _has_unsubmitted_draft(self, session: ProductSession) -> bool:
+        return self._is_intake_active(session)
+
+    def _is_start_intake_trigger(self, text: str) -> bool:
+        stripped = text.strip()
+        if stripped in self.START_INTAKE_COMMANDS:
+            return True
+        if any(tok in text for tok in ("準備看診", "回診", "看醫生")):
+            return True
+        return False
+
+    def _compose_resume_choice_prompt(self) -> str:
+        return (
+            "偵測到你有未完成的看診前整理，請選擇：\n"
+            f"「{self.RESUME_CHOICE_CONTINUE}」— 保留已填資料，接著問下一題\n"
+            f"「{self.RESUME_CHOICE_NEW}」— 清除未提交草稿，重新開始\n"
+            "請直接回覆上述指令（也可回覆「不填了」取消）。"
+        )

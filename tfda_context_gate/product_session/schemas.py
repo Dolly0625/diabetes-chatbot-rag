@@ -29,7 +29,13 @@ IntakeField = Literal[
     "questions_for_doctor",
 ]
 
-PendingActionType = Literal["PENDING_CONFIRM_QUESTION", "PENDING_SEVERITY_CLARIFY", "PENDING_FIELD_CORRECTION", "PENDING_STAGE_TRANSITION"]
+PendingActionType = Literal[
+    "PENDING_CONFIRM_QUESTION",
+    "PENDING_SEVERITY_CLARIFY",
+    "PENDING_FIELD_CORRECTION",
+    "PENDING_STAGE_TRANSITION",
+    "PENDING_RESUME_CHOICE",
+]
 
 
 class PendingAction(BaseModel):
