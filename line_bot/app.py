@@ -1435,7 +1435,273 @@ def line_client_config() -> dict[str, Any]:
         # This is intentionally a boolean.  The configured clinician IDs are
         # an authorization boundary and must not be enumerated to browsers.
         "demo_clinician_enabled": _demo_clinician_enabled(),
+        "demo_intake_token_enabled": _is_demo_intake_token_enabled(),
+        "previsit_room_url": "/patient/previsit-room",
     }
+
+
+# ── Previsit Room (dedicated) ─────────────────────────────────────────────
+# Only line_bot/intake_token.py and this section may handle demo tokens.
+# LIFF Bearer (verified via api.line.me) takes precedence, fail-closed.
+
+def _is_demo_intake_token_enabled() -> bool:
+    return os.getenv("DEMO_INTAKE_TOKEN_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def _hash_intake_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _get_previsit_base_url(request: Any | None = None) -> str:
+    env_url = os.getenv("PATIENT_INTAKE_BASE_URL", "").strip() or os.getenv("LINE_PATIENT_PORTAL_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    if request is not None:
+        try:
+            base = str(request.base_url).rstrip("/")
+            return base
+        except Exception:
+            pass
+    return "https://example.com"
+
+
+def _create_previsit_token_for_user(line_user_id: str) -> tuple[str, str]:
+    import secrets as _sec
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise RuntimeError("ProductSession not configured")
+    sess = orch._load_or_create(line_user_id)
+    raw = _sec.token_urlsafe(16)
+    h = _hash_intake_token(raw)
+    exp = _dt.now(_tz.utc) + _td(minutes=30)
+    orch.repository.create_intake_token(h, sess.session_id, exp)
+    return raw, sess.session_id
+
+
+PREVISIT_TRIGGER_TEXTS = {"我要準備看診", "開啟看診前對談室"}
+PREVISIT_KEYWORDS = ["我要準備看診", "開啟看診前對談室"]
+
+
+def _is_previsit_trigger_text(text: str) -> bool:
+    norm = unicodedata.normalize("NFKC", text).strip()
+    if norm in PREVISIT_TRIGGER_TEXTS:
+        return True
+    return any(kw in norm for kw in PREVISIT_KEYWORDS)
+
+
+def _portal_available() -> bool:
+    has_liff = bool(os.getenv("LINE_LIFF_ID", "").strip() and os.getenv("LINE_LOGIN_CHANNEL_ID", "").strip())
+    return has_liff or _is_demo_intake_token_enabled()
+
+
+def _build_previsit_flex_message(previsit_url: str) -> dict:
+    return {
+        "type": "flex",
+        "altText": "看診前對談室 — 開啟專用對談",
+        "contents": {
+            "type": "bubble",
+            "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "看診前對談室", "weight": "bold", "size": "lg", "color": "#17352f"}]},
+            "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [
+                {"type": "text", "text": "這是專用看診前 AI 對談室。一般衛教請回 LINE 詢問，點下方按鈕開啟網頁對談。", "wrap": True, "size": "sm", "color": "#5f746d"},
+            ]},
+            "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
+                {"type": "button", "style": "primary", "color": "#087f67", "action": {"type": "uri", "label": "開啟看診前對談室", "uri": previsit_url}},
+            ]},
+        },
+    }
+
+
+# Web chat idempotency (dedup by client_message_id, in-memory per process)
+_web_chat_dedup: dict[tuple[str, str], dict[str, Any]] = {}
+_web_chat_lock = threading.Lock()
+
+
+def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: str):
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+    if authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+        if token:
+            uid = _verify_line_id_token(token)
+            sess = orch.session_for_user(uid)
+            if sess is None:
+                sess = orch._load_or_create(uid)
+            return sess
+    if intake_token and _is_demo_intake_token_enabled():
+        import re as _re
+        tok = intake_token.strip()
+        if not _re.match(r"^[A-Za-z0-9_-]{16,64}$", tok):
+            raise HTTPException(status_code=401, detail="Invalid intake token")
+        h = _hash_intake_token(tok)
+        rec = orch.repository.get_intake_token(h)
+        if rec is None:
+            raise HTTPException(status_code=403, detail="Invalid intake token")
+        from datetime import datetime as _dt, timezone as _tz
+        try:
+            exp_raw = rec.get("expires_at") or rec.get("expiresAt") or ""
+            exp_dt = _dt.fromisoformat(str(exp_raw))
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=_tz.utc)
+            if _dt.now(_tz.utc) >= exp_dt:
+                raise HTTPException(status_code=401, detail="Intake token expired")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+        if rec.get("consumed_at"):
+            pass
+        sess_id = str(rec.get("product_session_id") or "")
+        sess = orch.repository.get(sess_id)
+        if sess is None:
+            raise HTTPException(status_code=403, detail="Token session not found")
+        return sess
+    if _demo_identity_headers_enabled() and demo_user_id:
+        sess = orch.session_for_user(demo_user_id)
+        if sess is None:
+            sess = orch._load_or_create(demo_user_id)
+        return sess
+    raise HTTPException(status_code=401, detail="Verified LINE LIFF identity is required")
+
+
+def _is_general_education_in_previsit(text: str) -> bool:
+    """Detect general education question to avoid polluting intake stage."""
+    low = text.strip().lower()
+    edu_keywords = ["糖尿病的一般飲食", "飲食原則", "衛教", "一般飲食", "血糖正常值", "胰島素是什麼"]
+    if any(k in text for k in edu_keywords):
+        return True
+    # Fallback heuristic: if text looks like general knowledge without personal context
+    if len(text) < 60 and any(k in low for k in ["什麼是", "是什麼", "如何", "怎麼"]):
+        # limit to education-like
+        if "看診" not in text and "症狀" not in text and "藥" not in text:
+            return True
+    return False
+
+
+@app.get("/patient/previsit-room", response_class=FileResponse)
+def previsit_room_portal() -> FileResponse:
+    p = Path(__file__).parent / "static" / "previsit-room.html"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="Previsit room portal not found")
+    return FileResponse(p)
+
+
+@app.get("/api/patient/previsit-room")
+def get_previsit_room(
+    request: Request,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> JSONResponse:
+    token_q = ""
+    try:
+        token_q = request.query_params.get("token") or request.query_params.get("intake_token") or ""
+    except Exception:
+        token_q = ""
+    token = x_intake_token or intake_token or token_q
+    sess = _get_previsit_session(authorization, x_line_user_id, token)
+    return JSONResponse(content={
+        "session_id": sess.session_id,
+        "version": sess.version,
+        "status": sess.status,
+        "intake_stage": sess.intake_stage,
+        "intake_snapshot": sess.intake_snapshot.model_dump(mode="json"),
+        "pending_question": sess.pending_question,
+        "pending_field": sess.pending_field,
+        "system_risk_classification": sess.system_risk_classification,
+    })
+
+
+class PrevisitChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=1, max_length=2000)
+    version: int = Field(ge=0)
+    client_message_id: str | None = Field(default=None, max_length=128)
+
+
+@app.post("/api/patient/previsit-room/chat")
+def post_previsit_chat(
+    body: PrevisitChatRequest,
+    request: Request,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> JSONResponse:
+    token_q = ""
+    try:
+        token_q = request.query_params.get("token") or request.query_params.get("intake_token") or ""
+    except Exception:
+        token_q = ""
+    token = x_intake_token or intake_token or token_q
+    sess = _get_previsit_session(authorization, x_line_user_id, token)
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+    # idempotency before version check
+    if body.client_message_id:
+        key = (sess.session_id, body.client_message_id)
+        with _web_chat_lock:
+            cached = _web_chat_dedup.get(key)
+            if cached is not None:
+                return JSONResponse(content=cached)
+    if sess.status == "SUBMITTED":
+        raise HTTPException(status_code=409, detail="Cannot modify SUBMITTED session")
+    if body.version != sess.version:
+        raise HTTPException(status_code=409, detail="Version conflict")
+    text = body.message.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="message is required")
+    # red-flag pre-check before AI, does not pollute intake
+    try:
+        from tfda_context_gate.clinical_safety import RiskSignalPolicy
+        risk = RiskSignalPolicy().classify(text)
+        if risk.level == "RED_FLAG":
+            red_payload = {"level": risk.level, "signals": risk.signals}
+            new_sess = sess.model_copy(update={"system_risk_classification": red_payload}, deep=True)
+            try:
+                saved = orch.repository.save(new_sess, expected_version=sess.version)
+            except Exception as exc:
+                from tfda_context_gate.product_session import ProductSessionConflict as _PSC
+                if isinstance(exc, _PSC) or "conflict" in str(exc).lower():
+                    raise HTTPException(status_code=409, detail="Version conflict") from exc
+                raise
+            resp = {"reply": "偵測到可能的緊急警訊。請立即撥打 119 或前往急診；若身旁有人請請他協助。本系統不做診斷，已為你保留目前進度。", "status": "FALLBACK", "intake_stage": saved.intake_stage, "version": saved.version, "intake_snapshot": saved.intake_snapshot.model_dump(mode="json")}
+            if body.client_message_id:
+                with _web_chat_lock:
+                    _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+            return JSONResponse(content=resp)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    # general education pollution prevention in web chat path
+    if _is_general_education_in_previsit(text):
+        resp = {"reply": "這個問題比較偏一般衛教，建議回 LINE 聊天問衛教小幫手，我這裡先幫你保留看診前整理的進度。你可以繼續整理看診資料。", "status": sess.status, "intake_stage": sess.intake_stage, "version": sess.version, "intake_snapshot": sess.intake_snapshot.model_dump(mode="json")}
+        if body.client_message_id:
+            with _web_chat_lock:
+                _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+        return JSONResponse(content=resp)
+    # Normal intake flow via orchestrator
+    try:
+        result = orch._process_text(sess, text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    saved = orch.repository.get(sess.session_id)
+    if saved is None:
+        try:
+            saved = orch.repository.get(result.session_id)  # type: ignore[attr-defined]
+        except Exception:
+            saved = sess
+    if saved is None:
+        saved = sess
+    resp = {"reply": getattr(result, "reply", ""), "status": getattr(result, "status", saved.status), "intake_stage": getattr(saved, "intake_stage", sess.intake_stage), "version": getattr(saved, "version", sess.version), "intake_snapshot": saved.intake_snapshot.model_dump(mode="json") if hasattr(saved, "intake_snapshot") else sess.intake_snapshot.model_dump(mode="json")}
+    if body.client_message_id:
+        with _web_chat_lock:
+            _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+    return JSONResponse(content=resp)
 
 
 _PATIENT_REVIEW_FIELDS: tuple[tuple[str, str], ...] = (
@@ -1706,6 +1972,41 @@ async def callback(
                 except Exception:
                     pass
                 orchestrator = _get_conversation_orchestrator()
+                if _is_previsit_trigger_text(text) and _portal_available():
+                    try:
+                        # fail-closed: any exception skips card and falls through to normal flow
+                        base = _get_previsit_base_url(request)
+                        raw_token = None
+                        sess_id = None
+                        if _is_demo_intake_token_enabled() and not os.getenv("LINE_LIFF_ID"):
+                            try:
+                                raw_token, sess_id = _create_previsit_token_for_user(str(user_id))
+                            except Exception:
+                                raw_token = None
+                        if raw_token:
+                            previsit_url = f"{base}/patient/previsit-room?token={raw_token}"
+                        else:
+                            # LIFF mode: no token in URL, client will use LIFF id_token
+                            previsit_url = f"{base}/patient/previsit-room"
+                        flex = _build_previsit_flex_message(previsit_url)
+                        sent = False
+                        try:
+                            api = _get_messaging_api()
+                            if api is not None:
+                                from linebot.v3.messaging import FlexMessage, ReplyMessageRequest
+                                # FlexMessage expects contents as dict, API validates
+                                api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[FlexMessage(alt_text=flex["altText"], contents=flex["contents"])]))
+                                sent = True
+                        except Exception:
+                            sent = False
+                        if not sent:
+                            _send(reply_token, f"已為你準備好看診前對談室：{previsit_url}")
+                        else:
+                            # Also ensure text dedup not blocking next trigger
+                            _mark_text_dedup(str(user_id), text)
+                        continue
+                    except Exception:
+                        pass
                 webhook_event_id = ev.get("webhookEventId") or message.get("id")
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":
                     # Crash recovery: the first process may have committed
