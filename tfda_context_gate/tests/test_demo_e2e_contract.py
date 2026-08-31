@@ -87,10 +87,6 @@ def _has_three_way_choice(reply: str) -> dict[str, bool]:
     }
 
 
-@pytest.mark.xfail(
-    reason="contract: 本分支尚未實作『繼續上次整理 / 開始新的整理 / 取消整理』三選一；現狀為無提示自動續填（見 S2 runner/detail 與 issue tracker）。實作後請去掉 xfail 並驗證三選一皆保留草稿/清除語意。",
-    strict=False,
-)
 def test_s2_draft_requires_three_way_choice(tmp_path):
     """未完成草稿再進入時必須三選一，不能無提示自動續填。"""
     orch, repo = _new_orch(tmp_path, "s2.sqlite3")

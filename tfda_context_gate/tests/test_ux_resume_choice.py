@@ -47,6 +47,7 @@ def test_old_draft_not_auto_resume(tmp_path):
     assert result.status == "NEEDS_RESUME_CHOICE"
     assert "繼續上次整理" in result.reply
     assert "開始新的整理" in result.reply
+    assert "取消整理" in result.reply
     _assert_has_resume_metadata(result)
 
     after = orch.session_for_user("U-A")
@@ -174,9 +175,11 @@ def test_resume_choice_reprompt_still_has_metadata_and_cancel_clears_without_met
     _setup_active_draft(repo, orch, user_id="U-reprompt")
     first = orch.handle_text(event_id="reprompt-1", line_user_id="U-reprompt", text="我要準備看診")
     _assert_has_resume_metadata(first)
+    assert "取消整理" in first.reply
     second = orch.handle_text(event_id="reprompt-2", line_user_id="U-reprompt", text="隨便打字不是指令")
     assert second.status == "NEEDS_RESUME_CHOICE"
     _assert_has_resume_metadata(second)
+    assert "取消整理" in second.reply
     after = orch.session_for_user("U-reprompt")
     assert after is not None
     assert after.intake_snapshot.known_medications == ["metformin"]
@@ -184,5 +187,20 @@ def test_resume_choice_reprompt_still_has_metadata_and_cancel_clears_without_met
     assert cancelled.status == "CANCELLED"
     _assert_no_resume_metadata(cancelled)
     cleared = orch.session_for_user("U-reprompt")
+    assert cleared is not None
+    assert cleared.intake_snapshot.known_medications == []
+
+
+def test_cancel_alias_explicit_text_also_cancels(tmp_path):
+    repo = SQLiteProductSessionRepository(tmp_path / "s.sqlite3")
+    orch = ConversationOrchestrator(repo, identity_hash_key=_KEY)
+    _setup_active_draft(repo, orch, user_id="U-alias")
+    choice = orch.handle_text(event_id="alias-1", line_user_id="U-alias", text="我要準備看診")
+    assert "取消整理" in choice.reply
+    _assert_has_resume_metadata(choice)
+    cancelled = orch.handle_text(event_id="alias-2", line_user_id="U-alias", text="取消整理")
+    assert cancelled.status == "CANCELLED"
+    _assert_no_resume_metadata(cancelled)
+    cleared = orch.session_for_user("U-alias")
     assert cleared is not None
     assert cleared.intake_snapshot.known_medications == []

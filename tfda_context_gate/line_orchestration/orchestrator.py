@@ -3619,5 +3619,6 @@ class ConversationOrchestrator:
             "偵測到你有未完成的看診前整理，請選擇：\n"
             f"「{self.RESUME_CHOICE_CONTINUE}」— 保留已填資料，接著問下一題\n"
             f"「{self.RESUME_CHOICE_NEW}」— 清除未提交草稿，重新開始\n"
-            "請直接回覆上述指令（也可回覆「不填了」取消）。"
+            "「取消整理」— 結束整理並清除未提交草稿（也可回覆「不填了」）\n"
+            "請直接回覆上述指令。"
         )

@@ -3,7 +3,7 @@
 
 情境：
 1. 病患在 LINE 問糖尿病衛教，資料不會誤寫入看診欄位。
-2. 看診前資料收集存在未完成草稿時，系統必須要求使用者在「繼續上次整理」「開始新的整理」「取消整理」中選擇，不能無提示自動續填。 (若未實作，本 runner 記為 XFAIL)
+2. 看診前資料收集存在未完成草稿時，系統必須要求使用者在「繼續上次整理」「開始新的整理」「取消整理」中選擇，不能無提示自動續填。
 3. 使用者確認提交並授權後，醫護只能讀到已確認的結構化摘要，不能寫入、不能看到未確認草稿。
 
 約束：
@@ -17,8 +17,8 @@
   python scripts/demo/run_e2e_acceptance.py --json     # 額外輸出 JSON summary 到 stdout 最後一行
 
 Exit code：
-  0  若 Scenario1=PASS 且 Scenario3=PASS，且 Scenario2= PASS 或 XFAIL（預期）
-  1  若有任一 FAIL（或 XPASS 視為 FAIL，因合約仍把壞行為當 pass 不可接受）
+  0  若三個情境皆 PASS
+  1  若有任一 FAIL
 
 See also:
   tfda_context_gate/tests/test_demo_e2e_contract.py  （同契約的 pytest 版）
@@ -208,19 +208,17 @@ def scenario_2(tmp_dir: Path, verbose: bool = False) -> dict:
         _pass("系統正確要求三選一，且草稿保持原樣未被自動覆寫")
         return {"scenario": 2, "status": "PASS", "has": has, "reply_status": r2.status}
 
-    # 未全部出現 → 合約未實作：標 XFAIL（不可當 PASS）
+    # 未全部出現 → 合約失敗，不可把壞行為當成可 demo 的 PASS。
     detail = f"缺少：{', '.join(missing) if missing else '未知'}；實際 reply={r2.reply[:200]!r} status={r2.status}"
     if auto_continued_without_choice:
         detail += "；且系統無提示自動續填（壞行為），必須阻擋"
-    _xfail(f"本分支尚未實作三選一（預期合約失敗）：{detail}")
-    # 同時把實際行為記錄為 XFAIL，runner 視為預期內
-    # 若要嚴格驗證未來實作，可在此加 xfail 標記的 contract test 對照
+    _fail(f"草稿三選一驗收失敗：{detail}")
     return {
         "scenario": 2,
-        "status": "XFAIL",
+        "status": "FAIL",
         "has": has,
         "reply_status": r2.status,
-        "reason": "draft resume choice not implemented: need 3-way prompt",
+        "reason": "draft resume choice contract failed",
         "detail": detail,
         "auto_continued": auto_continued_without_choice,
         "intake_polluted": intake_polluted,
@@ -437,17 +435,12 @@ def main() -> int:
             label = {1: "衛教不污染", 2: "草稿三選一", 3: "醫護唯讀已確認"}[sc]
             _print(f"  情境 {sc}（{label}）: {st}" + (f" — {r.get('reason') or r.get('errors')}" if st != "PASS" else ""))
 
-        # 判定：S1 PASS 且 S3 PASS，且 S2 為 PASS 或 XFAIL 視為整體通過
+        # 三個產品情境都必須通過，才算可 demo。
         s1_ok = results[0]["status"] == "PASS"
-        s2_ok = results[1]["status"] in ("PASS", "XFAIL")
+        s2_ok = results[1]["status"] == "PASS"
         s3_ok = results[2]["status"] == "PASS"
         overall = "PASS" if (s1_ok and s2_ok and s3_ok) else "FAIL"
-        # XPASS 視為 FAIL（把壞行為當 pass 不可接受）
-        if results[1]["status"] == "XPASS":
-            overall = "FAIL"
         _print(f"\nOverall: {overall}")
-        if results[1]["status"] == "XFAIL":
-            _print("  註：情境 2 為 XFAIL（合約尚未實作，見 tfda_context_gate/tests/test_demo_e2e_contract.py::test_s2_draft_requires_three_way_choice）— runner 視為預期內，不計為 FAIL。")
 
         summary = {"overall": overall, "results": results}
         if args.json:
@@ -459,9 +452,6 @@ def main() -> int:
         # Exit code：FAIL→1；XFAIL 仍 0（預期）
         if overall != "PASS":
             return 1
-        # 額外：若 S2 XFAIL 但詳細含 auto_continued，表示壞行為仍存在，需提醒但不卡 CI
-        if results[1].get("auto_continued"):
-            _print("  提醒：情境 2 仍為無提示自動續填的壞行為，請於 integration branch 補上三選一實作後重跑並去掉 xfail。")
         return 0
 
 
