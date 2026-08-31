@@ -48,7 +48,7 @@ def test_static_previsit_room_served():
     try:
         r = client.get("/patient/previsit-room")
         assert r.status_code == 200
-        assert "看診前對談室" in r.text
+        assert "看診前 AI 對談室" in r.text
         assert r.headers.get("content-type", "").startswith("text/html")
     finally:
         if not existed and dummy.is_file():
