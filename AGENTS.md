@@ -8,6 +8,7 @@
 4. 看診前 3-Stage 整理室（Pre-visit Intake）：具擬真溫度的衛教師問卷對話，支援 SSE 打字串流與個資雜湊。
 5. 醫護端調閱後台（Clinician Portal）：手機相機離線 QR Code 掃描解碼，15 分鐘時效與「閱後即焚」調閱機制。
 6. 雙軌 RAG 檢索（diabetes-rag 子模組）：整合 Google Gemini 雲端向量檢索（零本機模型負擔，僅需 GEMINI_API_KEY）＋ TFDA 知識圖譜三元組 ＋ RRF 排名融合。
+7. 目前部署架構：本機 FastAPI 伺服器搭配 ngrok 外網穿透，尚未部署至 GCP（Google Cloud Platform）雲端伺服器；GCP Cloud Run 容器化部署列為後續生產上線規劃。
 
 ---
 
@@ -94,6 +95,7 @@ python3 -c "from pathlib import Path; from tfda_context_gate.workflow.runner imp
   3. dialogue_interrupt.py（專責插話提問與代填對象切換）。
   4. session_checkpointer.py（專責 SQLite 狀態保存與斷點續填）。
   5. orchestrator.py（保留核心狀態機調度骨架，降至 ~400 行）。
+- [ ] 雲端化生產部署：整合 GCP（Google Cloud Platform）Cloud Run 容器化自動擴展部署。
 - [ ] 多模態 OCR 演進：擴充藥袋相片 PaddleOCR 修正模型介面。
 
 ---
