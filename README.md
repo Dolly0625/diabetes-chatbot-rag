@@ -9,6 +9,7 @@
 
 ### 1. 權威衛教與藥物諮詢（RAG 組別專屬檢索模組）
 * 跨組別模組整合：透過 Git Submodule 深度串接 RAG 組別開發之 diabetes-rag 引擎。
+* 零本機向量模型依賴：全面採用 Google Gemini 雲端向量 API（models/gemini-embedding-2），無需在本地安裝 Ollama 或下載數 GB 之巨大模型權重，具備 API Key 即可隨插即用。
 * 雙軌檢索技術：融合 Google Gemini 向量檢索（254 筆國健署專書）與 TFDA 官方藥品知識圖譜三元組，透過 RRF (Reciprocal Rank Fusion) 排名融合演算法精準召回。
 * 杜絕 AI 幻覺：透過安全閘門（Context Gate B）強制 15 欄位檢驗，模型僅能依據官方核准之證據回答，並標註引用來源（如〔來源：E1、E2〕）與免責聲明。
 
@@ -45,7 +46,7 @@
 ```
 
 * Gate A（路由層）：急症紅旗一票否決，意圖分流與藥袋圖像處理。
-* RAG 檢索層：由 RAG 組別研發之 diabetes-rag 負責雙軌語意與圖譜召回。
+* RAG 檢索層：由 RAG 組別研發之 diabetes-rag 負責雙軌語意（Gemini Embedding）與圖譜召回，無需本機模型。
 * Gate B（知識層）：15 欄位正規化驗證，過濾不可靠資料。
 * Gate C（生成層）：嚴格依據官方證據生成，拒絕胡說八道。
 * Gate D（輸出層）：8 道合規過濾（禁止確診、禁止開處方、個資去識別化）。
@@ -79,7 +80,7 @@ OPENCODE_BASE_URL=https://opencode.ai/zen/go/v1
 OPENCODE_API_KEY=your_opencode_api_key_here
 ROUTER_LLM_MODEL=opencode/mimo-v2.5
 
-# 2. RAG 檢索模組配置 (Gemini Embedding，由 RAG 組別驅動)
+# 2. RAG 檢索模組配置 (無需安裝本機模型，僅需填入 Gemini API Key)
 GEMINI_API_KEY=your_gemini_api_key_here
 RAG_BACKEND=diabetes_rag
 
