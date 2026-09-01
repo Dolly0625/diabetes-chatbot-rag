@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-retrieval"
+version = "0.1.0"
+description = "Evidence retrieval tool (Vector + Graph) for the diabetes education LangGraph pipeline"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "pydantic>=2",
+    "numpy",
+    "google-generativeai",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"rag_retrieval" = ["data/*.json"]

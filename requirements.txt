@@ -24,3 +24,6 @@ torch
 
 # === Development & Testing ===
 pytest>=8.0
+
+# RAG 組原始碼已隨主專案提供，避免 clone 後還要取得另一個 GitLab 權限。
+-e ./diabetes-rag

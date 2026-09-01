@@ -7,7 +7,7 @@
 3. 藥袋解析（Medication Bag QR-First）：支援藥袋 QR Code 優先解析自動帶入問卷，並預留 OCR 視覺辨識介面（原型驗證階段）；原始圖片於記憶體處理後即銷毀，絕不持久化儲存。
 4. 看診前 3-Stage 整理室（Pre-visit Intake）：具擬真溫度的衛教師問卷對話，支援 SSE 打字串流與個資雜湊。
 5. 醫護端調閱後台（Clinician Portal）：手機相機離線 QR Code 掃描解碼，15 分鐘時效與「閱後即焚」調閱機制。
-6. 雙軌 RAG 檢索（diabetes-rag 子模組）：整合 Google Gemini 雲端向量檢索（零本機模型負擔，僅需 GEMINI_API_KEY）＋ TFDA 知識圖譜三元組 ＋ RRF 排名融合。
+6. 雙軌 RAG 檢索（diabetes-rag 內嵌原始碼）：整合 Google Gemini 雲端向量檢索（零本機模型負擔，僅需 GEMINI_API_KEY）＋ TFDA 知識圖譜三元組 ＋ RRF 排名融合。
 7. 目前部署架構：本機 FastAPI 伺服器搭配 ngrok 外網穿透，尚未部署至雲端主機；未來的雲端主機與部署方案待團隊後續共同討論定案。
 
 ---
@@ -18,7 +18,7 @@
 - Gate C (Generator)：受限生成與來源標註（〔來源：E1、E2〕）＋ 標準醫療免責聲明。
 - Gate D (Output Gate)：8 道確定性輸出過濾防線（禁止確診、禁止開處方、禁止自造藥名）。
 - Gate E (Observability)：全鏈路 Trace 追蹤（記錄各節點延遲、狀態流轉與審計資訊）。
-- RAG 引擎：已打通 diabetes-rag 子模組（全面採用 Google Gemini 雲端 API，無需在本地安裝 Ollama 或下載模型權重，具備 API Key 即可隨插即用）。
+- RAG 引擎：已打通隨主專案提供的 diabetes-rag 原始碼（全面採用 Google Gemini 雲端 API，無需在本地安裝 Ollama 或下載模型權重，具備 API Key 即可隨插即用）。
 - 測試驗證：全套自動化回歸測試 707 passed, 0 failed。
 
 ---

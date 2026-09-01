@@ -1,0 +1,156 @@
+[
+  {
+    "query_id": "g01",
+    "track": "graph",
+    "user_raw_input": "腎功能不佳者使用 metformin 時，有哪些一般注意事項？",
+    "retrieval_queries": ["metformin 腎功能 注意事項", "metformin eGFR 減量"],
+    "expected_chunk_ids": [
+      "openfda_metformin_contraindications_tri_00",
+      "openfda_metformin_contraindications_tri_01"
+    ]
+  },
+  {
+    "query_id": "g02",
+    "track": "graph",
+    "user_raw_input": "如何施打胰島素？固定同一個位置打會怎樣？",
+    "retrieval_queries": ["胰島素 注射部位", "未輪替注射部位 皮膚澱粉樣變性症"],
+    "expected_chunk_ids": ["tfda_insulin_amyloidosis_tri_00", "tfda_insulin_amyloidosis_tri_01"]
+  },
+  {
+    "query_id": "g03",
+    "track": "graph",
+    "user_raw_input": "Canagliflozin 和 dapagliflozin 會不會引起急性腎損傷？",
+    "retrieval_queries": ["canagliflozin dapagliflozin 急性腎損傷"],
+    "expected_chunk_ids": [
+      "tfda_canagliflozin_dapagliflozin_aki_tri_00",
+      "tfda_canagliflozin_dapagliflozin_aki_tri_01"
+    ]
+  },
+  {
+    "query_id": "g04",
+    "track": "graph",
+    "user_raw_input": "慢性腎病、脫水、低血壓的病人使用 SGLT2 抑制劑要注意什麼？",
+    "retrieval_queries": ["慢性腎病 脫水 低血壓 急性腎損傷"],
+    "expected_chunk_ids": [
+      "tfda_canagliflozin_dapagliflozin_aki_tri_02",
+      "tfda_canagliflozin_dapagliflozin_aki_tri_03",
+      "tfda_canagliflozin_dapagliflozin_aki_tri_04"
+    ]
+  },
+  {
+    "query_id": "g05",
+    "track": "graph",
+    "user_raw_input": "SGLT2 抑制劑為什麼會引起酮酸中毒？急症算誘發因素嗎？",
+    "retrieval_queries": ["SGLT2 抑制劑 酮酸中毒 急症 誘發"],
+    "expected_chunk_ids": ["tfda_sglt2_ketoacidosis_tri_00"]
+  },
+  {
+    "query_id": "g06",
+    "track": "graph",
+    "user_raw_input": "進食減少或飲酒會不會誘發酸中毒？",
+    "retrieval_queries": ["進食減少 飲酒史 酸中毒"],
+    "expected_chunk_ids": ["tfda_sglt2_ketoacidosis_tri_06", "tfda_sglt2_ketoacidosis_tri_07"]
+  },
+  {
+    "query_id": "g07",
+    "track": "graph",
+    "user_raw_input": "低血容量、急性腎衰竭、低血氧算不算酸中毒的風險因子？",
+    "retrieval_queries": ["低血容量 急性腎衰竭 低血氧 酸中毒"],
+    "expected_chunk_ids": [
+      "tfda_sglt2_ketoacidosis_tri_03",
+      "tfda_sglt2_ketoacidosis_tri_04",
+      "tfda_sglt2_ketoacidosis_tri_05"
+    ]
+  },
+  {
+    "query_id": "g08",
+    "track": "graph",
+    "user_raw_input": "SGLT2 抑制劑類用來治療什麼？",
+    "retrieval_queries": ["SGLT2抑制劑類 第二型糖尿病 治療"],
+    "expected_chunk_ids": ["tfda-risk-019_tri_00", "tfda-risk-064_tri_00"]
+  },
+  {
+    "query_id": "g09",
+    "track": "graph",
+    "user_raw_input": "DPP-4 抑制劑是治療哪種糖尿病的藥？",
+    "retrieval_queries": ["DPP-4抑制劑類 第二型糖尿病"],
+    "expected_chunk_ids": ["tfda-risk-026_tri_00"]
+  },
+  {
+    "query_id": "g10",
+    "track": "graph",
+    "user_raw_input": "胰島素是用來治療哪些糖尿病的？",
+    "retrieval_queries": ["Insulin 糖尿病 治療"],
+    "expected_chunk_ids": ["tfda-risk-100_tri_00"]
+  },
+  {
+    "query_id": "v01",
+    "track": "vector",
+    "user_raw_input": "Canagliflozin 和 dapagliflozin 的藥理作用機轉是什麼？",
+    "retrieval_queries": ["Canagliflozin dapagliflozin 藥理作用機轉 SGLT2"],
+    "expected_chunk_ids": ["tfda-risk-035_sec2_02"]
+  },
+  {
+    "query_id": "v02",
+    "track": "vector",
+    "user_raw_input": "SGLT2 抑制劑類為什麼會誘發酮酸中毒？",
+    "retrieval_queries": ["SGLT2 抑制劑 酮酸中毒 誘發因素"],
+    "expected_chunk_ids": ["tfda-risk-019_sec4_07"]
+  },
+  {
+    "query_id": "v03",
+    "track": "vector",
+    "user_raw_input": "DPP-4 抑制劑會不會造成關節疼痛？",
+    "retrieval_queries": ["DPP-4 抑制劑 關節疼痛"],
+    "expected_chunk_ids": ["tfda-risk-026_sec4_04", "tfda-risk-026_sec5_08"]
+  },
+  {
+    "query_id": "v04",
+    "track": "vector",
+    "user_raw_input": "打胰島素要記得輪流換注射部位嗎？",
+    "retrieval_queries": ["胰島素 注射部位 輪流更換"],
+    "expected_chunk_ids": ["tfda-risk-100_sec5_14"]
+  },
+  {
+    "query_id": "v05",
+    "track": "vector",
+    "user_raw_input": "胰島素注射點的皮膚澱粉樣變性症是什麼？",
+    "retrieval_queries": ["胰島素 注射點 皮膚澱粉樣變性症"],
+    "expected_chunk_ids": ["tfda-risk-100_sec4_05"]
+  },
+  {
+    "query_id": "v06",
+    "track": "vector",
+    "user_raw_input": "Repaglinide 和 clopidogrel 一起吃有什麼禁忌？",
+    "retrieval_queries": ["repaglinide clopidogrel 禁忌 交互作用"],
+    "expected_chunk_ids": ["tfda-risk-027_sec4_05"]
+  },
+  {
+    "query_id": "v07",
+    "track": "vector",
+    "user_raw_input": "Canagliflozin 引起急性腎損傷的通報案例狀況如何？",
+    "retrieval_queries": ["canagliflozin dapagliflozin 急性腎損傷 通報案例"],
+    "expected_chunk_ids": ["tfda-risk-035_sec4_04"]
+  },
+  {
+    "query_id": "v08",
+    "track": "vector",
+    "user_raw_input": "SGLT2 抑制劑類的適應症是什麼？",
+    "retrieval_queries": ["SGLT2抑制劑類 適應症"],
+    "expected_chunk_ids": ["tfda-risk-019_sec1_01"]
+  },
+  {
+    "query_id": "v09",
+    "track": "vector",
+    "user_raw_input": "胰島素如何調節血糖？",
+    "retrieval_queries": ["胰島素 藥理作用機轉 血糖 調節"],
+    "expected_chunk_ids": ["tfda-risk-100_sec2_02"]
+  },
+  {
+    "query_id": "v10",
+    "track": "vector",
+    "user_raw_input": "DPP-4 抑制劑類的藥品成分有哪些？",
+    "retrieval_queries": ["DPP-4抑制劑類 藥品成分"],
+    "expected_chunk_ids": ["tfda-risk-026_sec0_00"]
+  }
+]

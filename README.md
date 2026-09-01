@@ -8,7 +8,7 @@
 ## 核心功能特色
 
 ### 1. 衛教與藥物諮詢（RAG 檢索模組）
-* 模組化整合：透過 Git Submodule 串接 RAG 組別開發之 diabetes-rag 檢索引擎。
+* 模組化整合：內含 RAG 組別開發的 diabetes-rag 檢索引擎原始碼，clone 一次即可取得完整 Demo。
 * 雲端向量檢索：採用 Google Gemini 雲端向量 API（models/gemini-embedding-2），無需在本地安裝 Ollama 或下載模型權重，具備 API Key 即可使用。
 * 雙軌檢索架構：結合 Google Gemini 向量檢索（254 筆國健署衛教專書語料）與 TFDA 藥品知識圖譜三元組，透過 RRF (Reciprocal Rank Fusion) 排名融合演算法進行召回。
 * 知識邊界約束：透過安全閘門（Context Gate B）進行 15 欄位檢驗，依據官方證據產出衛教回答，並標註引用來源（如〔來源：E1、E2〕）與免責聲明。
@@ -61,10 +61,9 @@
 ### 步驟一：環境建置與初始化
 
 ```bash
-# 1. Clone 專案並初始化 RAG 組別子模組
+# 1. Clone 完整專案（已包含 RAG 組原始碼）
 git clone https://github.com/Dolly0625/diabetes-chatbot-rag.git
 cd diabetes-chatbot-rag
-git submodule update --init --recursive
 
 # 2. 建立 Python 虛擬環境並安裝相依套件 (建議使用 Python 3.10+)
 python3 -m venv .venv
@@ -166,7 +165,7 @@ python3 -m pytest -q
 diabetes-chatbot-rag/
 ├── tfda_context_gate/        # 【Agent 組】四道安全閘門、臨床急症政策、藥袋解析、看診問卷狀態機
 ├── line_bot/                 # 【Agent 組】FastAPI 主伺服器、LINE Webhook 與網頁前端
-├── diabetes-rag/             # 【RAG 組別】RAG 檢索子模組 (Gemini Vector + TFDA Graph Triples)
+├── diabetes-rag/             # 【RAG 組別】隨專案提供的 RAG 原始碼 (Gemini Vector + TFDA Graph Triples)
 ├── docs/                     # 專案架構規範與技術文件
 ├── fixtures/                 # 測試資源與範例藥袋照片
 └── scripts/                  # LINE 圖文選單產生與維運工具

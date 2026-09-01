@@ -1,0 +1,758 @@
+[
+  {
+    "subject": {
+      "id": "tfda-risk-019_subj0",
+      "type": "Substance",
+      "label": "SGLT2抑制劑類",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-019_obj0",
+      "type": "Condition",
+      "label": "第二型糖尿病。",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-019",
+    "source_excerpt": "[2015/6/25] 藥品成分=SGLT2抑制劑類 | 適應症段落=第二型糖尿病。",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": [
+      "tfda-risk-042"
+    ]
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-026_subj0",
+      "type": "Substance",
+      "label": "DPP-4抑制劑類",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-026_obj0",
+      "type": "Condition",
+      "label": "第二型糖尿病",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-026",
+    "source_excerpt": "[2015/10/28] 藥品成分=DPP-4抑制劑類 | 適應症段落=第二型糖尿病",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-027_subj0",
+      "type": "Substance",
+      "label": "Repaglinide",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-027_obj0",
+      "type": "Condition",
+      "label": "第 2 型糖尿病（NIDDM）無法經由飲食控制、減重及加強運動等方法，達成良好控制者。",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-027",
+    "source_excerpt": "[2015/12/22] 藥品成分=Repaglinide | 適應症段落=第 2 型糖尿病（NIDDM）無法經由飲食控制、減重及加強運動等方法，達成良好控制者。",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-030_subj0",
+      "type": "Substance",
+      "label": "Saxagliptin",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-030_obj0",
+      "type": "Condition",
+      "label": "第二型糖尿病。",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-030",
+    "source_excerpt": "[2016/5/24] 藥品成分=Saxagliptin及alogliptin | 適應症段落=第二型糖尿病。",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-030_subj1",
+      "type": "Substance",
+      "label": "alogliptin",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-030_obj1",
+      "type": "Condition",
+      "label": "第二型糖尿病。",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-030",
+    "source_excerpt": "[2016/5/24] 藥品成分=Saxagliptin及alogliptin | 適應症段落=第二型糖尿病。",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-035_subj0",
+      "type": "Substance",
+      "label": "Canagliflozin",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-035_obj0",
+      "type": "Condition",
+      "label": "第二型糖尿病",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-035",
+    "source_excerpt": "[2016/7/14] 藥品成分=Canagliflozin及dapagliflozin | 適應症段落=第二型糖尿病",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-035_subj1",
+      "type": "Substance",
+      "label": "dapagliflozin",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-035_obj1",
+      "type": "Condition",
+      "label": "第二型糖尿病",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-035",
+    "source_excerpt": "[2016/7/14] 藥品成分=Canagliflozin及dapagliflozin | 適應症段落=第二型糖尿病",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-064_subj0",
+      "type": "Substance",
+      "label": "SGLT2抑制劑類",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-064_obj0",
+      "type": "Condition",
+      "label": "第二型糖尿病 (empagliflozin亦核准用於第二型糖尿病病人預防心血管事件)",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-064",
+    "source_excerpt": "[2018/9/28] 藥品成分=SGLT2抑制劑類 | 適應症段落=第二型糖尿病 (empagliflozin亦核准用於第二型糖尿病病人預防心血管事件)",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda-risk-100_subj0",
+      "type": "Substance",
+      "label": "Insulin",
+      "code": null
+    },
+    "relation": "TREATS",
+    "object": {
+      "id": "tfda-risk-100_obj0",
+      "type": "Condition",
+      "label": "糖尿病。",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "rule:field_mapping",
+    "source": "tfda-risk-100",
+    "source_excerpt": "[2020/11/16] 藥品成分=Insulin  | 適應症段落=糖尿病。",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "openfda_metformin_contraindications_s4__metformin",
+      "type": "Substance",
+      "label": "Metformin",
+      "code": "RxNorm:6809"
+    },
+    "relation": "CAUTION_FOR",
+    "object": {
+      "id": "openfda_metformin_contraindications_o4",
+      "type": "LabParameter",
+      "label": "eGFR",
+      "code": "LOINC:48642-3"
+    },
+    "condition": "eGFR 30 to <45 mL/min/1.73 m^2",
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "openfda_metformin_contraindications",
+    "source_excerpt": "not recommended if eGFR is 30 to <45 mL/min/1.73 m^2",
+    "review_tier": "bronze",
+    "normalized_from_brand": "ZITUVIMET",
+    "requires_manual_split": true,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "openfda_metformin_contraindications_s4__sitagliptin",
+      "type": "Substance",
+      "label": "Sitagliptin",
+      "code": null
+    },
+    "relation": "CAUTION_FOR",
+    "object": {
+      "id": "openfda_metformin_contraindications_o4",
+      "type": "LabParameter",
+      "label": "eGFR",
+      "code": "LOINC:48642-3"
+    },
+    "condition": "eGFR 30 to <45 mL/min/1.73 m^2",
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "openfda_metformin_contraindications",
+    "source_excerpt": "not recommended if eGFR is 30 to <45 mL/min/1.73 m^2",
+    "review_tier": "bronze",
+    "normalized_from_brand": "ZITUVIMET",
+    "requires_manual_split": true,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s0",
+      "type": "Substance",
+      "label": "canagliflozin",
+      "code": null
+    },
+    "relation": "INDUCES",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o0",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.8,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "與使用含canagliflozin成分及含dapagliflozin成分藥品具時序相關性之急性腎損傷確診的通報案例",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s1",
+      "type": "Substance",
+      "label": "dapagliflozin",
+      "code": null
+    },
+    "relation": "INDUCES",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o1",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.8,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "與使用含canagliflozin成分及含dapagliflozin成分藥品具時序相關性之急性腎損傷確診的通報案例",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s2",
+      "type": "Condition",
+      "label": "慢性腎病",
+      "code": null
+    },
+    "relation": "RISK_FACTOR_FOR",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o2",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.7,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "部分病人有慢性腎病或急性腎損傷病史",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s3",
+      "type": "Condition",
+      "label": "脫水",
+      "code": null
+    },
+    "relation": "RISK_FACTOR_FOR",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o3",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.7,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "部分病人有慢性腎病或急性腎損傷病史、脫水、低血壓",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s4",
+      "type": "Condition",
+      "label": "低血壓",
+      "code": null
+    },
+    "relation": "RISK_FACTOR_FOR",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o4",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.7,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "部分病人有慢性腎病或急性腎損傷病史、脫水、低血壓",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s5",
+      "type": "Substance",
+      "label": "血管張力素轉換酶抑制劑 (ACEIs)",
+      "code": null
+    },
+    "relation": "INDUCES",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o5",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.7,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "或於用藥期間併用血管張力素轉換酶抑制劑（ACEIs）、利尿劑或非類固醇抗發炎藥（NSAIDs）",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s6",
+      "type": "Substance",
+      "label": "利尿劑",
+      "code": null
+    },
+    "relation": "INDUCES",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o6",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.7,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "或於用藥期間併用血管張力素轉換酶抑制劑（ACEIs）、利尿劑或非類固醇抗發炎藥（NSAIDs）",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_s7",
+      "type": "Substance",
+      "label": "非類固醇抗發炎藥 (NSAIDs)",
+      "code": null
+    },
+    "relation": "INDUCES",
+    "object": {
+      "id": "tfda_canagliflozin_dapagliflozin_aki_o7",
+      "type": "Condition",
+      "label": "急性腎損傷",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.7,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_canagliflozin_dapagliflozin_aki",
+    "source_excerpt": "或於用藥期間併用血管張力素轉換酶抑制劑（ACEIs）、利尿劑或非類固醇抗發炎藥（NSAIDs）",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s0",
+      "type": "Trigger",
+      "label": "急症",
+      "code": null
+    },
+    "relation": "TRIGGERS",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o0",
+      "type": "Condition",
+      "label": "DKA",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "潛在誘發 DKA 之因素包括：急症",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s1",
+      "type": "Trigger",
+      "label": "熱量或液體攝取減少",
+      "code": null
+    },
+    "relation": "TRIGGERS",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o1",
+      "type": "Condition",
+      "label": "DKA",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "熱量或液體攝取減少",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s2",
+      "type": "Trigger",
+      "label": "降低胰島素劑量",
+      "code": null
+    },
+    "relation": "TRIGGERS",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o2",
+      "type": "Condition",
+      "label": "DKA",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "降低胰島素劑量",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s3",
+      "type": "Condition",
+      "label": "低血容量",
+      "code": null
+    },
+    "relation": "RISK_FACTOR_FOR",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o3",
+      "type": "Condition",
+      "label": "高陰離子間隙代謝性酸中毒",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "潛在引起高陰離子間隙代謝性酸中毒之因素包括：低血容量",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s4",
+      "type": "Condition",
+      "label": "急性腎衰竭",
+      "code": null
+    },
+    "relation": "RISK_FACTOR_FOR",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o4",
+      "type": "Condition",
+      "label": "高陰離子間隙代謝性酸中毒",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "急性腎衰竭",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s5",
+      "type": "Condition",
+      "label": "低血氧",
+      "code": null
+    },
+    "relation": "RISK_FACTOR_FOR",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o5",
+      "type": "Condition",
+      "label": "高陰離子間隙代謝性酸中毒",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "低血氧",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s6",
+      "type": "Trigger",
+      "label": "進食減少",
+      "code": null
+    },
+    "relation": "TRIGGERS",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o6",
+      "type": "Condition",
+      "label": "高陰離子間隙代謝性酸中毒",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "進食減少",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_sglt2_ketoacidosis_s7",
+      "type": "Trigger",
+      "label": "飲酒史",
+      "code": null
+    },
+    "relation": "TRIGGERS",
+    "object": {
+      "id": "tfda_sglt2_ketoacidosis_o7",
+      "type": "Condition",
+      "label": "高陰離子間隙代謝性酸中毒",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_sglt2_ketoacidosis",
+    "source_excerpt": "飲酒史",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_insulin_amyloidosis_s0",
+      "type": "Trigger",
+      "label": "未輪替注射部位",
+      "code": null
+    },
+    "relation": "TRIGGERS",
+    "object": {
+      "id": "tfda_insulin_amyloidosis_o0",
+      "type": "Condition",
+      "label": "皮膚澱粉樣變性症",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.95,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_insulin_amyloidosis",
+    "source_excerpt": "固定將胰島素注射於同一注射點之病人會增加在注射點發生皮膚澱粉樣變性症的風險",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  },
+  {
+    "subject": {
+      "id": "tfda_insulin_amyloidosis_s1",
+      "type": "Condition",
+      "label": "皮膚澱粉樣變性症",
+      "code": null
+    },
+    "relation": "RISK_FACTOR_FOR",
+    "object": {
+      "id": "tfda_insulin_amyloidosis_o1",
+      "type": "Condition",
+      "label": "糖尿病控制不佳",
+      "code": null
+    },
+    "condition": null,
+    "effect": null,
+    "confidence": 0.9,
+    "negation_checked": false,
+    "extracted_by": "llm:models/gemma-4-26b-a4b-it",
+    "source": "tfda_insulin_amyloidosis",
+    "source_excerpt": "類澱粉蛋白腫塊會使胰島素吸收不足進而導致糖尿病控制不佳",
+    "review_tier": "bronze",
+    "normalized_from_brand": null,
+    "requires_manual_split": false,
+    "additional_sources": []
+  }
+]
