@@ -52,6 +52,8 @@
 * Gate D（輸出層）：8 道合規過濾（禁止確診、禁止開處方、個資去識別化）。
 * Gate E（觀測層）：全鏈路 Trace 追蹤與效能監控。
 
+去識別化的代表性 trace 結果與驗證方式見 [Trace 結果摘要](docs/reports/TRACE_SUMMARY_20260901.md)；原始 trace 不公開，以避免將使用者輸入或除錯資料帶入 GitHub。
+
 ---
 
 ## 展示與操作指南 (Demo Walkthrough)
