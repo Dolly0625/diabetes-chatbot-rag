@@ -4,11 +4,11 @@
 本專案為 糖尿病智慧健康助理（Diabetes Chatbot RAG），由 Agent 組 與 RAG 組別 協同開發：
 1. 臨床安全閘門（A→B→C→D）：確保所有醫療衛教回答嚴格依據官方仿單與專書，杜絕 AI 幻覺。
 2. 急性紅旗即時攔截（Fail-Closed 119 防禦）：遇急症（胸痛、呼吸困難、嚴重低血糖冒冷汗）0.1ms 內一票否決並強制轉介。
-3. 藥袋照片上傳與智慧辨識（Medication Bag OCR & QR）：病患拍照上傳藥袋，自動解析藥名並以 TFDA 4.4 萬字典模糊糾錯，自動帶入問卷，原始圖片即時銷毀不留存。
+3. 藥袋解析（Medication Bag QR-First）：支援藥袋 QR Code 優先解析自動帶入問卷，並預留 OCR 視覺辨識介面（原型驗證階段）；原始圖片於記憶體處理後即銷毀，絕不持久化儲存。
 4. 看診前 3-Stage 整理室（Pre-visit Intake）：具擬真溫度的衛教師問卷對話，支援 SSE 打字串流與個資雜湊。
 5. 醫護端調閱後台（Clinician Portal）：手機相機離線 QR Code 掃描解碼，15 分鐘時效與「閱後即焚」調閱機制。
 6. 雙軌 RAG 檢索（diabetes-rag 子模組）：整合 Google Gemini 雲端向量檢索（零本機模型負擔，僅需 GEMINI_API_KEY）＋ TFDA 知識圖譜三元組 ＋ RRF 排名融合。
-7. 目前部署架構：本機 FastAPI 伺服器搭配 ngrok 外網穿透，尚未部署至 GCP（Google Cloud Platform）雲端伺服器；GCP Cloud Run 容器化部署列為後續生產上線規劃。
+7. 目前部署架構：本機 FastAPI 伺服器搭配 ngrok 外網穿透，尚未部署至 GCP（Google Cloud Platform）雲端伺服器；GCP 雲端容器化部署列為後續生產上線規劃。
 
 ---
 
@@ -43,10 +43,11 @@ ngrok http 8000
 
 ### 3. 病患端操作與看診前整理流程 (Patient Journey)
 * 衛教與急症諮詢：病患在 LINE 輸入 糖尿病可以吃什麼？ 或 我現在胸口劇痛，系統自動執行 A→B→C→D 閘門。
-* 藥袋照片上傳與智慧辨識 (Medication Bag OCR & QR)：
-  - 病患若不清楚藥品名稱，可直接在 LINE 聊天室傳送藥袋相片。
-  - 後端 MedicationBagOCRService 執行「QR 碼優先 ＋ OCR 視覺辨識 ＋ TFDA 4.4 萬筆藥品字典模糊糾錯」，精準提取藥物學名（如 Metformin 500mg）。
-  - 自動將解析結果填入看診前問卷的「目前固定用藥」欄位，原始圖片於記憶體解析後立即銷毀，絕不持久化儲存。
+* 藥袋資訊解析 (Medication Bag QR & OCR Prototype)：
+  - 病患在 LINE 聊天室傳送藥袋相片。
+  - 後端 MedicationBagOCRService 優先解析藥袋處方 QR Code，提取藥名（如 Metformin 500mg）並帶入問卷目前用藥欄位。
+  - 預留 OCR 視覺辨識與 TFDA 核心糖尿病字典比對介面（在無 GPU 或未裝 OCR 深度學習套件之環境下，以 QR Code 解析為主）。
+  - 原始相片於記憶體解析後立即銷毀，絕不持久化儲存。
 * 啟動看診前整理：
   - LINE 管道：在 LINE 聊天室輸入 準備看診，依序回答 8 題問卷（用藥、過敏、慢性病、家族史、發病時間、症狀描述、生活影響程度、想問醫師的問題）。
   - 網頁對談室管道：打開 http://localhost:8000/demo/previsit（或 ngrok 網址），以打字機動畫完成對話。
@@ -58,7 +59,7 @@ ngrok http 8000
 * 相機掃描解碼：醫師點擊「開啟相機掃描」直接對準病患手機上的 QR Code，前端內建 jsQR 函式庫進行純本地離線解碼，取得 share_token。
 * 兌換與閱後即焚（Burn-After-Reading）：
   1. 前端向後端 POST /api/clinician/share/redeem 發送請求。
-  2. 後端驗證 Token 是否有效且未過期；驗證成功後立即將該 Token 標記為 USED 並銷毀，防止二次調閱洩漏。
+  2. 後端驗證 Token 是否有效且未過期；驗證成功後立即將該 Token 標記為已使用並銷毀，防止二次調閱洩漏。
   3. 醫護端螢幕於 1 秒內渲染 4 大區塊臨床摘要（用藥歷程、過敏病史、主訴症狀、就醫提問）。
   4. 全程操作自動寫入 audit_logs 審計資料庫。
 
@@ -96,7 +97,7 @@ python3 -c "from pathlib import Path; from tfda_context_gate.workflow.runner imp
   4. session_checkpointer.py（專責 SQLite 狀態保存與斷點續填）。
   5. orchestrator.py（保留核心狀態機調度骨架，降至 ~400 行）。
 - [ ] 雲端化生產部署：整合 GCP（Google Cloud Platform）Cloud Run 容器化自動擴展部署。
-- [ ] 多模態 OCR 演進：擴充藥袋相片 PaddleOCR 修正模型介面。
+- [ ] 多模態 OCR 演進：正式整合 PaddleOCR 繁體中文深度學習視覺模型。
 
 ---
 
