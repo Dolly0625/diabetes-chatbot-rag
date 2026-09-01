@@ -1,12 +1,12 @@
-# AGENTS.md — Diabetes Chatbot RAG 專案交接與後續任務清單 (2026-09-01)
+# AGENTS.md — Diabetes Chatbot RAG 專案交接與 AI 協同操作指南 (2026-09-01)
 
-## 📌 專案定位與目標 (Project Goal)
-本專案為 **糖尿病智慧健康助理（Diabetes Chatbot RAG）**，核心具備：
-1. **臨床安全防護（A→B→C→D 四道安全閘門）**：確保所有醫療衛教嚴格依據官方仿單與專書，拒絕 AI 幻覺。
-2. **急性紅旗緊急攔截（Fail-Closed 119 防禦）**：遇急症（胸痛、呼吸困難、嚴重低血糖冒冷汗）立即中斷轉介。
-3. **看診前 3-Stage 整理室（Pre-visit Intake）**：具擬真溫度的衛教師問卷對話，支援 SSE 打字串流。
-4. **醫護端調閱後台（Clinician Portal）**：手機相機離線 QR Code 掃描解碼，閱後即焚調閱結構化病歷摘要。
-5. **雙軌 RAG 檢索（diabetes-rag）**：整合 Google Gemini 向量檢索 ＋ TFDA 知識圖譜三元組 ＋ RRF 融合排序。
+## 📌 專案定位與架構目標 (Project Overview)
+本專案為 **糖尿病智慧健康助理（Diabetes Chatbot RAG）**，由 **Agent 組** 與 **RAG 組別** 協同開發：
+1. **臨床安全閘門（A→B→C→D）**：確保所有醫療衛教回答嚴格依據官方仿單與專書，杜絕 AI 幻覺。
+2. **急性紅旗即時攔截（Fail-Closed 119 防禦）**：遇急症（胸痛、呼吸困難、嚴重低血糖冒冷汗）0.1ms 內一票否決並強制轉介。
+3. **看診前 3-Stage 整理室（Pre-visit Intake）**：具擬真溫度的衛教師問卷對話，支援 SSE 打字串流與個資雜湊。
+4. **醫護端調閱後台（Clinician Portal）**：手機相機離線 QR Code 掃描解碼，15 分鐘時效與「閱後即焚」調閱機制。
+5. **雙軌 RAG 檢索（diabetes-rag 子模組）**：整合 Google Gemini 向量檢索 ＋ TFDA 知識圖譜三元組 ＋ RRF 排名融合。
 
 ---
 
@@ -17,30 +17,44 @@
 - **Gate D (Output Gate)**：8 道確定性輸出過濾防線（禁止確診、禁止開處方、禁止自造藥名）。
 - **Gate E (Observability)**：全鏈路 Trace 追蹤（記錄各節點延遲、狀態流轉與審計資訊）。
 - **RAG 引擎**：已打通 `diabetes-rag` 子模組（調用 Gemini Embedding-2），並保留本地 Ollama `bge-m3` 多來源快取備援。
-- **前端與通訊**：
-  - LINE 官方 Webhook (`/callback`)
-  - 病患對談室 SSE 串流 (`/api/patient/previsit-room/chat/stream`)
-  - 醫護端 QR 掃描 (`/api/clinician/share/redeem` ＋ 本地 `jsQR` 離線解碼)
-- **測試驗證**：全套自動化測試 **707 passed, 0 failed**。
+- **測試驗證**：全套自動化回歸測試 **707 passed, 0 failed**。
 
 ---
 
-## 📋 目前待辦與後續維護任務清單 (Pending Tasks & Roadmap)
+## 📲 LINE 官方帳號串接與展示操作指南 (LINE & Demo Walkthrough)
 
-### 1. 倉庫瘦身與歷史檔案清理 (Repo Cleanup)
-- [ ] **移除歷史封存目錄**：清理 `archive/` 與 `experiments/` 歷史檔案，保持公開倉庫極簡。
-- [ ] **精簡 `docs/` 文件**：將過期的過渡型交接文件（如 `HANDOFF_20260831.md`）歸檔，保留 `PROJECT_STRUCTURE_AND_UPLOAD_GUIDE.md` 與公開 `README.md`。
+### 1. 本地啟動與外網穿透 (Ngrok Setup)
+```bash
+# 終端機 1：啟動主伺服器 (Port 8000)
+python3 -m uvicorn line_bot.app:app --host 0.0.0.0 --port 8000 --reload
 
-### 2. 架構優化與模組化拆分 (v0.2 Refactor Blueprint)
-- [ ] **`orchestrator.py` 瘦身拆分**（將目前 3,600 行依單一職責拆為 4 個專用模組）：
-  1. `async_push_manager.py`（專責 LINE 1秒超時與背景推播）。
-  2. `intake_normalizer.py`（專責 8 大問卷欄位口語解析與正規化）。
-  3. `dialogue_interrupt.py`（專責插話提問與代填對象切換）。
-  4. `session_checkpointer.py`（專責 SQLite 狀態保存與斷點續填）。
-  5. `orchestrator.py`（保留核心狀態機調度骨架，降至 ~400 行）。
+# 終端機 2：啟動 ngrok 取得公開 HTTPS 網址
+ngrok http 8000
+# 複製產生的網址，例如：https://xxxx.ngrok-free.dev
+```
 
-### 3. 多模態與 OCR 演進 (Multimodal OCR Roadmap)
-- [ ] 目前以相機 QR Code 掃描為主；未來可擴充藥袋文字 OCR 介面（如 PaddleOCR 修正模型）。
+### 2. LINE Developers Console 後台設定
+1. 前往 [LINE Developers Console](https://developers.line.biz/) 進入您的 Messaging API Channel。
+2. **Webhook URL** 設定為：`https://xxxx.ngrok-free.dev/callback`
+3. 點擊 **Verify** 確認回傳 Success，並開啟 **Use webhook**。
+4. 進入 LINE Official Account Manager 後台，在「回應設定」中**關閉「自動回應訊息」**，並**開啟「Webhook」**。
+
+### 3. 病患端操作與看診前整理流程 (Patient Journey)
+* **衛教與急症諮詢**：病患在 LINE 輸入 `糖尿病可以吃什麼？` 或 `我現在胸口劇痛`，系統自動執行 A→B→C→D 閘門。
+* **啟動看診前整理**：
+  - **LINE 管道**：在 LINE 聊天室輸入 `準備看診`，依序回答 8 題問卷（用藥、過敏、慢性病、家族史、發病時間、症狀描述、生活影響程度、想問醫師的問題）。
+  - **網頁對談室管道**：打開 `http://localhost:8000/demo/previsit`（或 ngrok 網址），以打字機動畫完成對話。
+* **生成專屬分享碼（QR Code）**：
+  - 問卷填寫完畢後，系統自動將 8 欄位打包為結構化 Snapshot，並調用 `sharing/service.py` 產出具備 **15 分鐘時效** 的加密 `share_token` 與 QR Code 圖片。
+
+### 4. 醫護端調閱與 QR 碼兌換機制 (Clinician Portal & QR Flow)
+* **醫護端入口**：瀏覽器打開 `http://localhost:8000/clinician`（Demo 模式自動帶入 `doctor-demo` 授權身分）。
+* **相機掃描解碼**：醫師點擊「開啟相機掃描」直接對準病患手機上的 QR Code，前端內建 `jsQR` 函式庫進行純本地離線解碼，取得 `share_token`。
+* **兌換與閱後即焚（Burn-After-Reading）**：
+  1. 前端向後端 `POST /api/clinician/share/redeem` 發送請求。
+  2. 後端驗證 Token 是否有效且未過期；**驗證成功後立即將該 Token 標記為 USED 並銷毀**，防止二次調閱洩漏。
+  3. 醫護端螢幕於 1 秒內渲染 4 大區塊臨床摘要（用藥歷程、過敏病史、主訴症狀、就醫提問）。
+  4. 全程操作自動寫入 `audit_logs` 審計資料庫。
 
 ---
 
@@ -50,17 +64,30 @@
 # 1. 執行全套回歸測試 (707 passed)
 python3 -m pytest -q
 
-# 2. 啟動後端主伺服器 (Port 8000)
-export DEMO_INTAKE_TOKEN_ENABLED=true
-export DEMO_WEB_ENABLED=true
-export LINE_DEMO_MODE=true
-export DEMO_CLINICIAN_IDS=doctor-demo
-export RAG_BACKEND=diabetes_rag
-python3 -m uvicorn line_bot.app:app --host 0.0.0.0 --port 8000 --reload
+# 2. 測試特定模組
+python3 -m pytest tfda_context_gate/tests/test_workflow_integration.py -v
+python3 -m pytest line_bot/tests/test_previsit_room_api.py -v
+python3 -m pytest tfda_context_gate/tests/test_diabetes_rag_integration.py -v
 
-# 3. 本地快速驗證 RAG 衛教生成
+# 3. 本地快速模擬 3 大劇本
+# (1) 衛教諮詢
 python3 -c "from tfda_context_gate.workflow.runner import run_workflow; print(run_workflow({'request_id':'1','user_raw_input':'糖尿病飲食可以吃什麼？','declared_role':'PATIENT','language':'zh-TW'}, use_formal=True).final_response)"
+# (2) 急症攔截
+python3 -c "from tfda_context_gate.workflow.runner import run_workflow; print(run_workflow({'request_id':'2','user_raw_input':'我現在胸口劇痛而且全身冒冷汗','declared_role':'PATIENT','language':'zh-TW'}, use_formal=True).final_response)"
+# (3) 啟動看診整理
+python3 -c "from tfda_context_gate.workflow.runner import run_workflow; print(run_workflow({'request_id':'3','user_raw_input':'準備看診','declared_role':'PATIENT','language':'zh-TW'}, use_formal=True).question)"
 ```
+
+---
+
+## 📋 後續架構優化藍圖 (v0.2 Refactor Blueprint)
+- [ ] **`orchestrator.py` 瘦身拆分**（將 3,600 行依單一職責拆為 4 個專用模組）：
+  1. `async_push_manager.py`（專責 LINE 1秒超時與背景推播）。
+  2. `intake_normalizer.py`（專責 8 大問卷欄位口語解析與正規化）。
+  3. `dialogue_interrupt.py`（專責插話提問與代填對象切換）。
+  4. `session_checkpointer.py`（專責 SQLite 狀態保存與斷點續填）。
+  5. `orchestrator.py`（保留核心狀態機調度骨架，降至 ~400 行）。
+- [ ] **多模態 OCR 演進**：擴充藥袋相片 PaddleOCR 修正模型介面。
 
 ---
 
