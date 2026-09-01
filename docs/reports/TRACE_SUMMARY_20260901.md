@@ -1,41 +1,108 @@
-# 去識別化 Trace 結果摘要
+# Demo 實際 Trace 與耗時結果
 
-**整理日期：** 2026-09-01
-**用途：** 專題展示與架構說明，不是病患資料、臨床研究結果或模型效能保證。
+**執行日期：** 2026-09-01
+**執行環境：** 本機 Python 3.10、正式 workflow、已設定的 Gemini RAG 與正式生成模型。
+**資料原則：** 全部是合成 Demo 輸入，沒有使用真實病患、LINE 使用者、病歷或分享碼。
 
-## 為什麼公開的是摘要，而不是原始 trace
+## 這份報告在展示什麼
 
-E 觀測層會記錄每一輪的 A→RAG→B→C→D 決策路徑，也可能保有供本機除錯用的使用者原句與雜湊。原始 JSONL trace 因此保留在本機 archive，**不放到公開 GitHub**。
+以下三筆是實際呼叫 `run_workflow(..., use_formal=True)` 後，從 E observability trace 擷取的結果：使用者輸入、實際路徑、每關耗時與最後狀態。
 
-本報告只保留去識別化後的案例代號、各關卡狀態與最終結果；不包含原始問題、姓名、病歷資料、request ID、query hash、access token、API key 或完整模型回答。
+所有時間是同一輪的 wall-clock 量測，會受當時網路與模型負載影響；它們是 Demo 實測值，不是 SLA。
 
-## Trace 格式
+## 總覽
 
-每一請求會有下列結構化節點：
+| 案例 | 使用者輸入 | 最終狀態 | 總耗時 | 重點 |
+| --- | --- | --- | ---: | --- |
+| `EDU-001` | 糖尿病飲食可以怎麼吃？ | `COMPLETED` | **7,093 ms** | 完整走 A → RAG → B → C → D，安全產生衛教回答。 |
+| `EMERGENCY-001` | 我胸口很痛，喘不過氣。 | `FALLBACK` | **43 ms** | A 判為紅旗，立即急診／119 安全中止；未呼叫 RAG 或生成模型。 |
+| `PREVISIT-001` | 我要準備看診。 | `NEEDS_CLARIFICATION` | **34 ms** | 引導進看診前資料流程，快速提出第一個需要補充的資料。 |
+
+## 案例一：一般衛教的完整安全流程
+
+**輸入：** `糖尿病飲食可以怎麼吃？`
+**最後結果：** `COMPLETED`，無 fallback。
 
 ```text
-SYSTEM → A（路由）→ QUERY_EXPANSION → RAG（檢索）→ B（證據檢核）
-       → C（生成）→ D（輸出檢核）→ SYSTEM 結束
+使用者問題
+  → A / input_router               COMPLETED    0.1 ms
+  → QUERY_EXPANSION                COMPLETED    0.0 ms
+  → RAG / retrieval                COMPLETED  747.8 ms
+  → B / context_gate               COMPLETED    0.3 ms
+  → C / generator                  COMPLETED 5533.1 ms
+  → D / output_gate                COMPLETED   18.9 ms
+  → SYSTEM / request               COMPLETED 7093.0 ms
 ```
 
-- B 證據不足時，系統可選擇詢問澄清、重寫查詢，或安全 fallback。
-- 只有 B 通過後才會進 C，且 C 的回答仍要通過 D 才能輸出。
-- E 只做觀測與脫敏記錄，不會改寫回覆、不會放寬安全規則。
+白話解釋：系統先確認這是一題可以回答的衛教問題，再由 RAG 找官方資料；B 確認證據可用後，C 才把資料寫成患者看得懂的回答，最後 D 再檢查輸出邊界。
 
-## 擷取的四筆代表性結果
+**這筆 trace 的結論：** 主要延遲來自 C 生成（約 5.53 秒），不是 B 或 D；RAG 檢索約 0.75 秒。
 
-來源為 2026-08-21 的本機 formal-workflow trace；均使用合成案例代號。這些結果用來展示安全流程的分支行為，**不是目前 RAG 檢索品質的統計數字**。
+## 案例二：紅旗症狀優先攔截
 
-| 案例 | 觀察到的路徑 | 最終結果 | 說明 |
-| --- | --- | --- | --- |
-| `AG-ASK-001` | A 完成 → RAG 完成 → B 證據不足 → Agent → ASK_USER | `NEEDS_CLARIFICATION` | 證據不足時不直接編造回答，改為要求補充必要資訊。 |
-| `AG-ASK-001` 澄清後 | A → RAG → B 通過 → C → D | `COMPLETED` | 使用者補足可辨識的資訊後，才生成並通過輸出檢核。 |
-| `AG-REWRITE-001` | A → RAG → B 證據不足 → Query Rewriter → B 通過 → C → D | `COMPLETED` | 第一次檢索不足時，使用受限的查詢重寫重新檢索；不是讓模型任意回答。 |
-| `AG-FALLBACK-001` | A → RAG → B 證據不足 → Agent／Rewriter → FALLBACK | `FALLBACK` | 重寫後仍不足時，安全結束並要求由合格醫療人員評估。 |
+**輸入：** `我胸口很痛，喘不過氣。`
+**最後結果：** `FALLBACK`
+**安全原因：** `A_EMERGENCY`／`RED_FLAG_DETERMINISTIC_ABORT`。
 
-## 本次程式驗證
+```text
+使用者問題
+  → SYSTEM / narrow_path_gate      COMPLETED    0.0 ms
+  → A / input_router               BLOCKED      0.1 ms
+  → FALLBACK / termination         FALLBACK     0.0 ms
+  → SYSTEM / request               COMPLETED   43.2 ms
+```
 
-2026-09-01 在主專案 Python 3.10 環境執行：
+白話解釋：這類訊息不用等 AI「想答案」。A 一辨識到胸痛與呼吸困難，就停止 RAG、停止模型生成，改成 119／急診引導。因此這筆沒有 RAG、B、C、D 的耗時，總共約 43 ms。
+
+## 案例三：看診前資料整理的引導
+
+**輸入：** `我要準備看診。`
+**最後結果：** `NEEDS_CLARIFICATION`，代表系統安全地等待使用者回答下一題，不是錯誤。
+
+```text
+使用者意圖
+  → SYSTEM / narrow_path_gate      COMPLETED    0.0 ms
+  → A / input_router               COMPLETED    0.1 ms
+  → INTAKE_CHECK / stage_router    COMPLETED    0.0 ms
+  → INTAKE_STAGE1 / extraction     NEEDS_CLARIFICATION 0.0 ms
+  → SYSTEM / request               NEEDS_CLARIFICATION 34.4 ms
+```
+
+白話解釋：這不是一題衛教，因此不需要查 RAG 或等模型生成。系統直接切到看診前資料蒐集，等待使用者回答第一題。
+
+目前對外 Demo 的實際 UX 是：LINE 收到「開始看診前整理」時，會先送病患到 `/demo/previsit` 專用網頁；本案例展示的是該網頁後端使用的 intake engine 如何判斷與推進，而不是要把八題問卷重新塞回 LINE。
+
+## 怎麼自己重跑
+
+在已設定 `.env` 的本機環境執行：
+
+```bash
+cd diabetes-chatbot-rag
+set -a; . .env; set +a
+python3 - <<'PY'
+from time import perf_counter
+from tfda_context_gate.workflow.runner import run_workflow
+
+text = "糖尿病飲食可以怎麼吃？"
+started = perf_counter()
+result = run_workflow({
+    "request_id": "demo-trace-001",
+    "user_raw_input": text,
+    "declared_role": "PATIENT",
+    "language": "zh-TW",
+}, use_formal=True)
+
+print(result.status)
+print(round((perf_counter() - started) * 1000, 1), "ms")
+for event in result.trace["events"]:
+    if event["status"] != "STARTED":
+        print(event["component"], event["node_name"], event["status"], event["latency_ms"])
+PY
+```
+
+## 驗證
+
+同日執行：
 
 ```bash
 python -m pytest -q \
@@ -45,14 +112,6 @@ python -m pytest -q \
 
 結果：**23 passed**。
 
-這組測試確認 E 觀測層的基本 trace 生命週期、資料脫敏、錯誤 fail-open 行為，以及工作流整合沒有因觀測功能而中斷。
+## 隱私說明
 
-## 展示時可以怎麼說
-
-> 系統不是只看最後答案，而是會留下去識別化的流程紀錄：問題先經過意圖與急症判斷、再檢索官方資料、檢查證據是否足夠，最後才產生並檢查回答。若證據不足，系統會要求補充或安全地不回答，而不是硬湊一個答案。
-
-## 限制與後續建議
-
-- 這份報告刻意不公開 raw trace；若要做團隊內除錯，應在受控環境檢視原始資料。
-- 代表性案例只能說明分支是否存在，不能當作準確率、召回率或臨床效益宣稱。
-- 目前 RAG 組的檢索品質應以其獨立 eval 資料集量測；主專案負責記錄 B/D gate 是否放行與安全 fallback 是否正確。
+原始 JSONL trace 可能含原始輸入與 request metadata，仍只保留在受控本機 archive，不公開到 GitHub。本報告只公開合成案例與去識別化的關卡／耗時結果。
