@@ -113,7 +113,9 @@ JSON 絕不包含秘密值，僅告知是否設定與修復提示。
 - **LINE 真機缺項**：`LINE_CHANNEL_SECRET` / `LINE_CHANNEL_ACCESS_TOKEN` 未設 → 從 LINE Developers Console 複製；`LINE_IDENTITY_HASH_KEY` 建議 ≥16 隨機字串；`LINE_SESSION_DB_PATH` 確保 `data/processed` 可寫。
 - **callback**：真機需公開 `https://`（ngrok / Cloud Run），`localhost` 僅本地可用。
 - **簽章驗證**：`LINE_ALLOW_UNSIGNED_WEBHOOK` 正式環境必須 `false`。
-- **Rich Menu**：本工具不呼叫 LINE API，請手動預覽 `GET /api/line/rich-menu?patient_portal_url=https://...` 後再建立。
+- **Rich Menu**：LINE 只放一個病患入口「開始看診前整理」，醫護入口不放入。可先用本機 CLI 產生 JSON：
+  `python3 -m scripts.demo.render_line_rich_menu --patient-portal-url https://.../demo/previsit --output /tmp/tfda-patient-rich-menu.json`
+  。CLI 與 `GET /api/line/rich-menu` 都只產生定義、不呼叫 LINE API；請人工審核 JSON 後，在 LINE Developers Console 建立 Rich Menu、上傳圖片並綁定官方帳號。Demo 請用無 `?token=...` 的 `/demo/previsit`，讓系統在點擊後才產生使用者專屬短期 token。
 - **Demo clinician**：`LINE_DEMO_MODE=true` 時必須同時設定 `DEMO_CLINICIAN_IDS`。
 
 ## 安全保證

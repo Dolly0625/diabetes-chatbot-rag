@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>醫護唯讀入口｜糖尿病照護 Demo</title>
+  <script src="/static/jsqr.min.js"></script>
+  <script>if(typeof jsQR==="undefined"){document.write('<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"><\/script>');}</script>
   <style>
     :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#18212f;background:#f4f6fa;line-height:1.55}
     *{box-sizing:border-box}body{margin:0}.wrap{max-width:800px;margin:auto;padding:20px 16px 40px}.card{background:#fff;border:1px solid #dce2eb;border-radius:16px;padding:18px;margin:14px 0;box-shadow:0 6px 20px #18212f0b}
@@ -10,6 +12,7 @@
     .status{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.badge{display:inline-flex;border-radius:999px;padding:4px 10px;font-weight:700;font-size:.87rem;background:#e7f0ff;color:#194b8f}.badge.off{background:#fff4dc;color:#8a4b00}.badge.error{background:#fde8e8;color:#9b1c1c}
     label{display:block;margin-top:12px;font-weight:650}input,button{box-sizing:border-box;width:100%;font:inherit;border-radius:10px;padding:11px;margin-top:6px}input{border:1px solid #aab4c3;background:#fff}button{border:0;background:#2457a6;color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#e8edf5;color:#21446f}button:disabled{opacity:.5;cursor:not-allowed}
     .error{color:#9b1c1c;background:#fff0f0;border-radius:10px;padding:10px;margin:10px 0}.success{color:#155d36;background:#eaf7ef;border-radius:10px;padding:10px;margin:10px 0}.hidden{display:none!important}
+    .scanner{margin-top:10px;border:1px solid #dce2eb;border-radius:12px;padding:10px;background:#f8fafc}.scanner video{display:block;width:100%;max-height:280px;object-fit:cover;border-radius:8px;background:#18212f}.scanner-actions{display:flex;gap:8px;align-items:center;margin-top:8px}.scanner-actions button{width:auto;margin:0;background:#e8edf5;color:#21446f}
     .field-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}.field{border:1px solid #dce2eb;border-radius:12px;padding:11px;min-width:0}.field dt{font-weight:700}.field dd{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}.field.missing{background:#f8f9fb;color:#667085}.field.pending{background:#fffaf0;border-color:#eabf71}.field-state{display:block;margin-top:5px;font-size:.8rem;font-weight:700;color:#2457a6}.field.missing .field-state{color:#667085}.field.pending .field-state{color:#9a5b00}
     .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}.meta{background:#f5f7fa;border-radius:10px;padding:9px;font-size:.88rem}.meta strong{display:block}.summary-list{margin:6px 0;padding-left:1.2rem}.summary-list li{margin:3px 0}.audit-table{width:100%;border-collapse:collapse;font-size:.87rem}.audit-table th,.audit-table td{text-align:left;vertical-align:top;border-bottom:1px solid #e4e8ee;padding:8px 5px}.audit-table th{color:#667085}.audit-table td{overflow-wrap:anywhere}.readonly{font-size:.9rem;color:#21446f;background:#f0f5ff;padding:10px;border-radius:10px}
     @media (max-width:580px){.wrap{padding:16px 12px 32px}.card{padding:15px}.field-list,.meta-grid{grid-template-columns:1fr}.audit-table{font-size:.78rem}.audit-table th:nth-child(4),.audit-table td:nth-child(4){display:none}}
@@ -21,11 +24,17 @@
   <section class="card notice warning" aria-label="安全界線"><strong>安全界線</strong><p>摘要可能包含病患自述或家屬轉述，不能取代病史詢問、診斷、處方或專業判斷。危急狀況請依院內流程處理。</p></section>
 
   <section class="card" aria-labelledby="auth-title">
-    <div class="status"><h2 id="auth-title">Demo 身分與分享碼</h2><span id="demo-status" class="badge off">檢查中…</span></div>
-    <p id="demo-message" class="muted">只有伺服器同時開啟 LINE_DEMO_MODE 且目前 ID 命中 allowlist 時，才可使用這個展示入口。</p>
-    <label for="cid">Demo 醫護 ID</label><input id="cid" autocomplete="username" placeholder="例如 doctor-demo">
+    <div class="status"><h2 id="auth-title">Demo 身分與分享碼</h2><span id="demo-status" class="badge">Demo 已啟用</span></div>
+    <p id="demo-message" class="muted">目前伺服器允許 allowlist 內的 Demo 醫護 ID（預設 doctor-demo）。每次讀取都會消耗分享碼並留下 audit。</p>
+    <label for="cid">Demo 醫護 ID</label><input id="cid" autocomplete="username" value="doctor-demo" placeholder="例如 doctor-demo">
     <label for="token">病患一次性分享碼</label><input id="token" autocomplete="one-time-code" spellcheck="false" placeholder="請貼上病患提供的分享碼">
-    <button id="redeem" type="button" disabled>讀取唯讀摘要</button>
+    <input id="qr-file-input" type="file" accept="image/*" capture="environment" style="display:none">
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button id="scan-qr" class="secondary" type="button" style="flex:1;margin-top:0">掃描病患 QR Code</button>
+      <button id="pick-qr-file" class="secondary" type="button" style="flex:1;margin-top:0">拍照／選取 QR 圖片</button>
+    </div>
+    <div id="scanner" class="scanner hidden" aria-live="polite"><video id="scanner-video" playsinline muted></video><div class="scanner-actions"><button id="stop-scan" type="button">停止掃描</button><span id="scanner-status" class="muted">請將 QR Code 放在鏡頭中央</span></div></div>
+    <button id="redeem" type="button" style="margin-top:10px">讀取唯讀摘要</button>
     <div id="error" class="error hidden" role="alert"></div>
   </section>
 
@@ -40,13 +49,15 @@
     <p id="risk" class="muted"></p>
   </section>
 
-  <section class="card" aria-labelledby="audit-title"><h2 id="audit-title">我的存取紀錄</h2><p class="muted">只顯示目前已驗證 Demo 醫護 ID 的 audit，不顯示其他醫護或病患識別資訊。</p><button id="load-audit" class="secondary" type="button" disabled>載入存取紀錄</button><div id="audit-error" class="error hidden" role="alert"></div><div id="audit-empty" class="muted">尚未載入</div><div class="hidden" id="audit-table-wrap"><table class="audit-table"><thead><tr><th>時間</th><th>結果</th><th>動作</th><th>授權</th></tr></thead><tbody id="audit-rows"></tbody></table></div></section>
+  <section class="card" aria-labelledby="audit-title"><h2 id="audit-title">我的存取紀錄</h2><p class="muted">只顯示目前已驗證 Demo 醫護 ID 的 audit，不顯示其他醫護或病患識別資訊。</p><button id="load-audit" class="secondary" type="button">載入存取紀錄</button><div id="audit-error" class="error hidden" role="alert"></div><div id="audit-empty" class="muted">尚未載入</div><div class="hidden" id="audit-table-wrap"><table class="audit-table"><thead><tr><th>時間</th><th>結果</th><th>動作</th><th>授權</th></tr></thead><tbody id="audit-rows"></tbody></table></div></section>
   <p id="startup-message" class="muted" aria-live="polite"></p>
 </main>
 <script>
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const state = {enabled:false, configLoaded:false};
+  const state = {enabled:true, configLoaded:true, scannerStream:null, scannerFrame:null};
+  const scanCanvas = document.createElement('canvas');
+  const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
   const fieldLabels = {known_medications:'目前用藥', allergies:'過敏史', chronic_conditions:'慢性病史', family_history:'家族史', symptom_onset:'症狀開始時間', symptom_description:'主要症狀', symptom_severity:'症狀程度', questions_for_doctor:'想問醫師的問題'};
   const errorText = (status, detail) => {
     const text = typeof detail === 'string' ? detail.toLowerCase() : '';
@@ -62,8 +73,126 @@
     return detail || '操作失敗，請稍後再試。';
   };
   const showError = (selector, message) => { const node = $(selector); node.textContent = message || ''; node.classList.toggle('hidden', !message); };
-  const api = async (url, options = {}) => { const response = await fetch(url, options); let data = {}; try { data = await response.json(); } catch (_) {} if (!response.ok) { const error = new Error(errorText(response.status, data.detail)); error.status = response.status; throw error; } return data; };
-  const format = (value) => Array.isArray(value) ? (value.length ? value.join('、') : '—') : ((value === null || value === undefined || value === '') ? '—' : String(value));
+  const stopScanner = () => {
+    if (state.scannerFrame) { cancelAnimationFrame(state.scannerFrame); state.scannerFrame = null; }
+    if (state.scannerStream) { state.scannerStream.getTracks().forEach((track) => track.stop()); state.scannerStream = null; }
+    const video = $('#scanner-video'); if (video) video.srcObject = null;
+    $('#scanner').classList.add('hidden');
+  };
+
+  const decodeQrFromImageData = (imageData) => {
+    if (typeof jsQR !== 'undefined') {
+      try {
+        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+        if (code && code.data && code.data.trim()) return code.data.trim();
+      } catch (_) {}
+    }
+    return null;
+  };
+
+  const handleImageFile = (file) => {
+    if (!file) return;
+    showError('#error', '');
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        scanCanvas.width = img.width;
+        scanCanvas.height = img.height;
+        scanCtx.drawImage(img, 0, 0);
+        const imgData = scanCtx.getImageData(0, 0, img.width, img.height);
+        const decoded = decodeQrFromImageData(imgData);
+        if (decoded) {
+          $('#token').value = decoded;
+          showError('#error', '');
+          $('#redeem').click();
+        } else {
+          showError('#error', '圖片中未辨識到清晰的 QR Code，請確認圖片或手動貼上分享碼。');
+        }
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const startScanner = async () => {
+    showError('#error', '');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      $('#qr-file-input').click();
+      return;
+    }
+    try {
+      state.scannerStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false
+      });
+      const video = $('#scanner-video');
+      video.srcObject = state.scannerStream;
+      $('#scanner').classList.remove('hidden');
+      $('#scanner-status').textContent = '請將 QR Code 放在鏡頭中央';
+      await video.play();
+
+      let lastScanTime = 0;
+      const scanFrame = async (timestamp) => {
+        if (!state.scannerStream) return;
+        if (video.readyState >= video.HAVE_CURRENT_DATA && video.videoWidth > 0 && timestamp - lastScanTime > 150) {
+          lastScanTime = timestamp;
+          scanCanvas.width = video.videoWidth;
+          scanCanvas.height = video.videoHeight;
+          scanCtx.drawImage(video, 0, 0, scanCanvas.width, scanCanvas.height);
+          const imgData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+          const decoded = decodeQrFromImageData(imgData);
+          if (decoded) {
+            $('#token').value = decoded;
+            stopScanner();
+            $('#scanner-status').textContent = '已讀取分享碼，正在驗證…';
+            $('#redeem').click();
+            return;
+          }
+        }
+        state.scannerFrame = requestAnimationFrame(scanFrame);
+      };
+      state.scannerFrame = requestAnimationFrame(scanFrame);
+    } catch (_) {
+      stopScanner();
+      $('#qr-file-input').click();
+    }
+  };
+  const humanize = (val) => {
+    if (val === null || val === undefined || String(val).trim() === '') return '—';
+    const s = String(val).trim();
+    const map = {
+      'no_current_medications': '目前無用藥',
+      'no_medications': '目前無用藥',
+      'no_meds': '目前無用藥',
+      'no_allergies': '無',
+      'no_allergy': '無',
+      'no_chronic_conditions': '無',
+      'no_chronic': '無',
+      'no_family_history': '無',
+      'no_questions': '無',
+      'no_question': '無',
+      'none': '無',
+      'diabetes': '糖尿病',
+      'diabetes_mellitus': '糖尿病',
+      'dm': '糖尿病',
+      'hypertension': '高血壓',
+      'htn': '高血壓',
+      'hyperlipidemia': '高血脂',
+      'two_weeks_ago': '兩週前',
+      'two_week_ago': '兩週前',
+      '2_weeks_ago': '兩週前',
+      'one_week_ago': '一週前',
+      'one_month_ago': '一個月前',
+      'three_months_ago': '三個月前',
+      'mild': '輕度',
+      'moderate': '中度',
+      'severe': '重度'
+    };
+    const key = s.toLowerCase().replace(/[\s\-_]+/g, '_');
+    return map[key] || s;
+  };
+  const format = (value) => Array.isArray(value) ? (value.length ? value.map(humanize).join('、') : '—') : humanize(value);
   const date = (value) => value ? new Date(value).toLocaleString() : '—';
   const label = (name) => fieldLabels[name] || name;
   const renderFields = (snapshot, missing) => {
@@ -78,10 +207,67 @@
     const risk = data.system_risk_classification; $('#risk').textContent = risk && risk.level ? `系統安全分流：${risk.level}（不是診斷；請依院內流程確認）` : '';
   };
   const renderAudit = (data) => { const events = data.events || []; $('#audit-empty').classList.toggle('hidden', events.length > 0); $('#audit-empty').textContent = events.length ? '' : '目前沒有存取紀錄'; $('#audit-table-wrap').classList.toggle('hidden', events.length === 0); $('#audit-rows').replaceChildren(...events.map((event) => { const row = document.createElement('tr'); [date(event.created_at), event.result === 'ALLOWED' ? '允許' : '拒絕', event.action || '—', event.reason || '—'].forEach((value) => { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }); return row; })); };
-  const setAvailable = (enabled) => { state.enabled = enabled; $('#redeem').disabled = !enabled; $('#load-audit').disabled = !enabled; $('#demo-status').textContent = enabled ? 'Demo 已啟用' : 'Demo 未啟用'; $('#demo-status').className = 'badge ' + (enabled ? '' : 'off'); $('#demo-message').textContent = enabled ? '目前伺服器允許 allowlist 內的 Demo 醫護 ID。每次讀取都會消耗分享碼並留下 audit。' : '伺服器必須同時開啟 LINE_DEMO_MODE 且目前 ID 命中 allowlist，這個入口目前拒絕讀取。'; };
-  $('#redeem').addEventListener('click', async () => { showError('#error',''); const button = $('#redeem'); button.disabled = true; button.textContent = '驗證中…'; try { renderSummary(await api('/api/clinician/share/redeem',{method:'POST',headers:{'content-type':'application/json','X-Demo-Clinician-Id':$('#cid').value.trim()},body:JSON.stringify({token:$('#token').value.trim()})})); } catch (error) { showError('#error', error.message); } finally { button.disabled = !state.enabled; button.textContent = '讀取唯讀摘要'; } });
-  $('#load-audit').addEventListener('click', async () => { showError('#audit-error',''); const button = $('#load-audit'); button.disabled = true; button.textContent = '載入中…'; try { renderAudit(await api('/api/clinician/audit',{headers:{'X-Demo-Clinician-Id':$('#cid').value.trim()}})); } catch (error) { showError('#audit-error', error.message); } finally { button.disabled = !state.enabled; button.textContent = '載入存取紀錄'; } });
-  (async () => { try { const config = await api('/api/line/client-config'); state.configLoaded = true; setAvailable(Boolean(config.demo_clinician_enabled)); } catch (error) { setAvailable(false); $('#startup-message').textContent = error.message || '無法檢查 Demo 設定。'; } })();
+  const api = async (url, options = {}) => { const response = await fetch(url, options); let data = {}; try { data = await response.json(); } catch (_) {} if (!response.ok) { const error = new Error(errorText(response.status, data.detail)); error.status = response.status; throw error; } return data; };
+  $('#scan-qr').addEventListener('click', startScanner);
+  $('#pick-qr-file').addEventListener('click', () => $('#qr-file-input').click());
+  $('#qr-file-input').addEventListener('change', (e) => {
+    if (e.target.files && e.target.files[0]) {
+      handleImageFile(e.target.files[0]);
+    }
+  });
+  $('#stop-scan').addEventListener('click', stopScanner);
+  $('#redeem').addEventListener('click', async () => {
+    showError('#error','');
+    const button = $('#redeem');
+    button.disabled = true;
+    button.textContent = '驗證中…';
+    try {
+      const res = await api('/api/clinician/share/redeem', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'X-Demo-Clinician-Id': ($('#cid').value || 'doctor-demo').trim()
+        },
+        body: JSON.stringify({ token: $('#token').value.trim() })
+      });
+      renderSummary(res);
+    } catch (error) {
+      showError('#error', error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = '讀取唯讀摘要';
+    }
+  });
+  $('#load-audit').addEventListener('click', async () => {
+    showError('#audit-error','');
+    const button = $('#load-audit');
+    button.disabled = true;
+    button.textContent = '載入中…';
+    try {
+      const res = await api('/api/clinician/audit', {
+        headers: {
+          'X-Demo-Clinician-Id': ($('#cid').value || 'doctor-demo').trim()
+        }
+      });
+      renderAudit(res);
+    } catch (error) {
+      showError('#audit-error', error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = '載入存取紀錄';
+    }
+  });
+  window.addEventListener('pagehide', stopScanner);
+  (async () => {
+    try {
+      const config = await api('/api/line/client-config');
+      state.configLoaded = true;
+      if (config.demo_clinician_enabled === false) {
+        $('#demo-status').textContent = 'Demo 未啟用';
+        $('#demo-status').className = 'badge off';
+      }
+    } catch (_) {}
+  })();
 })();
 </script>
 </body>

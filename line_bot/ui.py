@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from line_bot.intake_entry import (
     INTAKE_ENTRY_EXPLANATION,
@@ -42,6 +42,22 @@ PREVISIT_ROOM_BUTTON_LABEL: str = PREVISIT_ROOM_TRIGGER_TEXT  # 8 字元，符�
 # 無連結時的安全說明（不可點狀態，不可造假連結）
 PREVISIT_ROOM_NO_URL_HINT: str = "尚未產生專用連結。請點下方按鈕，系統將產生安全連結。"
 PREVISIT_ROOM_WITH_URL_HINT: str = "連結已就緒，請點下方按鈕進入專用對談室。"
+
+
+def is_valid_rich_menu_url(value: str | None) -> bool:
+    """Validate a shared, tokenless HTTPS URL for a patient Rich Menu."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlparse(value.strip())
+    except Exception:
+        return False
+    if parsed.scheme != "https" or not parsed.netloc:
+        return False
+    # Rich Menus are shared by all users.  A one-user intake token must never
+    # be embedded in the menu URI.
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    return "token" not in {key.lower() for key in query}
 
 
 def _is_valid_room_url(room_url: str | None) -> bool:
@@ -241,18 +257,28 @@ CLINICIAN_ACTIONS = [
 
 
 def build_rich_menu_payload(*, patient_portal_url: str) -> dict:
-    """產生可交給 LINE Rich Menu API 的 v0.1 定義；不在啟動時修改外部狀態。"""
+    """產生病患用 Rich Menu 定義；不在啟動時修改外部狀態。
+
+    LINE 是日常聊天／衛教入口；看診前資料整理則由這個單一入口帶往
+    專用病患網頁。醫護端刻意不放進病患選單，避免把兩種角色混在一起。
+    ``patient_portal_url`` 必須由部署者提供已授權的 HTTPS 網址（Demo 可用
+    ``/demo/previsit``，正式 LIFF 則用病患 room URL）。
+    """
+    if not is_valid_rich_menu_url(patient_portal_url):
+        raise ValueError("patient_portal_url must be a tokenless HTTPS URL")
     return {
         "size": {"width": 2500, "height": 1686},
         "selected": True,
-        "name": "TFDA 糖尿病照護 Demo v0.1",
-        "chatBarText": "開啟功能選單",
+        "name": "TFDA 看診前整理 Demo v0.1",
+        "chatBarText": "開始看診前整理",
         "areas": [
-            {"bounds": {"x": 0, "y": 0, "width": 833, "height": 843}, "action": {"type": "message", "label": "健康諮詢", "text": "開始健康諮詢"}},
-            {"bounds": {"x": 833, "y": 0, "width": 834, "height": 843}, "action": {"type": "message", "label": "準備看診", "text": "我要準備看診"}},
-            {"bounds": {"x": 1667, "y": 0, "width": 833, "height": 843}, "action": {"type": "message", "label": "上傳藥袋", "text": "我要上傳藥袋"}},
-            {"bounds": {"x": 0, "y": 843, "width": 833, "height": 843}, "action": {"type": "message", "label": "看診摘要", "text": "查看看診摘要"}},
-            {"bounds": {"x": 833, "y": 843, "width": 834, "height": 843}, "action": {"type": "uri", "label": "分享給醫護", "uri": patient_portal_url}},
-            {"bounds": {"x": 1667, "y": 843, "width": 833, "height": 843}, "action": {"type": "message", "label": "緊急協助", "text": "使用說明與緊急協助"}},
+            {
+                "bounds": {"x": 0, "y": 0, "width": 2500, "height": 1686},
+                "action": {
+                    "type": "uri",
+                    "label": "開始看診前整理",
+                    "uri": patient_portal_url,
+                },
+            },
         ],
     }

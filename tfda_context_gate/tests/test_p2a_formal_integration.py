@@ -57,8 +57,9 @@ def test_p2a_formal_deterministic_partial_plus_formal_complement(tmp_path, monke
                 ],
                 confidence=0.9,
             )
-        # 其它句走原本 fallback（避免影響後續）
-        return original_interpret(envelope)
+        # 其它句走 deterministic fallback（避免發送真實網路 LLM 請求超時）
+        from tfda_context_gate.conversation.interpreter import DeterministicConversationInterpreter
+        return DeterministicConversationInterpreter().interpret(envelope)
 
     # 替換 interpret 但保留 Formal 實例（符合「不直接塞 Fake」但 mock transport）
     interp.interpret = _mock_interpret  # type: ignore[method-assign]

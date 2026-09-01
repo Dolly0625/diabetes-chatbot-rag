@@ -96,6 +96,36 @@ def _build_canonical_map(variants: dict[str, list[str]]) -> dict[str, str]:
 _CHRONIC_CANONICAL_MAP: dict[str, str] = _build_canonical_map(_CHRONIC_VARIANTS)
 _MED_CANONICAL_MAP: dict[str, str] = _build_canonical_map(_MED_VARIANTS)
 
+_SLUG_CANONICAL_MAP: dict[str, str] = {
+    "nocurrentmedications": "目前無用藥",
+    "nomedications": "目前無用藥",
+    "nomeds": "目前無用藥",
+    "noallergies": "無",
+    "noallergy": "無",
+    "nochronicconditions": "無",
+    "nochronic": "無",
+    "nofamilyhistory": "無",
+    "noquestions": "目前無特別想問的問題",
+    "noquestion": "目前無特別想問的問題",
+    "twoweeksago": "兩週前",
+    "twoweekago": "兩週前",
+    "2weeksago": "兩週前",
+    "oneweekago": "一週前",
+    "1weekago": "一週前",
+    "onemonthago": "一個月前",
+    "1monthago": "一個月前",
+    "threemonthsago": "三個月前",
+    "3monthsago": "三個月前",
+    "severaldaysago": "幾天前",
+    "afewdaysago": "幾天前",
+    "recently": "最近",
+    "today": "今天",
+    "yesterday": "昨天",
+    "mild": "輕度",
+    "moderate": "中度",
+    "severe": "重度",
+}
+
 _CHRONIC_NEGATION_RE = re.compile(r"(沒有|無|否認|未有|不曾|沒得|未曾|沒有得|沒有患|未患|不是.*高血壓|沒有.*高血壓)")
 _CHRONIC_QUESTION_RE = re.compile(r"(是什麼|是甚麼|是什麼\?|是甚麼\?|什麼是|為何|為甚麼|怎麼|如何)")
 
@@ -107,6 +137,8 @@ def _canonicalize_value(field: str, value: str) -> str:
     if v == "無":
         return v
     key = _normalize_canonical_key(v)
+    if key in _SLUG_CANONICAL_MAP:
+        return _SLUG_CANONICAL_MAP[key]
     if field == "chronic_conditions":
         return _CHRONIC_CANONICAL_MAP.get(key, v)
     if field == "known_medications":
@@ -747,12 +779,16 @@ def candidates_to_intake_updates(
             except Exception:
                 seen_lower = {re.sub(r"\s+", "", x.lower()) for x in merged}
             for v in vals:
+                if field == "allergies":
+                    v = re.sub(r"^(我|我有|我有對|對)\s*", "", v).strip()
                 try:
                     key = re.sub(r"\s+", "", _canonicalize_value(field, v).lower())
                 except Exception:
                     key = re.sub(r"\s+", "", v.lower())
-                if key not in seen_lower and len(merged) < 10:
-                    if field == "chronic_conditions":
+                # Check if exact key exists or if a cleaner version already in seen
+                is_sub = any(key in s or s in key for s in seen_lower) if field in ("allergies", "chronic_conditions", "known_medications") else False
+                if (key not in seen_lower and not is_sub) and len(merged) < 10:
+                    if field in ("chronic_conditions", "known_medications"):
                         try:
                             v = _canonicalize_value(field, v)
                         except Exception:

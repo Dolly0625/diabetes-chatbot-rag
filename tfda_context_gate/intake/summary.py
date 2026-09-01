@@ -41,23 +41,58 @@ def generate_previsit_summary(intake: PreVisitIntake | dict, *, request_id: str)
         else:
             missing.append(field)
 
+    def _humanize(v: Any) -> str:
+        if not v:
+            return ""
+        s = str(v).strip()
+        slugs = {
+            "no_current_medications": "目前無用藥",
+            "no_medications": "目前無用藥",
+            "no_meds": "目前無用藥",
+            "no_allergies": "無",
+            "no_allergy": "無",
+            "no_chronic_conditions": "無",
+            "no_chronic": "無",
+            "no_family_history": "無",
+            "no_questions": "目前無特別想問的問題",
+            "no_question": "目前無特別想問的問題",
+            "none": "無",
+            "diabetes": "糖尿病",
+            "diabetes_mellitus": "糖尿病",
+            "dm": "糖尿病",
+            "hypertension": "高血壓",
+            "htn": "高血壓",
+            "hyperlipidemia": "高血脂",
+            "two_weeks_ago": "兩週前",
+            "two_week_ago": "兩週前",
+            "2_weeks_ago": "兩週前",
+            "one_week_ago": "一週前",
+            "one_month_ago": "一個月前",
+            "three_months_ago": "三個月前",
+            "mild": "輕度",
+            "moderate": "中度",
+            "severe": "重度",
+        }
+        k = s.lower().replace(" ", "_").replace("-", "_")
+        return slugs.get(k, s)
+
     parts: list[str] = []
     if intake.known_medications and not _is_sentinel(intake.known_medications):
-        parts.append(f"已知用藥：{', '.join(intake.known_medications)}")
+        parts.append(f"已知用藥：{', '.join(_humanize(x) for x in intake.known_medications)}")
     if intake.allergies and not _is_sentinel(intake.allergies):
-        parts.append(f"過敏史：{', '.join(intake.allergies)}")
+        parts.append(f"過敏史：{', '.join(_humanize(x) for x in intake.allergies)}")
     if intake.chronic_conditions and not _is_sentinel(intake.chronic_conditions):
-        parts.append(f"慢性病史：{', '.join(intake.chronic_conditions)}")
+        parts.append(f"慢性病史：{', '.join(_humanize(x) for x in intake.chronic_conditions)}")
     if intake.family_history and not _is_sentinel(intake.family_history):
-        parts.append(f"家族史：{', '.join(intake.family_history)}")
+        parts.append(f"家族史：{', '.join(_humanize(x) for x in intake.family_history)}")
     if intake.symptom_onset and not _is_sentinel(intake.symptom_onset):
-        parts.append(f"症狀起始：{intake.symptom_onset}")
+        parts.append(f"症狀起始：{_humanize(intake.symptom_onset)}")
     if intake.symptom_description and not _is_sentinel(intake.symptom_description):
-        parts.append(f"症狀描述：{intake.symptom_description}")
+        parts.append(f"症狀描述：{_humanize(intake.symptom_description)}")
     if intake.symptom_severity and not _is_sentinel(intake.symptom_severity):
-        parts.append(f"症狀程度：{intake.symptom_severity}")
+        parts.append(f"症狀程度：{_humanize(intake.symptom_severity)}")
     if intake.questions_for_doctor and not _is_sentinel(intake.questions_for_doctor):
-        parts.append(f"想問醫師的問題：{'；'.join(intake.questions_for_doctor)}")
+        parts.append(f"想問醫師的問題：{'；'.join(_humanize(x) for x in intake.questions_for_doctor)}")
     if intake.time_frame:
         tf = intake.time_frame.value if hasattr(intake.time_frame, "value") else str(intake.time_frame)
         parts.append(f"時間框架：{tf}")

@@ -44,7 +44,13 @@ class ShareGrantService:
             if str(session.actor_role) == "RELATED_PERSON"
             else PermissionScope.SHARE_OWN_SUMMARY
         )
-        if session.status != "SUBMITTED" or required_scope not in session.permission_scopes:
+        if (
+            session.status != "SUBMITTED"
+            or required_scope not in session.permission_scopes
+            or session.pending_field is not None
+            or session.pending_question is not None
+            or session.pending_action is not None
+        ):
             raise ShareGrantDenied("session is not confirmed or actor cannot share it")
         now = datetime.now(timezone.utc)
         token = secrets.token_urlsafe(32)

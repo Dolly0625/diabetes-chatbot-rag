@@ -25,13 +25,24 @@ class RiskSignalPolicy:
         ("FOOT_ULCER_OR_WOUND", re.compile(r"(?:足部|腳|腳趾).{0,8}(?:潰瘍|流膿|傷口.{0,6}(?:感染|流膿|惡臭|不癒合))", re.IGNORECASE)),
         ("WOUND_INFECTION", re.compile(r"傷口.{0,8}(?:感染|紅腫|流膿|惡臭)", re.IGNORECASE)),
         ("TISSUE_NECROSIS", re.compile(r"皮膚變黑|組織壞死|壞疽|gangrene|necrosis", re.IGNORECASE)),
-        ("SEVERE_HYPOGLYCEMIA", re.compile(r"低血糖.{0,12}(?:抽搐|昏迷|叫不醒|無法進食)|抽搐.{0,8}低血糖", re.IGNORECASE)),
+        ("SEVERE_HYPOGLYCEMIA", re.compile(r"低血糖.{0,12}(?:抽搐|昏迷|叫不醒|無法進食|冒冷汗|發抖|心悸|頭暈)|抽搐.{0,8}低血糖|冒冷汗|發抖冒冷汗|手抖冒冷汗|血糖.*(?:不到|只有|低於|量.*)?\s*([2-6][0-9]|70)", re.IGNORECASE)),
         ("POSSIBLE_DKA", re.compile(r"(?:呼吸.*水果味|水果味.*呼吸|酮酸中毒|深快呼吸).{0,12}|(?:高血糖).{0,12}(?:持續嘔吐|腹痛)", re.IGNORECASE)),
         ("POSSIBLE_SEPSIS", re.compile(r"(?:傷口|感染).{0,12}(?:意識不清|呼吸急促|高燒不退|發冷發抖)", re.IGNORECASE)),
     )
 
     def classify(self, text: str) -> SystemRiskClassification:
         normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(text))).strip()
+
+        # 若為一般衛教／假設性詢問句，且未含當下第一人稱急迫發作詞，不觸發紅旗攔截
+        if self._is_general_education_inquiry(normalized):
+            return SystemRiskClassification(
+                level="NO_DEFINED_SIGNAL",
+                signals=[],
+                action="CONTINUE_BOUNDED_WORKFLOW",
+                basis="no_defined_signal_detected",
+                limitations=_LIMITATION,
+            )
+
         signals: list[str] = []
         for signal, pattern in self.SIGNAL_PATTERNS:
             if self._has_affirmed_match(normalized, pattern):
@@ -52,6 +63,17 @@ class RiskSignalPolicy:
             basis="no_defined_signal_detected",
             limitations=_LIMITATION,
         )
+
+    @staticmethod
+    def _is_general_education_inquiry(text: str) -> bool:
+        if re.search(r"我現在|我目前|我剛剛?|快暈倒|叫不醒|抽搐|昏迷|痛到|快受不了", text):
+            return False
+        if re.search(r"^(?:請問|想了解|想問|請教|請說明|為什麼|如何|怎樣)", text):
+            if re.search(r"怎麼辦|如何處理|怎麼處理|的原因|有什麼症狀|是什麼|要吃什麼|要怎麼做|嗎[？\?]?$|[？\?]$", text):
+                return True
+        if re.search(r"(?:如果|若|要是).*(?:該怎麼辦|要怎麼處理|如何處理|可以吃什麼|要吃什麼)", text):
+            return True
+        return False
 
     @staticmethod
     def _has_affirmed_match(text: str, pattern: re.Pattern[str]) -> bool:

@@ -55,6 +55,23 @@ def test_static_previsit_room_served():
             dummy.unlink()
 
 
+def test_public_demo_entry_is_opt_in_and_creates_an_isolated_room(monkeypatch):
+    client, app_mod, _ = _make_client()
+    monkeypatch.setenv("LINE_DEMO_MODE", "false")
+    monkeypatch.setenv("DEMO_WEB_ENABLED", "false")
+    assert client.get("/demo/previsit", follow_redirects=False).status_code == 404
+
+    monkeypatch.setenv("LINE_DEMO_MODE", "true")
+    monkeypatch.setenv("DEMO_WEB_ENABLED", "true")
+    response = client.get("/demo/previsit", follow_redirects=False)
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/patient/previsit-room?token=")
+    assert "web-demo-" not in location
+    assert response.headers["cache-control"] == "no-store"
+    assert client.get(location).status_code == 200
+
+
 def test_get_previsit_no_token_401():
     client, app_mod, tmp = _make_client()
     # reset to no demo token
@@ -81,6 +98,13 @@ def test_get_previsit_via_query_token():
     r = client.get(f"/api/patient/previsit-room?token={raw}")
     assert r.status_code == 200
     assert r.json()["session_id"] == sess.session_id
+
+
+def test_doctor_question_leadin_is_not_stored_as_a_second_question():
+    _, app_mod, _ = _make_client()
+    assert app_mod._clean_previsit_doctor_question("我想問醫生 可以吃炸雞嗎") == "可以吃炸雞嗎"
+    assert app_mod._clean_previsit_doctor_question("想問醫師的問題 可以喝珍珠奶茶嗎") == "可以喝珍珠奶茶嗎"
+    assert app_mod._clean_previsit_doctor_question("血糖多少正常") == "血糖多少正常"
 
 
 def test_cross_user_403():
@@ -230,6 +254,115 @@ def test_line_trigger_creates_token():
     flex = app_mod._build_previsit_flex_message(f"https://example.com/patient/previsit-room?token={raw}")
     assert flex["type"] == "flex"
     assert "開啟看診前對談室" in str(flex)
+
+
+def test_expired_line_retry_has_no_previsit_side_effect():
+    _, app_mod, _ = _make_client()
+    assert app_mod._is_expired_line_reply_event({"timestamp": 1_000}, now_ms=61_001) is True
+    assert app_mod._is_expired_line_reply_event({"timestamp": 1_000}, now_ms=60_999) is False
+    # Missing/malformed timestamps must preserve normal webhook handling.
+    assert app_mod._is_expired_line_reply_event({}, now_ms=61_001) is False
+    assert app_mod._is_expired_line_reply_event({"timestamp": "bad"}, now_ms=61_001) is False
+
+
+def test_room_greeting_and_opening_phrase_never_become_intake_values():
+    client, app_mod, _ = _make_client()
+    raw, session = _create_session_and_token(client, app_mod, "room-meta-user")
+    started = client.post(
+        "/api/patient/previsit-room/chat",
+        headers={"X-Intake-Token": raw},
+        json={"message": "開始新的整理", "version": session.version, "client_message_id": "start-room"},
+    )
+    assert started.status_code == 200
+    current = started.json()
+    before = current["intake_snapshot"]
+    for index, text in enumerate(("你好", "有病啊", "我要看診啊")):
+        response = client.post(
+            "/api/patient/previsit-room/chat",
+            headers={"X-Intake-Token": raw},
+            json={"message": text, "version": current["version"], "client_message_id": f"meta-{index}"},
+        )
+        assert response.status_code == 200
+        current = response.json()
+        assert current["intake_snapshot"] == before
+        assert "吃藥" in current["reply"]
+
+
+def test_room_naturalizes_no_medication_without_exposing_internal_sentinel():
+    """The web room speaks naturally while storage keeps its existing value."""
+    client, app_mod, _ = _make_client()
+    raw, session = _create_session_and_token(client, app_mod, "room-natural-user")
+    started = client.post(
+        "/api/patient/previsit-room/chat",
+        headers={"X-Intake-Token": raw},
+        json={"message": "開始新的整理", "version": session.version, "client_message_id": "natural-start"},
+    )
+    assert started.status_code == 200
+    current = started.json()
+
+    response = client.post(
+        "/api/patient/previsit-room/chat",
+        headers={"X-Intake-Token": raw},
+        json={
+            "message": "沒有吃藥",
+            "version": current["version"],
+            "client_message_id": "natural-no-medication",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["reply"] == (
+        "了解，我先記為目前沒有固定用藥。\n\n"
+        "接下來想確認：有沒有藥物或食物過敏？沒有、不確定都可以直接說。"
+    )
+    assert "none" not in payload["reply"].lower()
+    assert payload["intake_stage"] == "stage1"
+    stored = app_mod._get_conversation_orchestrator().repository.get(session.session_id).intake_snapshot.known_medications
+    assert stored  # presentation changed; the normalizer's stored value remains present
+
+
+def test_room_uncertain_answer_keeps_uncertainty_wording():
+    """A genuinely uncertain answer must not be rewritten as a confirmation."""
+    client, app_mod, _ = _make_client()
+    raw, session = _create_session_and_token(client, app_mod, "room-uncertain-user")
+    started = client.post(
+        "/api/patient/previsit-room/chat",
+        headers={"X-Intake-Token": raw},
+        json={"message": "開始新的整理", "version": session.version, "client_message_id": "uncertain-start"},
+    )
+    assert started.status_code == 200
+    current = started.json()
+    response = client.post(
+        "/api/patient/previsit-room/chat",
+        headers={"X-Intake-Token": raw},
+        json={
+            "message": "不確定藥名",
+            "version": current["version"],
+            "client_message_id": "uncertain-medication",
+        },
+    )
+    assert response.status_code == 200
+    reply = response.json()["reply"]
+    assert "待看診確認" in reply or "不確定" in reply
+    assert "了解，我先記為目前沒有固定用藥" not in reply
+
+
+def test_line_sdk_flex_serialization_keeps_card_body_and_footer():
+    """A dict looks valid in unit tests but the LINE SDK drops its blocks.
+
+    This mirrors the production conversion used by the webhook before a card
+    is sent to LINE, preventing an API-side "At least one block" rejection.
+    """
+    from linebot.v3.messaging import FlexContainer, FlexMessage
+    from line_bot.ui import build_previsit_room_flex_message
+
+    msg = build_previsit_room_flex_message(room_url="https://example.com/patient/previsit-room?token=abc")
+    outgoing = FlexMessage(
+        altText=msg["altText"],
+        contents=FlexContainer.from_dict(msg["contents"]),
+    ).to_dict()
+    assert outgoing["contents"]["body"]["type"] == "box"
+    assert outgoing["contents"]["footer"]["contents"][0]["action"]["type"] == "uri"
 
 
 def _parse_sse_events(text: str) -> list[dict]:

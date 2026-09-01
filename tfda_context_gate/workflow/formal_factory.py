@@ -18,6 +18,7 @@ def _build_formal_extractor():
 def _build_formal_retriever():
     from tfda_context_gate.run_config import env_value
 
+    backend = (env_value("RAG_BACKEND", "diabetes_rag") or "diabetes_rag").strip().lower()
     external_url = (env_value("RAG_RETRIEVAL_URL", "") or "").strip()
     if external_url:
         from tfda_context_gate.rag.external_retriever import ExternalContractRetriever
@@ -31,21 +32,25 @@ def _build_formal_retriever():
         # silently to fixture evidence because of a typo or unsafe URL.
         return ExternalContractRetriever(external_url, timeout_s=timeout_s)
 
+    if backend == "diabetes_rag":
+        try:
+            from tfda_context_gate.rag.diabetes_rag_retriever import DiabetesRAGRetriever
+
+            return DiabetesRAGRetriever()
+        except Exception:
+            pass
+
     try:
-        from tfda_context_gate.rag.tfda_retriever import TFDADrugSafetyRetriever
+        from tfda_context_gate.rag.hpa_retriever import MultiSourceRetriever
 
         embedding_model = (
             env_value("EMBED_MODEL", "")
             or env_value("OLLAMA_EMBED_MODEL", "")
-            or ""
+            or "ollama/bge-m3:latest"
         ).strip()
-        if not embedding_model:
-            raise RuntimeError("EMBED_MODEL or OLLAMA_EMBED_MODEL is required for formal retrieval")
         if "/" not in embedding_model and embedding_model.startswith("bge-"):
             embedding_model = f"ollama/{embedding_model}"
-        retriever = TFDADrugSafetyRetriever(embedding_model=embedding_model)
-        retriever._ensure_store()
-        return retriever
+        return MultiSourceRetriever(embedding_model=embedding_model)
     except Exception:
         from tfda_context_gate.rag import FixtureRetriever
 

@@ -95,6 +95,9 @@ def test_ready_device_when_all_set(monkeypatch, tmp_path):
     monkeypatch.setenv("LINE_LIFF_ID", "liff-123")
     monkeypatch.setenv("PATIENT_PORTAL_URL", "https://example.com")
     monkeypatch.setenv("LINE_CALLBACK_URL", "https://example.com/callback")
+    # This test is about the minimum device-demo configuration.  Isolate it
+    # from a developer's optional local clinician-demo flag.
+    monkeypatch.setenv("LINE_DEMO_MODE", "false")
     checks = run_all_checks()
     readiness = compute_readiness(checks)
     assert readiness == READY_DEVICE

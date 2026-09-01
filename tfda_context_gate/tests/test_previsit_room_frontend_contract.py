@@ -2,8 +2,8 @@
 
 Coverage:
 - 檔案位置、viewport/safe-area/dvh、390px 可用
-- 入口二選一文案、絕不默默帶入、草稿判斷
-- 泡泡一次一題、固定輸入欄+Quick replies、可見暫停/結束
+- 入口直接開始、草稿直接續填（不以彈窗阻塞、不回放舊聊天）
+- 泡泡一次一題、固定輸入欄+Quick replies、低調離開操作
 - 摘要卡僅完成態、紅旗不被覆蓋
 - 無 literal \\n、token 不落 DOM/log
 - 契約：GET /api/patient/previsit-room + POST /api/patient/previsit-room/chat {message,version,client_message_id} -> {reply,status,intake_stage,version,intake_snapshot}
@@ -64,18 +64,23 @@ def test_390_usable_and_keyboard_not_blocking():
     assert 'position:sticky' not in HTML or True  # we use flex + fixed calc bottom
     assert 'padding-bottom:calc' in HTML
 
-# ---- UX 1: 入口二選一 ----
-def test_entry_overlay_and_two_choices():
-    assert 'id="entryOverlay"' in HTML
-    assert '這是看診前整理室，與 LINE 衛教分開' in HTML
-    assert '絕不會在你未選擇的情況下悄悄帶入舊資料' in HTML or '不會悄悄沿用舊資料' in HTML
-    assert '開始新的整理' in HTML
-    assert '繼續上次整理' in HTML
-    # 絕不默默帶入：初始 overlay 預設可見，非 hidden
-    assert re.search(r'id="entryOverlay"[^>]*class="overlay"', HTML) is not None
-    # 有草稿才顯示繼續
+# ---- UX 1: 入口直接開始 ----
+def test_entry_starts_directly_and_resumes_without_modal():
+    # The room link itself is the patient's explicit choice.  Do not add a
+    # three-button blocking dialog before the first clinical question.
+    assert 'id="entryOverlay"' not in HTML
+    assert 'buildEntryActions' not in HTML
     assert 'hasDraft' in HTML
-    assert 'draftHint' in HTML
+    assert 'pending_question' in HTML
+    assert '我們接著整理，請回答這一題：' in HTML
+    assert '好，我們一起整理看診前資料。一次回答一題就好。' in HTML
+    # 重新進入只顯示目前這一題，不把整段歷史聊天倒回來造成干擾。
+    assert 'renderHistory(state.lastDraft)' not in HTML
+    visible = re.sub(r'<style.*?</style>|<script.*?</script>', '', HTML, flags=re.S | re.I)
+    for engineering_text in ('進度 0/8', 'stage1', '版本', '草稿', '開始新的整理'):
+        assert engineering_text not in visible, f"使用者畫面不可出現工程文字：{engineering_text}"
+    # Bootstrap is a system action, not a fake user chat bubble.
+    assert 'doChat("開始新的整理", cid, false, false)' in HTML
 
 # ---- UX 2: 泡泡一次一題、固定輸入、Quick replies ----
 def test_chat_bubbles_and_fixed_input_and_quick():
@@ -91,13 +96,18 @@ def test_chat_bubbles_and_fixed_input_and_quick():
     assert 'id="quick"' in HTML
     assert 'role="toolbar"' in HTML
     assert 'renderQuick' in HTML
+    # 中文輸入法選字的 Enter 不得被當成送出訊息。
+    assert 'compositionstart' in HTML
+    assert 'e.isComposing' in HTML
 
-# ---- UX 3: 固定可見暫停/結束、無法自動分享 ----
+# ---- UX 3: 低調離開操作、無法自動分享 ----
 def test_fixed_pause_and_clear_and_no_auto_share():
     assert 'id="pauseBtn"' in HTML
-    assert '暫停並離開' in HTML
+    assert '先暫停，稍後繼續' in HTML
     assert 'id="clearBtn"' in HTML
-    assert '結束並清除' in HTML
+    assert '清除這次整理' in HTML
+    assert '<details class="secondary-actions">' in HTML
+    assert '需要先離開嗎？' in HTML
     # 無法自動分享：不可有自動 POST share
     assert 'auto' not in HTML.lower() or 'share' not in HTML.lower() or True
     # 明確不可自動 share：檢查沒有 share grant 自動建立
@@ -109,7 +119,7 @@ def test_summary_only_on_complete_and_redflag_not_covered():
     assert 'class="hidden"' in HTML
     assert '確認完成' in HTML
     assert '修改資料' in HTML
-    assert '結構化摘要' in HTML
+    assert '看診前摘要' in HTML
     # 僅完成才顯示
     assert 'shouldShowSummary' in HTML
     assert 'COMPLETED' in HTML
@@ -120,6 +130,7 @@ def test_summary_only_on_complete_and_redflag_not_covered():
     assert 'redflag' in HTML
     assert 'if (data.red_flag' in HTML or 'isRed' in HTML
     assert 'summaryWrap.classList.add("hidden")' in HTML
+    assert 'id="shareQr"' in HTML
 
 # ---- UX 5: 已在 viewport 測過，另檢查 white-space ----
 def test_no_literal_newline_handling_and_wrap():
@@ -133,7 +144,8 @@ def test_human_errors_and_retry():
     assert '409' in HTML
     assert '身分驗證失敗' in HTML
     assert '沒有權限' in HTML
-    assert '版本不一致' in HTML
+    assert '資料版本不一致' not in HTML
+    assert '剛剛的資料有更新' in HTML
     assert '網路連線失敗' in HTML
     assert '資料未儲存' in HTML
     assert '請檢查網路後重試' in HTML

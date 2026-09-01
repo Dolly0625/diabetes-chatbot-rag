@@ -60,18 +60,11 @@ def is_red_flag(text: str) -> bool:
 
 
 def should_append_post_answer_invitation(a_result: Any, has_intake: bool) -> bool:
-    if has_intake:
-        return False
-    try:
-        tags = getattr(a_result, "intent_tags", []) or []
-        tag_strs = [str(t) for t in tags]
-        if "PRE_VISIT_INTAKE" in tag_strs:
-            return False
-        if any(t in ("GENERAL_EDUCATION", "GENERAL_MEDICATION_INFORMATION", "SYMPTOM_INFORMATION") for t in tag_strs):
-            return True
-        return False
-    except Exception:
-        return False
+    # LINE is the daily-chat / education surface.  Pre-visit collection has a
+    # dedicated web room reached from the Rich Menu, so silently appending the
+    # retired "start intake" CTA to every education answer is both confusing
+    # and a route back toward the legacy questionnaire.
+    return False
 
 
 def append_post_answer_invitation(response: str, has_intake: bool = False) -> str:
