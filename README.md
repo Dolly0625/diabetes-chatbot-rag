@@ -47,33 +47,33 @@
 
 ---
 
-## 快速開始 (Quick Start)
+## 完整展示與操作指南 (Demo Walkthrough)
 
-### 1. 下載專案與初始化 RAG 子模組
+### 步驟一：環境建置與初始化
+
 ```bash
-# Clone 專案並遞迴抓取 RAG 組別的 diabetes-rag 子模組
+# 1. Clone 專案並初始化 RAG 組別子模組
 git clone https://github.com/Dolly0625/diabetes-chatbot-rag.git
 cd diabetes-chatbot-rag
 git submodule update --init --recursive
-```
 
-### 2. 安裝環境依賴
-```bash
-# 建議使用 Python 3.10+
+# 2. 建立 Python 虛擬環境並安裝相依套件 (Python 3.10+)
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 設定環境變數
-在專案根目錄建立 .env 檔案（可參考 .env.example）：
+### 步驟二：配置環境變數 (.env)
+
+在專案根目錄建立 `.env` 檔案（可直接複製 `.env.example` 並修改）：
+
 ```env
-# 1. LLM 模型配置
+# 1. LLM 模型核心配置
 OPENCODE_BASE_URL=https://opencode.ai/zen/go/v1
 OPENCODE_API_KEY=your_opencode_api_key_here
 ROUTER_LLM_MODEL=opencode/mimo-v2.5
 
-# 2. RAG 檢索模組配置 (Gemini API，由 RAG 組別驅動)
+# 2. RAG 檢索模組配置 (Gemini Embedding，由 RAG 組別驅動)
 GEMINI_API_KEY=your_gemini_api_key_here
 RAG_BACKEND=diabetes_rag
 
@@ -82,7 +82,7 @@ LINE_CHANNEL_SECRET=your_line_channel_secret_here
 LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token_here
 LINE_IDENTITY_HASH_KEY=your_16_chars_random_hash_key_here
 
-# 4. Demo 展示與測試模式
+# 4. Demo 展示與測試旗標
 LINE_DEMO_MODE=true
 DEMO_INTAKE_TOKEN_ENABLED=true
 DEMO_WEB_ENABLED=true
@@ -90,14 +90,61 @@ DEMO_CLINICIAN_IDS=doctor-demo
 LINE_SESSION_DB_PATH=data/processed/line_sessions.sqlite3
 ```
 
-### 4. 啟動後端服務
+### 步驟三：啟動後端主伺服器
+
 ```bash
 # 啟動本機伺服器 (Port 8000)
 python3 -m uvicorn line_bot.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-* 醫護端入口：http://localhost:8000/clinician
-* 病患看診對談室：http://localhost:8000/demo/previsit
+---
+
+## LINE 官方帳號串接指引 (LINE Webhook Setup)
+
+若要讓真實的手機 LINE 能夠收到機器人回覆，請依序執行以下設定：
+
+1. **取得外網公開網址（使用 ngrok）**：
+   ```bash
+   ngrok http 8000
+   ```
+   複製終端機中產生的 HTTPS 網址，例如：`https://xxxx.ngrok-free.dev`
+
+2. **登入 LINE Developers 後台**：
+   * 前往 [LINE Developers Console](https://developers.line.biz/)，進入您的 Messaging API Channel。
+   * 在 **Messaging API** 頁籤中：
+     - **Webhook URL** 填入：`https://xxxx.ngrok-free.dev/callback`
+     - 點擊 **Verify** 確認回傳 Success。
+     - 開啟 **Use webhook** 開關。
+   * 在 **LINE Official Account features** 中：
+     - 點擊進入 LINE Official Account Manager，在「回應設定」中**關閉「自動回應訊息」**，並**開啟「Webhook」**。
+
+---
+
+## 醫護端後台與 QR Code 調閱機制 (Clinician Portal Flow)
+
+系統為診間醫師設計了免安裝、跨平台的快速調閱後台：
+
+```text
+[病患手機 LINE / 網頁] ──► [完成問卷生成 QR Code] ──► [醫師後台相機掃碼] ──► [解密調閱並銷毀 Token]
+```
+
+### 1. 醫護端入口連結
+醫師使用電腦瀏覽器或手機打開以下網址：
+* 本地測試：`http://localhost:8000/clinician`
+* 外網展示：`https://xxxx.ngrok-free.dev/clinician`
+* *(註：Demo 模式下已自動帶入 `doctor-demo` 授權識別身分)*
+
+### 2. 病患端產生分享碼（QR Code）
+* **途徑 A（LINE 聊天室）**：病患在 LINE 輸入 `準備看診`，依序回答完 8 題問卷後，機器人會自動生成 15 分鐘時效之 QR Code 圖片與代碼。
+* **途徑 B（網頁對談室）**：病患直接打開 `http://localhost:8000/demo/previsit`，以打字機動畫完成對話後，畫面一鍵產生 QR Code。
+
+### 3. 診間調閱與閱後即焚機制
+1. 醫師在醫護端點擊 **「開啟相機掃描」**（或手動輸入 Token），直接對準病患手機上的 QR Code。
+2. 系統前端透過內建的 `jsQR` 離線解析出加密字串，並向後端 `/api/clinician/share/redeem` 發送兌換請求。
+3. **閱後即焚安全保護**：
+   - 後端核對 Token 有效期（15 分鐘），解密成功後**立即將該 Token 標記為 USED 並銷毀**，防止二次調閱外洩。
+   - 系統即時在醫師螢幕上渲染 4 大結構化病歷區塊（用藥歷程、過敏病史、主訴症狀、就醫提問）。
+   - 全程操作自動寫入 `audit_logs` 審計資料庫，符合醫療法規軌跡要求。
 
 ---
 
