@@ -85,12 +85,27 @@ C 是把已通過 B gate 的證據整理成病患看得懂的衛教回答的正�
 
 ## 怎麼自己重跑
 
-在已設定 `.env` 的本機環境執行：
+公開 GitHub 不會包含 `.env`。第一次 clone 後，先建立自己的設定檔並填入自己的 API key；**不要把 `.env` 提交回 GitHub**。
 
 ```bash
 cd diabetes-chatbot-rag
+
+# 第一次才需要：由範本建立本機設定
+cp .env.example .env
+
+# 編輯 .env，至少填入：
+# OPENCODE_API_KEY=你的正式模型 API key
+# GEMINI_API_KEY=你的 Gemini API key
+# RAG_BACKEND=diabetes_rag
+
+# 使用 Python 3.10 建立環境，再安裝主專案與內含 RAG 模組
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+# 載入本機設定後重跑 trace
 set -a; . .env; set +a
-python3 - <<'PY'
+python - <<'PY'
 from time import perf_counter
 from tfda_context_gate.workflow.runner import run_workflow
 
