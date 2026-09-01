@@ -131,7 +131,7 @@ ProductSession
 10. `system_risk_classification` 對同一 subject 採單調合併；一旦為 `RED_FLAG`，查看摘要或其他產品命令都必須維持緊急轉介，不能降回一般回答。
 11. 使用者查看摘要與建立 share snapshot 都會執行固定 pre-visit D Output Gate；D 非 `PASS` 時只回安全 fallback，不分享未通過內容。
 12. webhook event 綁定 principal 並使用 120 秒 lease／claim-token fencing；reply API 失敗回 503，LINE 重送時重播已完成結果而不重複寫入 intake。
-13. repository 會清除到期 session／grant、1 天前 webhook payload 與 90 天前 clinician audit；SQLite 啟用 `secure_delete`，資料庫與 WAL/SHM 已排除版本控制及 Docker build context。
+13. repository 會清除到期 session／grant、1 天前 webhook payload 與 90 天前 clinician audit；SQLite 啟用 `secure_delete`，資料庫與 WAL/SHM 已排除版本控制。
 
 ## 執行設定
 
@@ -172,4 +172,3 @@ DEMO_CLINICIAN_IDS           Demo 醫護 allowlist；正式導入替換院方 SS
 - 目前 `.env` 已能讓 Messaging webhook 與 ProductSession 核心 ready；未另設 identity key 時，Demo 會以 channel secret 做 domain-separated HMAC 派生。正式環境仍應配置獨立 key，並制定 key rotation／session 失效策略。
 - `LINE_LOGIN_CHANNEL_ID`／`LINE_LIFF_ID` 尚未完整配置，所以病患 LIFF 身分驗證仍待 LINE Console 與實機驗收。
 - Demo clinician 預設關閉；只有同時設定 `LINE_DEMO_MODE=true` 與 allowlist 才可進入。正式醫護 IAM 尚未完成，不能宣稱已具醫院上線資格。
-- Dockerfile 已補齊 runtime 套件與 non-root 執行，但本機 Docker daemon 未啟動，尚未完成 image build 驗證。
