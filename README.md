@@ -66,25 +66,33 @@ pip install -r requirements.txt
 ```
 
 ### 3. 設定環境變數
-在專案根目錄建立 .env 檔案：
+在專案根目錄建立 .env 檔案（可參考 .env.example）：
 ```env
-# LLM 核心金鑰
+# 1. LLM 模型配置
 OPENCODE_BASE_URL=https://opencode.ai/zen/go/v1
-OPENCODE_API_KEY=your_api_key_here
+OPENCODE_API_KEY=your_opencode_api_key_here
 ROUTER_LLM_MODEL=opencode/mimo-v2.5
 
-# RAG 檢索模組設定 (Gemini API，由 RAG 組別模型驅動)
+# 2. RAG 檢索模組配置 (Gemini API，由 RAG 組別驅動)
 GEMINI_API_KEY=your_gemini_api_key_here
 RAG_BACKEND=diabetes_rag
+
+# 3. LINE Bot 與 Messaging API 配置
+LINE_CHANNEL_SECRET=your_line_channel_secret_here
+LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token_here
+LINE_IDENTITY_HASH_KEY=your_16_chars_random_hash_key_here
+
+# 4. Demo 展示與測試模式
+LINE_DEMO_MODE=true
+DEMO_INTAKE_TOKEN_ENABLED=true
+DEMO_WEB_ENABLED=true
+DEMO_CLINICIAN_IDS=doctor-demo
+LINE_SESSION_DB_PATH=data/processed/line_sessions.sqlite3
 ```
 
 ### 4. 啟動後端服務
 ```bash
 # 啟動本機伺服器 (Port 8000)
-export DEMO_INTAKE_TOKEN_ENABLED=true
-export DEMO_WEB_ENABLED=true
-export LINE_DEMO_MODE=true
-export DEMO_CLINICIAN_IDS=doctor-demo
 python3 -m uvicorn line_bot.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
