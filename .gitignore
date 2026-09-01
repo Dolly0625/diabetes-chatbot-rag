@@ -40,3 +40,10 @@ deliverables/staging/
 .idea/
 *.swp
 *.swo
+
+# 內部私人交接筆記與歷史封存（本地保留，不上傳 GitHub）
+archive/
+experiments/
+docs/HANDOFF*.md
+docs/PROJECT_STRUCTURE_AND_UPLOAD_GUIDE.md
+AGENTS.md
