@@ -1746,7 +1746,21 @@ def _is_previsit_room_meta_text(text: str) -> bool:
 
 
 def _previsit_room_current_question(session: Any) -> str:
-    return str(getattr(session, "pending_question", "") or "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。")
+    if hasattr(session, "pending_question") and session.pending_question:
+        return str(session.pending_question)
+    if hasattr(session, "intake_snapshot") and session.intake_snapshot:
+        try:
+            from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
+
+            agent = LeanIntakeAgent.from_env()
+            q, _ = agent._generate_next_question(
+                getattr(session, "intake_stage", "stage1") or "stage1", session.intake_snapshot
+            )
+            if q:
+                return q
+        except Exception:
+            pass
+    return "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。"
 
 
 _PREVISIT_CONFIRMATION_RE = re.compile(
@@ -1940,15 +1954,34 @@ def get_previsit_room(
 ) -> JSONResponse:
     token = _previsit_room_token(request, x_intake_token, intake_token)
     sess = _get_previsit_session(authorization, x_line_user_id, token)
+
+    pending_question = sess.pending_question
+    pending_field = sess.pending_field
+    quick_replies: list[dict[str, str]] = []
+    try:
+        from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
+
+        agent = LeanIntakeAgent.from_env()
+        stage = sess.intake_stage or "stage1"
+        dyn_q, dyn_f = agent._generate_next_question(stage, sess.intake_snapshot)
+        if not pending_question:
+            pending_question = dyn_q
+        if not pending_field:
+            pending_field = dyn_f
+        quick_replies = agent._generate_quick_replies(stage, sess.intake_snapshot)
+    except Exception:
+        pass
+
     return JSONResponse(
         content={
             "session_id": sess.session_id,
             "version": sess.version,
             "status": sess.status,
-            "intake_stage": sess.intake_stage,
+            "intake_stage": sess.intake_stage or "stage1",
             "intake_snapshot": sess.intake_snapshot.model_dump(mode="json"),
-            "pending_question": sess.pending_question,
-            "pending_field": sess.pending_field,
+            "pending_question": pending_question,
+            "pending_field": pending_field,
+            "quick_replies": quick_replies,
             "system_risk_classification": sess.system_risk_classification,
         },
         headers={"Cache-Control": "no-store"},

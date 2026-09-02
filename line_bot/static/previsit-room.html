@@ -756,7 +756,7 @@ body{background:#f4f8f6}
       renderSummary(state.lastDraft);
       updateProgress(state.lastDraft);
       const nextQuestion = state.lastDraft.pending_question || state.lastDraft.reply || "請回答目前這一題就好。";
-      if (!shouldShowSummary(state.lastDraft)) addBubble("ai", "我們接著整理，請回答這一題：" + nextQuestion);
+      if (!shouldShowSummary(state.lastDraft)) addBubble("ai", nextQuestion);
       announce("已載入目前整理進度");
     } else {
       // Opening the dedicated room is an explicit request to begin intake.
