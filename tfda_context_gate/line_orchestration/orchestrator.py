@@ -2158,75 +2158,37 @@ class ConversationOrchestrator:
         try:
             session = self._load_or_create(line_user_id)
             previous_version = session.version
-            if not self._is_intake_active(session):
-                from tfda_context_gate.intake.qr_ocr_service import MedicationBagOCRService
+            from tfda_context_gate.intake.qr_ocr_service import MedicationBagOCRService
 
-                svc = ocr_service if ocr_service is not None else MedicationBagOCRService()
-                extracted = svc.extract(image_bytes)
-                meds = extracted.get("meds") or []
-                if meds:
-                    meds_text = "、".join(meds)
-                    reply = (
-                        f"為您辨識藥袋上的藥品資訊如下：\n"
-                        f"藥品名稱：{meds_text}\n\n"
-                        f"您可以在這裡直接向我詢問此藥品的用途、服用注意事項或副作用。\n"
-                        f"若您近期要看醫生，也可以點選「我要準備看診」，我會將這筆用藥自動帶入看診資料中。"
-                    )
-                    current_intake = session.intake_snapshot or PreVisitIntake()
-                    existing_meds = list(current_intake.known_medications or [])
-                    for m in meds:
-                        if m not in existing_meds:
-                            existing_meds.append(m)
-                    current_intake = current_intake.model_copy(update={"known_medications": existing_meds}, deep=True)
-                    session = session.model_copy(update={"intake_snapshot": current_intake}, deep=True)
-                    self.repository.save(session, expected_version=previous_version)
-                else:
-                    reply = "這張照片未能清楚辨識出藥袋上的藥品名稱或 QR Code。建議您重新拍攝光線充足、文字清晰的藥袋正面再試一次喔！"
-                result = OrchestratorResult(event_id=event_id, session_id=session.session_id, reply=reply, status="COMPLETED", intake_stage=session.intake_stage)
+            svc = ocr_service if ocr_service is not None else MedicationBagOCRService()
+            extracted = svc.extract(image_bytes)
+            meds = extracted.get("meds") or []
+            if meds:
+                meds_text = "、".join(meds)
+                reply = (
+                    f"為您辨識藥袋上的藥品資訊如下：\n"
+                    f"藥品名稱：{meds_text}\n\n"
+                    f"您可以在這裡直接向我詢問此藥品的用途、服用注意事項或副作用。\n"
+                    f"若您近期要看醫生，也可以點選「我要準備看診」，我會將這筆用藥自動帶入看診資料中。"
+                )
+                current_intake = session.intake_snapshot or PreVisitIntake()
+                existing_meds = list(current_intake.known_medications or [])
+                for m in meds:
+                    if m not in existing_meds:
+                        existing_meds.append(m)
+                current_intake = current_intake.model_copy(update={"known_medications": existing_meds}, deep=True)
+                session = session.model_copy(update={"intake_snapshot": current_intake}, deep=True)
+                self.repository.save(session, expected_version=previous_version)
             else:
-                workflow = self._call_workflow(
-                    {"request_id": f"{session.session_id}-img-v{previous_version + 1}", "schema_version": "a.v0.1", "user_raw_input": "我上傳藥袋供看診前整理", "declared_role": self._declared_role(session.actor_role), "language": "zh-TW"},
-                    task_type="pre_visit_intake",
-                    intake=session.intake_snapshot,
-                    image_bytes=image_bytes,
-                    ocr_service=ocr_service,
-                )
-                updates: dict[str, Any] = {"pending_question": workflow.question}
-                if workflow.intake_snapshot is not None:
-                    updates["intake_snapshot"] = PreVisitIntake.model_validate(workflow.intake_snapshot)
-                if workflow.intake_stage is not None:
-                    updates["intake_stage"] = workflow.intake_stage
-                next_intake = PreVisitIntake.model_validate(
-                    workflow.intake_snapshot or session.intake_snapshot
-                )
-                updates["pending_field"] = self._next_pending_field(next_intake)
-                if workflow.status == "NEEDS_CONFIRMATION":
-                    updates["status"] = "AWAITING_CONFIRMATION"
-                new_stage = updates.get("intake_stage", session.intake_stage)
-                stage_completed = session.intake_stage != new_stage
-                reply_text = workflow.final_response
-                if stage_completed and session.intake_stage in {"stage1", "stage2"}:
-                    try:
-                        checkpoint = self._stage_checkpoint(next_intake, session.intake_stage)
-                        if checkpoint:
-                            reply_text = f"{checkpoint}\n\n{reply_text}"
-                    except Exception:
-                        pass
-                context = self.context_manager.append_turn(session.conversation_context, role="user", content="［藥袋圖片］")
-                context = self.context_manager.append_turn(context, role="assistant", content=reply_text)
-                if stage_completed and session.intake_stage in {"stage1", "stage2", "stage3"}:
-                    context = self.context_manager.mark_stage_completed(
-                        context, session.intake_stage, next_stage=new_stage
-                    )
-                context, _ = self.context_manager.compact(context, stage_completed=stage_completed)
-                updates["conversation_context"] = context
-                session = session.model_copy(update=updates, deep=True)
-                session = self._sync_clinical_context(session)
-                saved = self.repository.save(session, expected_version=previous_version)
-                result = OrchestratorResult(event_id=event_id, session_id=saved.session_id, reply=reply_text, status=workflow.status, intake_stage=workflow.intake_stage)
-            self.repository.complete_webhook_event(
-                event_id, result.model_dump(mode="json"), claim_token=claim_token
+                reply = "這張照片未能清楚辨識出藥袋上的藥品名稱或 QR Code。建議您重新拍攝光線充足、文字清晰的藥袋正面再試一次喔！"
+            result = OrchestratorResult(
+                event_id=event_id,
+                session_id=session.session_id,
+                reply=reply,
+                status="COMPLETED",
+                intake_stage=session.intake_stage,
             )
+            self.repository.complete_webhook_event(event_id, result.model_dump(mode="json"), claim_token=claim_token)
             return result
         except Exception:
             self.repository.fail_webhook_event(event_id, claim_token=claim_token)

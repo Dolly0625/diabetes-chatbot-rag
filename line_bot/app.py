@@ -2872,22 +2872,11 @@ async def callback(
                         image_bytes=image_bytes,
                     )
                     reply = product_result.reply
-                    try:
-                        session = orchestrator.session_for_user(str(user_id))
-                        intake = getattr(session, "intake_snapshot", None) if session else None
-                        reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
-                    except Exception:
-                        pass
-                    resume_actions = _resolve_resume_quick_actions(product_result)
-                    if resume_actions is not None:
-                        quick_actions = resume_actions
-                    else:
-                        quick_actions = _quick_actions_for_status(product_result.status, reply)
+                    quick_actions = [{"label": "我要準備看診", "text": "我要準備看診"}]
                 else:
                     # P0.5 fail-closed: no ProductSession → image/OCR must not start intake
                     reply = "目前無法安全開始整理，請先完成身分與授權設定後再試。"
                     quick_actions = None
-                # Optionally include OCR hint if available in trace
                 _send(reply_token, reply, quick_actions=quick_actions)
 
             else:
