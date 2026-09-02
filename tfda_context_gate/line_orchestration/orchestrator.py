@@ -2165,6 +2165,9 @@ class ConversationOrchestrator:
             meds = extracted.get("meds") or []
             if meds:
                 from tfda_context_gate.intake.lean_agent import deduplicate_medications, LeanIntakeAgent
+                # Reload fresh session from repository after OCR to avoid optimistic lock conflict with concurrent user messages
+                session = self._load_or_create(line_user_id)
+                previous_version = session.version
                 current_intake = session.intake_snapshot or PreVisitIntake()
                 existing_meds = list(current_intake.known_medications or [])
                 for m in meds:
@@ -2191,7 +2194,30 @@ class ConversationOrchestrator:
                     },
                     deep=True,
                 )
-                self.repository.save(session, expected_version=previous_version)
+                try:
+                    self.repository.save(session, expected_version=previous_version)
+                except Exception:
+                    # Retry with latest state on race condition
+                    session = self._load_or_create(line_user_id)
+                    current_intake = session.intake_snapshot or PreVisitIntake()
+                    existing_meds = list(current_intake.known_medications or [])
+                    for m in meds:
+                        if m not in existing_meds:
+                            existing_meds.append(m)
+                    clean_meds = deduplicate_medications(existing_meds)
+                    current_intake = current_intake.model_copy(update={"known_medications": clean_meds}, deep=True)
+                    dyn_q, dyn_f = agent._generate_next_question("stage1", current_intake)
+                    session = session.model_copy(
+                        update={
+                            "intake_snapshot": current_intake,
+                            "status": "ACTIVE",
+                            "intake_stage": "stage1",
+                            "pending_question": dyn_q,
+                            "pending_field": dyn_f,
+                        },
+                        deep=True,
+                    )
+                    self.repository.save(session, expected_version=session.version)
             else:
                 reply = "這張照片未能清楚辨識出藥袋上的藥品名稱或 QR Code。建議您重新拍攝光線充足、文字清晰的藥袋正面再試一次喔！"
             result = OrchestratorResult(
