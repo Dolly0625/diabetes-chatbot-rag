@@ -266,48 +266,47 @@ class LeanIntakeAgent:
     def _generate_next_question(self, stage: str, intake: PreVisitIntake) -> tuple[str, str | None]:
         """根據目前階段與缺漏項，產生自然流暢的下一個引導問題"""
         if stage == "stage1":
-            missing = []
-            if not intake.known_medications:
-                missing.append("目前用藥")
+            missing_health = []
             if not intake.allergies:
-                missing.append("過敏史")
+                missing_health.append("allergies")
             if not intake.chronic_conditions:
-                missing.append("過去慢性病")
+                missing_health.append("chronic_conditions")
             if not intake.family_history:
-                missing.append("家族病史")
+                missing_health.append("family_history")
 
-            # 決定目前最主要的待答欄位
-            if not intake.known_medications and (intake.allergies or intake.chronic_conditions or intake.family_history):
-                pending_field = "known_medications"
-            elif not intake.allergies:
-                pending_field = "allergies"
-            elif not intake.chronic_conditions:
-                pending_field = "chronic_conditions"
-            elif not intake.family_history:
-                pending_field = "family_history"
-            else:
-                pending_field = "known_medications"
+            # 1. 如果完全沒有填過過敏與病史
+            if len(missing_health) == 3:
+                pending_field = "allergies" if not intake.allergies else "chronic_conditions"
+                if intake.known_medications:
+                    med_list = deduplicate_medications(intake.known_medications)
+                    med_str = "、".join(med_list)
+                    return (
+                        f"嗨！我是看診前資料整理助理。系統已自動為您帶入剛才辨識的藥袋用藥【{med_str}】。\n\n"
+                        f"接下來想請問您的健康史：\n"
+                        f"1. 請問您有任何藥物或食物過敏史嗎？\n"
+                        f"2. 除了糖尿病之外，平時有高血壓、心臟病等其他慢性病史嗎？\n"
+                        f"3. 家人（如父母）有糖尿病或相關家族病史嗎？"
+                    ), pending_field
+                else:
+                    return STAGE_TOPIC_QUESTIONS["stage1"], "known_medications"
 
-            has_health_history = bool(intake.allergies or intake.chronic_conditions or intake.family_history)
-            
-            # 第一輪：若尚未回答過敏與病史，先問過敏、慢性病與家族病史
-            if not has_health_history:
-                return STAGE_TOPIC_QUESTIONS["stage1"], pending_field
+            # 2. 如果只缺部分病史（例如已填過敏，缺慢性病或家族史）
+            if missing_health:
+                if "chronic_conditions" in missing_health and "family_history" in missing_health:
+                    return "已為您記錄過敏史。請問平時有高血壓、心臟病等其他慢性病史，或是家人有糖尿病家族史嗎？", "chronic_conditions"
+                elif "chronic_conditions" in missing_health:
+                    return "請問除了糖尿病之外，平時有高血壓、心臟病等其他慢性病史嗎？（沒有請回答無）", "chronic_conditions"
+                elif "family_history" in missing_health:
+                    return "請問家人（如父母、兄弟姊妹）有糖尿病或相關家族病史嗎？（沒有請回答無）", "family_history"
+                elif "allergies" in missing_health:
+                    return "請問您有任何藥物或食物過敏史嗎？（沒有請回答無）", "allergies"
 
-            # 第二輪：已收到過敏與病史，現在確認用藥與藥袋
-            if intake.known_medications:
-                med_list = deduplicate_medications(intake.known_medications)
-                med_str = "、".join(med_list)
+            # 3. 若病史都齊全，但尚未填用藥
+            if not intake.known_medications:
                 return (
-                    f"收到，過敏與病史資料已為您記錄。\n\n"
-                    f"另外，系統已自動為您帶入剛才辨識的藥袋用藥【{med_str}】。\n\n"
-                    f"請問除了這款藥之外，目前平時還有固定吃其他藥物或打胰島素嗎？（若不需帶入此藥袋也可以直接告訴我取消）"
-                ), pending_field
-            else:
-                return (
-                    "收到，過敏與病史資料已為您記錄。\n\n"
-                    "另外想跟您確認：目前平時有固定吃藥或打胰島素嗎？（如果知道請直接告訴我，沒有請回「無」）"
-                ), pending_field
+                    "收到，健康史已為您記錄。\n\n"
+                    "另外想跟您確認：目前平時有固定吃降血糖藥、降血壓藥或打胰島素嗎？（如果知道請直接告訴我，沒有請回「無」）"
+                ), "known_medications"
 
         if stage == "stage2":
             missing = []
@@ -333,10 +332,16 @@ class LeanIntakeAgent:
     def _generate_quick_replies(self, stage: str, intake: PreVisitIntake) -> list[dict[str, str]]:
         """根據當前缺漏欄位，動態產生高精確度的情境式快捷回答按鈕（Smart Chips，乾淨無表情符號）"""
         if stage == "stage1":
-            has_health_history = bool(intake.allergies or intake.chronic_conditions or intake.family_history)
-            
-            # 第一輪（問過敏與病史）快捷按鈕
-            if not has_health_history:
+            missing_health = []
+            if not intake.allergies:
+                missing_health.append("allergies")
+            if not intake.chronic_conditions:
+                missing_health.append("chronic_conditions")
+            if not intake.family_history:
+                missing_health.append("family_history")
+
+            # 初始輪（缺全部病史）
+            if len(missing_health) == 3:
                 return [
                     {"label": "皆無（無過敏/慢性病/家族史）", "text": "沒有過敏，沒有其他慢性病，也沒有家族史"},
                     {"label": "無過敏，我有高血壓", "text": "無過敏，我有高血壓，無家族病史"},
@@ -344,14 +349,32 @@ class LeanIntakeAgent:
                     {"label": "對海鮮/花生過敏", "text": "我對海鮮和花生過敏，無其他病史"},
                 ]
 
-            # 第二輪（問用藥與藥袋）快捷按鈕
-            if intake.known_medications:
+            # 缺慢性病 + 家族史
+            if "chronic_conditions" in missing_health and "family_history" in missing_health:
                 return [
-                    {"label": "只有這款藥，無其他用藥", "text": "目前只有固定吃這款藥袋的藥，沒有其他用藥"},
-                    {"label": "還有吃其他降血糖/血壓藥", "text": "除了這款藥，平時還有吃降血糖與降血壓藥"},
-                    {"label": "不需帶入，我想修改用藥", "text": "我想修改用藥，不帶入此藥袋紀錄"},
+                    {"label": "皆無（無慢性病/家族史）", "text": "沒有其他慢性病，也沒有家族病史"},
+                    {"label": "有高血壓，無家族史", "text": "我有高血壓，沒有家族病史"},
+                    {"label": "無慢性病，父母有糖尿病", "text": "無其他慢性病，父母有糖尿病史"},
                 ]
-            else:
+
+            # 僅缺慢性病
+            if "chronic_conditions" in missing_health:
+                return [
+                    {"label": "無其他慢性病", "text": "沒有其他慢性病"},
+                    {"label": "我有高血壓", "text": "我有高血壓"},
+                    {"label": "有高血壓與高血脂", "text": "我有高血壓和高血脂"},
+                ]
+
+            # 僅缺家族史
+            if "family_history" in missing_health:
+                return [
+                    {"label": "無家族病史", "text": "沒有相關家族病史"},
+                    {"label": "父母有糖尿病", "text": "父母有糖尿病史"},
+                    {"label": "手足有糖尿病", "text": "兄弟姊妹有糖尿病史"},
+                ]
+
+            # 僅缺用藥
+            if not intake.known_medications:
                 return [
                     {"label": "吃降血糖與降血壓藥", "text": "我有吃降血糖與降血壓藥"},
                     {"label": "有固定打胰島素", "text": "平時有固定施打胰島素"},
@@ -522,8 +545,12 @@ class LeanIntakeAgent:
         if any(w in s for w in ("天前", "週前", "月前", "昨天", "最近一週", "幾天前", "禮拜前", "三天前")) and "symptom_onset" not in updates:
             updates["symptom_onset"] = s
 
-        # 3. 否定回答
-        is_neg = bool(re.search(r"^(沒有|無|沒有吃|沒吃|沒吃藥|沒有過敏|無過敏|無其他|無家族史|沒有慢性病|沒有問題|沒有別的了|都好了|無特別|沒有想問的)$", s))
+        # 3. 否定回答與特殊短語
+        is_neg = bool(re.search(r"^(沒有|無|沒有吃|沒吃|沒吃藥|沒有過敏|無過敏|無其他|無家族史|沒有家族史|沒有家族病史|無家族病史|沒有慢性病|沒有其他慢性病|無其他慢性病|無慢性病|沒有問題|沒有別的了|都好了|無特別|沒有想問的|目前只有固定吃這款藥袋的藥，沒有其他用藥|只有這款藥|沒有其他用藥|無其他用藥)$", s))
+
+        if any(w in s for w in ("只有這款藥", "沒有其他用藥", "無其他用藥", "只有藥袋的藥")):
+            if pending_field in ("chronic_conditions", "family_history") and "chronic_conditions" not in updates:
+                updates["chronic_conditions"] = ["無"]
 
         if pending_field == "known_medications" and "known_medications" not in updates:
             if is_neg:
@@ -544,7 +571,7 @@ class LeanIntakeAgent:
                     updates["allergies"] = [cleaned]
 
         elif pending_field == "chronic_conditions" and "chronic_conditions" not in updates:
-            if is_neg:
+            if is_neg or "沒有其他慢性病" in s or "無慢性病" in s or "沒有慢性病" in s or "沒有其他用藥" in s:
                 updates["chronic_conditions"] = ["無"]
             else:
                 cleaned = _clean_field_value(s)
@@ -552,7 +579,7 @@ class LeanIntakeAgent:
                     updates["chronic_conditions"] = [cleaned]
 
         elif pending_field == "family_history" and "family_history" not in updates:
-            if is_neg:
+            if is_neg or "沒有家族" in s or "無家族" in s:
                 updates["family_history"] = ["無"]
             else:
                 cleaned = _clean_field_value(s)
