@@ -785,8 +785,8 @@ def _split_intake_education_clauses(text: str, interpretation: Any | None) -> tu
 _HEDGE_RE = re.compile(r"有點|稍微|好像|吧$|大概")
 _SEVERITY_EXPLICIT_RE = re.compile(r"輕度|中度|重度|\d+\s*分|\d+/\d+|1–10|1-10|\b(10|[1-9])\b")
 _CORRECTION_RE = re.compile(r"不是|說錯了|更正|改成|其實|喔不對|不對|那邊要改|前面.*要改|那個要改")
-_AGREE_RE = re.compile(r"^(好|幫我記|記下來|可以|沒問題|同意|要|幫我記下來)$")
-_AGREE_SUB_RE = re.compile(r"好|幫我記|記下來|可以|沒問題")
+_AGREE_RE = re.compile(r"^(好|好的|好啊|好喔|好哦|行|行的|可以|可以啊|沒問題|同意|要|要的|幫我記|記下來|幫我記下來|ok|OK|yes|YES)$", re.IGNORECASE)
+_AGREE_SUB_RE = re.compile(r"(?<![你您大家早中晚上下午太問愛喜])好(?!久)|幫我記|記下來|可以|沒問題")
 _DISAGREE_RE = re.compile(r"不用|不需要|先不要|不要|不用了")
 _WANT_QUESTION_RE = re.compile(r"想問|幫我.*加.*問題|再加一個想問|幫我記一個|還要.*記|幫我記|多少|是否|正常嗎")
 _QUESTION_NEGATIVE_RE = re.compile(r"^\s*(沒有別的了|沒有了|沒了|就這樣|暫時沒有|沒有問題|沒有其他問題)\s*[。！!]*\s*$")
@@ -1453,11 +1453,44 @@ class ConversationOrchestrator:
                 return False
         except Exception:
             pass
+        if session.pending_action is not None:
+            return False
         if _is_rephrase_request(stripped):
             return False
-        if _orch_should_use_formal(stripped, None):
-            return True
-        return True
+        if session.intake_stage in ("review", "submitted") or session.status in ("AWAITING_CONFIRMATION", "SUBMITTED"):
+            return False
+        try:
+            if (
+                stripped in self.SELF_COMMANDS
+                or stripped in self.PROXY_COMMANDS
+                or stripped in self.PROXY_CONSENT_COMMANDS
+                or stripped in self.CONFIRM_COMMANDS
+                or stripped in self.START_INTAKE_COMMANDS
+                or stripped in self.SHARE_COMMANDS
+                or stripped in self.SUMMARY_COMMANDS
+                or stripped in self.MODIFY_COMMANDS
+                or stripped in self.PAUSE_COMMANDS
+                or stripped in self.CANCEL_COMMANDS
+                or stripped in self.RESUME_COMMANDS
+                or stripped in self.PROXY_SUBJECT_SOURCE_COMMANDS
+                or stripped in self.PROXY_OBSERVED_SOURCE_COMMANDS
+            ):
+                return False
+        except Exception:
+            pass
+        if self._is_intake_active(session, text):
+            try:
+                if self._looks_like_side_question(session, text):
+                    return True
+                if _orch_should_use_formal(stripped, None):
+                    return True
+            except Exception:
+                pass
+            return False
+        try:
+            return _orch_should_use_formal(stripped, None)
+        except Exception:
+            return False
 
     def _call_education_sync(self, request: dict[str, Any], **kwargs: Any) -> WorkflowResult:
         try:
@@ -2203,11 +2236,12 @@ class ConversationOrchestrator:
                     self.repository.save(session, expected_version=session.version)
             else:
                 reply = "這張照片未能清楚辨識出藥袋上的藥品名稱或 QR Code。建議您重新拍攝光線充足、文字清晰的藥袋正面再試一次喔！"
+            img_status = "NEEDS_CLARIFICATION" if (session.status == "ACTIVE" and session.pending_field) else "COMPLETED"
             result = OrchestratorResult(
                 event_id=event_id,
                 session_id=session.session_id,
                 reply=reply,
-                status="COMPLETED",
+                status=img_status,
                 intake_stage=session.intake_stage,
             )
             self.repository.complete_webhook_event(event_id, result.model_dump(mode="json"), claim_token=claim_token)
@@ -2658,41 +2692,51 @@ class ConversationOrchestrator:
         if session.pending_action and session.pending_action.type == "PENDING_CONFIRM_QUESTION":
             stripped = text.strip()
             norm = re.sub(r"\s+", "", stripped)
-            is_disagree = bool(_DISAGREE_RE.search(stripped) or _DISAGREE_RE.search(norm))
-            is_agree = False
-            if not is_disagree:
-                if _AGREE_RE.match(stripped) or _AGREE_RE.match(norm):
-                    is_agree = True
-                elif len(stripped) <= 8 and _AGREE_SUB_RE.search(stripped):
-                    is_agree = True
-                elif stripped in ("好", "好的", "好啊", "可以", "沒問題", "幫我記", "記下來", "幫我記下來", "同意", "要"):
-                    is_agree = True
-            if is_disagree:
+            from tfda_context_gate.workflow.intake_router import is_welcome_trigger
+            from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor
+            is_greeting = bool(
+                is_welcome_trigger(stripped)
+                or RuleBasedSignalExtractor.is_chit_chat_text(stripped)
+                or RuleBasedSignalExtractor.is_identity_text(stripped)
+            )
+            if is_greeting:
                 session = session.model_copy(update={"pending_action": None, "pending_question_proposal": None}, deep=True)
-                session = self._sync_clinical_context(session)
-                context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="好的，已略過，不會記入。")
-                context, _ = self.context_manager.compact(context, stage_completed=False)
-                saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
-                return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="好的，已略過，不會記入。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
-            if is_agree:
-                proposal = session.pending_action.proposal or session.pending_question_proposal or ""
-                if proposal:
-                    intake = session.intake_snapshot.model_copy(deep=True)
-                    if proposal not in intake.questions_for_doctor and len(intake.questions_for_doctor) < 10:
-                        intake.questions_for_doctor = [*intake.questions_for_doctor, proposal]
-                    session = session.model_copy(update={"intake_snapshot": intake, "pending_action": None, "pending_question_proposal": None}, deep=True)
-                    session = self._sync_clinical_context(session)
-                    context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="已幫你記下，會在看診摘要中提醒你問醫師。")
-                    context, _ = self.context_manager.compact(context, stage_completed=False)
-                    saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
-                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="已幫你記下，會在看診摘要中提醒你問醫師。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
-                else:
+            else:
+                is_disagree = bool(_DISAGREE_RE.search(stripped) or _DISAGREE_RE.search(norm))
+                is_agree = False
+                if not is_disagree:
+                    if _AGREE_RE.match(stripped) or _AGREE_RE.match(norm):
+                        is_agree = True
+                    elif len(stripped) <= 8 and _AGREE_SUB_RE.search(stripped):
+                        is_agree = True
+                    elif stripped in ("好", "好的", "好啊", "好喔", "好哦", "可以", "可以啊", "沒問題", "幫我記", "記下來", "幫我記下來", "同意", "要", "要的", "行", "行的"):
+                        is_agree = True
+                if is_disagree:
                     session = session.model_copy(update={"pending_action": None, "pending_question_proposal": None}, deep=True)
                     session = self._sync_clinical_context(session)
-                    context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="已幫你記下，會在看診摘要中提醒你問醫師。")
+                    context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="好的，已略過，不會記入。")
                     context, _ = self.context_manager.compact(context, stage_completed=False)
                     saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
-                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="已幫你記下，會在看診摘要中提醒你問醫師。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+                    return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="好的，已略過，不會記入。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+                if is_agree:
+                    proposal = session.pending_action.proposal or session.pending_question_proposal or ""
+                    if proposal:
+                        intake = session.intake_snapshot.model_copy(deep=True)
+                        if proposal not in intake.questions_for_doctor and len(intake.questions_for_doctor) < 10:
+                            intake.questions_for_doctor = [*intake.questions_for_doctor, proposal]
+                        session = session.model_copy(update={"intake_snapshot": intake, "pending_action": None, "pending_question_proposal": None}, deep=True)
+                        session = self._sync_clinical_context(session)
+                        context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="已幫你記下，會在看診摘要中提醒你問醫師。")
+                        context, _ = self.context_manager.compact(context, stage_completed=False)
+                        saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+                        return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="已幫你記下，會在看診摘要中提醒你問醫師。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
+                    else:
+                        session = session.model_copy(update={"pending_action": None, "pending_question_proposal": None}, deep=True)
+                        session = self._sync_clinical_context(session)
+                        context = self.context_manager.append_turn(session.conversation_context, role="assistant", content="已幫你記下，會在看診摘要中提醒你問醫師。")
+                        context, _ = self.context_manager.compact(context, stage_completed=False)
+                        saved = self.repository.save(session.model_copy(update={"conversation_context": context}, deep=True), expected_version=previous_version)
+                        return OrchestratorResult(event_id="pending", session_id=saved.session_id, reply="已幫你記下，會在看診摘要中提醒你問醫師。", status="NEEDS_CLARIFICATION", intake_stage=saved.intake_stage)
             # consent phrase but not agree/disagree ambiguous -> keep pending and fall through to normal? preserve pending
 
         if session.pending_action and session.pending_action.type == "PENDING_SEVERITY_CLARIFY":
@@ -4030,6 +4074,8 @@ class ConversationOrchestrator:
                     # Clear Brown Bag attempt if known_medications was filled
                     if "known_medications" in valid:
                         _intake_uncertain_attempts.pop((session.session_id, "known_medications"), None)
+                    if nxt_q and nxt_q not in confirm and not _is_confirmation_word(text.strip()):
+                        confirm = f"{confirm}\n\n{nxt_q}"
             except Exception:
                 pass
             return new_sess, confirm
@@ -4090,7 +4136,11 @@ class ConversationOrchestrator:
                 "known_medications", "allergies", "chronic_conditions", "family_history", "questions_for_doctor"
             } else "不清楚（待看診確認）"
             setattr(intake, field, value)
-            return session.model_copy(update={"intake_snapshot": intake}, deep=True), compose_uncertain(symptom=False)
+            next_field = cls._next_pending_field(intake)
+            next_q = cls._question_for_field(next_field) if next_field else None
+            msg = compose_uncertain(symptom=False)
+            reply_text = f"{msg}\n\n{next_q}" if next_q else msg
+            return session.model_copy(update={"intake_snapshot": intake, "pending_field": next_field, "pending_question": next_q}, deep=True), reply_text
 
         if none_answer:
             value = ["無"] if field in {
