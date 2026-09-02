@@ -2159,7 +2159,30 @@ class ConversationOrchestrator:
             session = self._load_or_create(line_user_id)
             previous_version = session.version
             if not self._is_intake_active(session):
-                result = OrchestratorResult(event_id=event_id, session_id=session.session_id, reply="請先選擇「為自己整理」或「代家人整理」，再上傳藥袋。", status="NEEDS_AUTHORIZATION", intake_stage=session.intake_stage)
+                from tfda_context_gate.intake.qr_ocr_service import MedicationBagOCRService
+
+                svc = ocr_service if ocr_service is not None else MedicationBagOCRService()
+                extracted = svc.extract(image_bytes)
+                meds = extracted.get("meds") or []
+                if meds:
+                    meds_text = "、".join(meds)
+                    reply = (
+                        f"為您辨識藥袋上的藥品資訊如下：\n"
+                        f"藥品名稱：{meds_text}\n\n"
+                        f"您可以在這裡直接向我詢問此藥品的用途、服用注意事項或副作用。\n"
+                        f"若您近期要看醫生，也可以點選「我要準備看診」，我會將這筆用藥自動帶入看診資料中。"
+                    )
+                    current_intake = session.intake_snapshot or PreVisitIntake()
+                    existing_meds = list(current_intake.known_medications or [])
+                    for m in meds:
+                        if m not in existing_meds:
+                            existing_meds.append(m)
+                    current_intake = current_intake.model_copy(update={"known_medications": existing_meds}, deep=True)
+                    session = session.model_copy(update={"intake_snapshot": current_intake}, deep=True)
+                    self.repository.save(session, expected_version=previous_version)
+                else:
+                    reply = "這張照片未能清楚辨識出藥袋上的藥品名稱或 QR Code。建議您重新拍攝光線充足、文字清晰的藥袋正面再試一次喔！"
+                result = OrchestratorResult(event_id=event_id, session_id=session.session_id, reply=reply, status="COMPLETED", intake_stage=session.intake_stage)
             else:
                 workflow = self._call_workflow(
                     {"request_id": f"{session.session_id}-img-v{previous_version + 1}", "schema_version": "a.v0.1", "user_raw_input": "我上傳藥袋供看診前整理", "declared_role": self._declared_role(session.actor_role), "language": "zh-TW"},
