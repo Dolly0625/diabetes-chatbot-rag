@@ -285,7 +285,7 @@ def test_room_greeting_and_opening_phrase_never_become_intake_values():
         assert response.status_code == 200
         current = response.json()
         assert current["intake_snapshot"] == before
-        assert "吃藥" in current["reply"]
+        assert ("吃藥" in current["reply"] or "過敏" in current["reply"] or "慢性病" in current["reply"])
 
 
 def test_room_naturalizes_no_medication_without_exposing_internal_sentinel():

@@ -951,26 +951,17 @@ def _should_use_async_formal(text: str, task_type: str | None = None) -> bool:
 
 
 def _should_schedule_formal_push(orchestrator: Any, line_user_id: str, text: str) -> bool:
-    """Keep active-intake answers inside the product state machine.
+    """Route all conversational chat messages to async formal RAG workflow.
 
-    The webhook-level keyword check cannot distinguish a medication answer
-    (for example, ``沒有打胰島素``) from a medication education request.  The
-    orchestrator owns that distinction because it can see the persisted
-    intake state.  On any lookup error we fail closed to the synchronous
-    orchestrator path instead of bypassing intake through async RAG.
+    The old in-chat 8-question questionnaire has been completely retired in
+    favor of the dedicated Web Intake Room (/demo/previsit).
     """
-
     if orchestrator is None or not getattr(orchestrator, "use_formal", False):
         return False
-    try:
-        session = orchestrator.session_for_user(line_user_id)
-        if session is not None:
-            eligible = getattr(orchestrator, "_is_async_narrow_eligible", None)
-            if callable(eligible):
-                return bool(eligible(session, text))
-    except Exception:
+    stripped = text.strip()
+    if _is_previsit_trigger_text(stripped):
         return False
-    return _should_use_async_formal(text, None)
+    return True
 
 
 def _schedule_formal_push(

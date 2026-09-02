@@ -1446,56 +1446,11 @@ class ConversationOrchestrator:
         except Exception:
             pass
         stripped = text.strip()
+        if _is_rephrase_request(stripped):
+            return True
         if _orch_should_use_formal(stripped, None):
             return True
-        if session.intake_stage in ("review", "submitted") or session.status in ("AWAITING_CONFIRMATION", "SUBMITTED"):
-            return False
-        if self._is_intake_active(session, text):
-            try:
-                if _is_rephrase_request(stripped):
-                    q = _resolve_rephrase_followup(session, stripped)
-                    if q and _orch_should_use_formal(q, None):
-                        return True
-                    if _orch_should_use_formal(stripped, None):
-                        return True
-                if self._looks_like_side_question(session, text):
-                    return True
-                if _orch_should_use_formal(stripped, None):
-                    return True
-            except Exception:
-                pass
-            return False
-        try:
-            if self.risk_policy.classify(text).level == "RED_FLAG":
-                return False
-        except Exception:
-            pass
-        try:
-            stripped = text.strip()
-            if _is_rephrase_request(stripped):
-                try:
-                    q = _resolve_rephrase_followup(session, stripped)
-                    if q and _orch_should_use_formal(q, None):
-                        return True
-                except Exception:
-                    pass
-                if _orch_should_use_formal(stripped, None):
-                    return True
-                return True
-        except Exception:
-            pass
-        try:
-            stripped = text.strip()
-            if stripped in self.SELF_COMMANDS or stripped in self.PROXY_COMMANDS or stripped in self.PROXY_CONSENT_COMMANDS or stripped in self.CONFIRM_COMMANDS or stripped in self.START_INTAKE_COMMANDS or stripped in self.SHARE_COMMANDS or stripped in self.SUMMARY_COMMANDS or stripped in self.MODIFY_COMMANDS or stripped in self.PAUSE_COMMANDS or stripped in self.CANCEL_COMMANDS or stripped in self.RESUME_COMMANDS:
-                return False
-            if stripped in self.PROXY_SUBJECT_SOURCE_COMMANDS or stripped in self.PROXY_OBSERVED_SOURCE_COMMANDS:
-                return False
-        except Exception:
-            pass
-        try:
-            return _orch_should_use_formal(text, None)
-        except Exception:
-            return False
+        return True
 
     def _call_education_sync(self, request: dict[str, Any], **kwargs: Any) -> WorkflowResult:
         try:
