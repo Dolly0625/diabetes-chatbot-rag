@@ -33,7 +33,7 @@ EMERGENCY_REPLY = (
 
 # 3 大主題的自然口語提問
 STAGE_TOPIC_QUESTIONS = {
-    "stage1": "你好！我是看診前資料整理小幫手。\n\n目前平時有固定吃藥或打胰島素嗎？有沒有藥物食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）",
+    "stage1": "你好！我是看診前資料整理小幫手。\n\n想先跟您確認：平常有沒有藥物或食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）",
     "stage2": "那這次想看診主要是哪裡不舒服呢？大概從什麼時候開始、如果用 1 到 10 分來評估，嚴重程度大概是幾分呢？",
     "stage3": "好的，我都幫你記下來了。這次看診有什麼特別想請教醫師或討論的問題嗎？（例如飲食原則、藥物副作用，沒有也可以說「沒有」）",
 }
@@ -275,24 +275,39 @@ class LeanIntakeAgent:
                 missing.append("過去慢性病")
             if not intake.family_history:
                 missing.append("家族病史")
-            pending_field = "known_medications" if not intake.known_medications else ("allergies" if not intake.allergies else ("chronic_conditions" if not intake.chronic_conditions else "family_history"))
-            if len(missing) == 4:
+
+            # 決定目前最主要的待答欄位
+            if not intake.known_medications and (intake.allergies or intake.chronic_conditions or intake.family_history):
+                pending_field = "known_medications"
+            elif not intake.allergies:
+                pending_field = "allergies"
+            elif not intake.chronic_conditions:
+                pending_field = "chronic_conditions"
+            elif not intake.family_history:
+                pending_field = "family_history"
+            else:
+                pending_field = "known_medications"
+
+            has_health_history = bool(intake.allergies or intake.chronic_conditions or intake.family_history)
+            
+            # 第一輪：若尚未回答過敏與病史，先問過敏、慢性病與家族病史
+            if not has_health_history:
                 return STAGE_TOPIC_QUESTIONS["stage1"], pending_field
+
+            # 第二輪：已收到過敏與病史，現在確認用藥與藥袋
             if intake.known_medications:
                 med_list = deduplicate_medications(intake.known_medications)
                 med_str = "、".join(med_list)
-                miss_str = "與".join(missing)
-                if len(missing) == 3:
-                    # 第一題開場：明確告知已自動帶入藥袋，並詢問剩餘過敏與病史
-                    return (
-                        f"你好！已為您自動帶入藥袋用藥【{med_str}】（若資料有誤或不需帶入，隨時告訴我即可取消或修改）。\n\n"
-                        f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）"
-                    ), pending_field
-                else:
-                    # 後續追問：不再重複帶入問候，直接追問剩餘缺漏項
-                    return f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）", pending_field
-            miss_str = "與".join(missing)
-            return f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）", pending_field
+                return (
+                    f"收到，過敏與病史資料已為您記錄。\n\n"
+                    f"另外，系統已自動為您帶入剛才辨識的藥袋用藥【{med_str}】。\n\n"
+                    f"請問除了這款藥之外，目前平時還有固定吃其他藥物或打胰島素嗎？（若不需帶入此藥袋也可以直接告訴我取消）"
+                ), pending_field
+            else:
+                return (
+                    "收到，過敏與病史資料已為您記錄。\n\n"
+                    "另外想跟您確認：目前平時有固定吃藥或打胰島素嗎？（如果知道請直接告訴我，沒有請回「無」）"
+                ), pending_field
 
         if stage == "stage2":
             missing = []
@@ -318,61 +333,30 @@ class LeanIntakeAgent:
     def _generate_quick_replies(self, stage: str, intake: PreVisitIntake) -> list[dict[str, str]]:
         """根據當前缺漏欄位，動態產生高精確度的情境式快捷回答按鈕（Smart Chips，乾淨無表情符號）"""
         if stage == "stage1":
-            missing = []
-            if not intake.known_medications:
-                missing.append("meds")
-            if not intake.allergies:
-                missing.append("allergies")
-            if not intake.chronic_conditions:
-                missing.append("chronic")
-            if not intake.family_history:
-                missing.append("family")
-
-            # 初始完整 Stage 1
-            if len(missing) == 4:
+            has_health_history = bool(intake.allergies or intake.chronic_conditions or intake.family_history)
+            
+            # 第一輪（問過敏與病史）快捷按鈕
+            if not has_health_history:
                 return [
-                    {"label": "吃降血糖/降血壓藥", "text": "我有吃降血糖與降血壓藥，無過敏"},
-                    {"label": "有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
-                    {"label": "目前無吃藥無病史", "text": "目前沒有吃藥，也沒有過敏或慢性病"},
+                    {"label": "皆無（無過敏/慢性病/家族史）", "text": "沒有過敏，沒有其他慢性病，也沒有家族史"},
+                    {"label": "無過敏，我有高血壓", "text": "無過敏，我有高血壓，無家族病史"},
+                    {"label": "無過敏，父母有糖尿病", "text": "無過敏無慢性病，父母有糖尿病史"},
+                    {"label": "對海鮮/花生過敏", "text": "我對海鮮和花生過敏，無其他病史"},
                 ]
 
-            if intake.known_medications and len(missing) == 3:
+            # 第二輪（問用藥與藥袋）快捷按鈕
+            if intake.known_medications:
                 return [
-                    {"label": "無過敏、無其他病史", "text": "沒有過敏，沒有其他慢性病或家族病史"},
-                    {"label": "有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
-                    {"label": "取消/修改已帶入用藥", "text": "我想修改用藥，不帶入此藥袋紀錄"},
+                    {"label": "只有這款藥，無其他用藥", "text": "目前只有固定吃這款藥袋的藥，沒有其他用藥"},
+                    {"label": "還有吃其他降血糖/血壓藥", "text": "除了這款藥，平時還有吃降血糖與降血壓藥"},
+                    {"label": "不需帶入，我想修改用藥", "text": "我想修改用藥，不帶入此藥袋紀錄"},
                 ]
-
-            # 若僅缺家族史
-            if missing == ["family"]:
+            else:
                 return [
-                    {"label": "父母有糖尿病", "text": "我父母有糖尿病史"},
-                    {"label": "家人無糖尿病", "text": "家裡長輩沒有糖尿病史"},
-                    {"label": "不太清楚家族史", "text": "不太清楚長輩是否有病史"},
+                    {"label": "吃降血糖與降血壓藥", "text": "我有吃降血糖與降血壓藥"},
+                    {"label": "有固定打胰島素", "text": "平時有固定施打胰島素"},
+                    {"label": "目前無任何固定用藥", "text": "目前沒有吃任何固定用藥或打胰島素"},
                 ]
-
-            # 若僅缺慢性病
-            if missing == ["chronic"]:
-                return [
-                    {"label": "有高血壓與高血脂", "text": "我有高血壓和高血脂"},
-                    {"label": "無其他慢性病", "text": "沒有其他慢性病"},
-                    {"label": "過去有心臟病史", "text": "過去有心血管相關病史"},
-                ]
-
-            # 若僅缺過敏
-            if missing == ["allergies"]:
-                return [
-                    {"label": "無任何過敏史", "text": "我沒有藥物或食物過敏"},
-                    {"label": "對海鮮/花生過敏", "text": "我對海鮮和花生過敏"},
-                    {"label": "對抗生素過敏", "text": "我對特定抗生素或西藥過敏"},
-                ]
-
-            # 若缺過敏 + 慢性病 等組合
-            return [
-                {"label": "皆無（無過敏/慢性病/家族史）", "text": "沒有過敏，沒有其他慢性病，也沒有家族史"},
-                {"label": "僅有高血壓", "text": "無過敏，有高血壓，無家族史"},
-                {"label": "僅有家族糖尿病史", "text": "無過敏無慢性病，父母有糖尿病"},
-            ]
 
         if stage == "stage2":
             missing = []

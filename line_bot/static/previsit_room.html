@@ -783,17 +783,8 @@ body{background:#f4f8f6}
       progressText.textContent = "目前還不能開始，請重新整理頁面。";
     } else {
       let nextQuestion = probe.pending_question || probe.reply || "";
-      const meds = (probe.intake_snapshot && probe.intake_snapshot.known_medications) || [];
-      if (meds.length) {
-        const medNames = Array.from(new Set(meds)).join("、");
-        addBubble("ai", "💊 已為您自動帶入藥袋用藥：\n【" + medNames + "】\n（若資料有誤或不需帶入，隨時點選下方快捷按鈕或告訴我即可取消/修改）");
-      }
       if (!nextQuestion) {
-        if (meds.length) {
-          nextQuestion = "另外想跟您確認：有過敏史、過去慢性病與家族病史嗎？（沒有可以直接點選下方快捷按鈕或回「無」）";
-        } else {
-          nextQuestion = "你好！我是看診前資料整理小幫手。\n\n目前平時有固定吃藥或打胰島素嗎？有沒有藥物食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）";
-        }
+        nextQuestion = "你好！我是看診前資料整理小幫手。\n\n想先跟您確認：平常有沒有藥物或食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）";
       }
       if (!shouldShowSummary(probe)) addBubble("ai", nextQuestion);
       announce("已載入看診前對談室");
