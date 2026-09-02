@@ -1659,33 +1659,32 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
     if not candidate_token and bearer_token and "." not in bearer_token:
         candidate_token = bearer_token
 
-    if candidate_token and _is_demo_intake_token_enabled():
+    if candidate_token:
         import re as _re
+
         if not _re.match(r"^[A-Za-z0-9_-]{16,64}$", candidate_token):
             raise HTTPException(status_code=401, detail="Invalid intake token")
         h = _hash_intake_token(candidate_token)
         rec = orch.repository.get_intake_token(h)
-        if rec is None:
-            raise HTTPException(status_code=403, detail="Invalid intake token")
-        from datetime import datetime as _dt, timezone as _tz
-        try:
-            exp_raw = rec.get("expires_at") or rec.get("expiresAt") or ""
-            exp_dt = _dt.fromisoformat(str(exp_raw))
-            if exp_dt.tzinfo is None:
-                exp_dt = exp_dt.replace(tzinfo=_tz.utc)
-            if _dt.now(_tz.utc) >= exp_dt:
-                raise HTTPException(status_code=401, detail="Intake token expired")
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-        if rec.get("consumed_at"):
-            pass
-        sess_id = str(rec.get("product_session_id") or "")
-        sess = orch.repository.get(sess_id)
-        if sess is None:
-            raise HTTPException(status_code=403, detail="Token session not found")
-        return sess
+        if rec is not None:
+            from datetime import datetime as _dt, timezone as _tz
+
+            try:
+                exp_raw = rec.get("expires_at") or rec.get("expiresAt") or ""
+                exp_dt = _dt.fromisoformat(str(exp_raw))
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=_tz.utc)
+                if _dt.now(_tz.utc) >= exp_dt:
+                    raise HTTPException(status_code=401, detail="Intake token expired")
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+            sess_id = str(rec.get("product_session_id") or "")
+            sess = orch.repository.get(sess_id)
+            if sess is None:
+                raise HTTPException(status_code=403, detail="Token session not found")
+            return sess
 
     if bearer_token:
         channel_id = os.getenv("LINE_LOGIN_CHANNEL_ID", "").strip()
