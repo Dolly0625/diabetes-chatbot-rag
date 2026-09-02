@@ -678,8 +678,11 @@ def _resolve_rephrase_followup(session: ProductSession, text: str) -> str | None
         
         last_topic = ""
         for turn in reversed(turns):
-            role = getattr(turn, "role", "")
-            content = getattr(turn, "content", "").strip()
+            role = getattr(turn, "role", "") or (turn.get("role") if isinstance(turn, dict) else "")
+            if role != "user":
+                continue
+            content = getattr(turn, "content", "") or getattr(turn, "text", "") or (turn.get("content") or turn.get("text") if isinstance(turn, dict) else "")
+            content = str(content).strip()
             if not content or _REPHRASE_FOLLOWUP_RE.search(content):
                 continue
             if _orch_should_use_formal(content, None) or re.search(r"糖尿病|血糖|飲食|吃什麼|副作用|用藥|胰島素|症狀", content):
