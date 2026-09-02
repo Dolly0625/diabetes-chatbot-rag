@@ -214,9 +214,13 @@ class LeanIntakeAgent:
             if len(missing) == 4:
                 return STAGE_TOPIC_QUESTIONS["stage1"], pending_field
             if intake.known_medications and len(missing) < 4:
-                med_str = "、".join(intake.known_medications)
+                med_list = list(dict.fromkeys(intake.known_medications))
+                med_str = "、".join(med_list)
                 miss_str = "與".join(missing)
-                return f"已為您帶入已記錄用藥【{med_str}】。另外想跟您確認：有{miss_str}嗎？（沒有可以直接回「無」）", pending_field
+                return (
+                    f"你好！已為您自動帶入藥袋用藥【{med_str}】（若資料有誤或不需帶入，隨時告訴我即可取消或修改）。\n\n"
+                    f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）"
+                ), pending_field
             miss_str = "與".join(missing)
             return f"另外想跟你確認：有{miss_str}嗎？（沒有可以直接回「無」）", pending_field
 
@@ -266,7 +270,7 @@ class LeanIntakeAgent:
                 return [
                     {"label": "無過敏、無其他病史", "text": "沒有過敏，沒有其他慢性病或家族病史"},
                     {"label": "有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
-                    {"label": "無過敏但有高血壓", "text": "無過敏，有高血壓，無家族病史"},
+                    {"label": "取消/修改已帶入用藥", "text": "我想修改用藥，不帶入此藥袋紀錄"},
                 ]
 
             # 若僅缺家族史
@@ -446,7 +450,9 @@ class LeanIntakeAgent:
             if found:
                 updates["chronic_conditions"] = found
 
-        if any(w in s for w in ("metformin", "美獲明", "伯基", "胰島素", "降血糖藥", "降血壓藥")):
+        if any(w in s for w in ("不帶入此藥袋", "取消用藥", "移除用藥", "移除藥品", "沒吃這個藥", "不要帶入藥袋", "清空用藥", "修改用藥")):
+            updates["known_medications"] = ["無"]
+        elif any(w in s for w in ("metformin", "美獲明", "伯基", "胰島素", "降血糖藥", "降血壓藥")):
             m_med = re.search(r"(metformin|美獲明|伯基|胰島素|降血糖藥|降血壓藥|[a-zA-Z0-9\-]+)", s, re.IGNORECASE)
             if m_med:
                 updates["known_medications"] = [m_med.group(1)]
