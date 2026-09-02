@@ -31,7 +31,7 @@ from .ocr_adapter import ImageInput, _merge_ocr_meds_into_intake_data, _process_
 from .schemas import WorkflowResult
 from .stream import buffered_stream_after_d
 
-FORMAL_WORKFLOW_TIMEOUT_S = float(os.getenv("FORMAL_WORKFLOW_TIMEOUT_S", "45"))
+FORMAL_WORKFLOW_TIMEOUT_S = float(os.getenv("FORMAL_WORKFLOW_TIMEOUT_S", "120"))
 
 def _is_formal_eligible(request_context: Any, task_type: str | None) -> bool:
     """P3 A+B narrow path: only G general-education with RAG candidate goes formal.
