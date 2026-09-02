@@ -213,6 +213,10 @@ class LeanIntakeAgent:
             pending_field = "known_medications" if not intake.known_medications else ("allergies" if not intake.allergies else ("chronic_conditions" if not intake.chronic_conditions else "family_history"))
             if len(missing) == 4:
                 return STAGE_TOPIC_QUESTIONS["stage1"], pending_field
+            if intake.known_medications and len(missing) < 4:
+                med_str = "、".join(intake.known_medications)
+                miss_str = "與".join(missing)
+                return f"已為您帶入已記錄用藥【{med_str}】。另外想跟您確認：有{miss_str}嗎？（沒有可以直接回「無」）", pending_field
             miss_str = "與".join(missing)
             return f"另外想跟你確認：有{miss_str}嗎？（沒有可以直接回「無」）", pending_field
 
@@ -256,6 +260,13 @@ class LeanIntakeAgent:
                     {"label": "吃降血糖/降血壓藥", "text": "我有吃降血糖與降血壓藥，無過敏"},
                     {"label": "有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
                     {"label": "目前無吃藥無病史", "text": "目前沒有吃藥，也沒有過敏或慢性病"},
+                ]
+
+            if intake.known_medications and len(missing) == 3:
+                return [
+                    {"label": "無過敏、無其他病史", "text": "沒有過敏，沒有其他慢性病或家族病史"},
+                    {"label": "有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
+                    {"label": "無過敏但有高血壓", "text": "無過敏，有高血壓，無家族病史"},
                 ]
 
             # 若僅缺家族史

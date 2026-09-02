@@ -1521,19 +1521,15 @@ def _get_previsit_base_url(request: Any | None = None) -> str:
     return "https://example.com"
 
 
-def _previsit_launch_url(request: Any | None = None) -> tuple[str, str | None]:
-    """Return the one supported pre-visit entry URL for this deployment.
-
-    In the public demo, every LINE entry deliberately starts at ``/demo/previsit``.
-    That endpoint creates a fresh browser-only session and then redirects to the
-    dedicated room.  In particular, do not reuse the old LINE ProductSession via
-    a token here: doing so makes an old, half-finished LINE questionnaire appear
-    inside the new room.
-
-    A production LIFF deployment keeps its identity flow and opens the same
-    dedicated room without putting a credential in the URL.
-    """
+def _previsit_launch_url(request: Any | None = None, line_user_id: str | None = None) -> tuple[str, str | None]:
+    """Return the pre-visit entry URL for this session/user."""
     base = _get_previsit_base_url(request)
+    if line_user_id and line_user_id != "unknown":
+        try:
+            raw_token, sess_id = _create_previsit_token_for_user(line_user_id)
+            return f"{base}/patient/previsit-room?token={raw_token}", sess_id
+        except Exception as exc:
+            logger.warning("Failed to create previsit token for user %s: %s", line_user_id, exc)
     if _is_public_demo_web_enabled():
         return f"{base}/demo/previsit", None
     # LIFF mode: no token in URL; the browser verifies the LIFF ID token.
@@ -2561,7 +2557,7 @@ async def callback(
                         # card always opens the dedicated patient room; demo
                         # uses /demo/previsit so it cannot resurrect a stale
                         # LINE intake session.
-                        previsit_url, sess_id = _previsit_launch_url(request)
+                        previsit_url, sess_id = _previsit_launch_url(request, line_user_id=str(user_id))
                         flex = _build_previsit_flex_message(previsit_url)
                         sent = False
                         try:
