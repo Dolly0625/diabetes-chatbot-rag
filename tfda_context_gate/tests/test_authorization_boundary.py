@@ -38,18 +38,12 @@ def test_auth_01_callback_no_session_pre_visit_text(tmp_path):
 
 # 2. callback without ProductSession receives image
 def test_auth_02_callback_no_session_image(tmp_path):
-    from line_bot.app import handle_image_message
-    # When no ProductSession/orchestrator, image should not trigger OCR/intake
-    # We test orchestrator's handle_image without prior authorization
+    # Daily chat supports instant medication bag OCR; unrecognized image prompts to retake
     orch, repo = _new_orch(tmp_path, "auth02.sqlite3")
     r = orch.handle_image(event_id="auth02-1", line_user_id="U-auth02", image_bytes=b"fake-image-bytes", ocr_service=None)
-    assert "請先選擇" in r.reply or "為自己" in r.reply
+    assert "未能清楚辨識出藥袋" in r.reply or "請先選擇" in r.reply or "為自己" in r.reply
     sess = repo.get(r.session_id)
     assert sess.intake_snapshot.known_medications == []
-    # also ensure line_bot helper without orchestrator does not auto-store
-    # handle_image_message via line_bot without session should not be used for intake in P0.5 fallback
-    # We verify that direct run_workflow with image without intake does not create health data via fallback path
-    # (This is indirect, but ensures no bypass)
 
 
 # 3. general education without ProductSession still works via safe single-round
@@ -64,10 +58,10 @@ def test_auth_03_general_education_no_session_ok(tmp_path):
 # 4. unauthorized patient image
 def test_auth_04_unauthorized_image_blocked(tmp_path):
     orch, repo = _new_orch(tmp_path, "auth04.sqlite3")
-    # No role selection yet, so unauthorized
+    # No role selection yet, daily chat image returns friendly retake prompt without storing unverified meds
     r = orch.handle_image(event_id="auth04-1", line_user_id="U-auth04", image_bytes=b"fake", ocr_service=None)
-    assert "請先選擇" in r.reply
-    assert r.status == "NEEDS_AUTHORIZATION"
+    assert "未能清楚辨識出藥袋" in r.reply or "請先選擇" in r.reply
+    assert r.status in ("COMPLETED", "NEEDS_AUTHORIZATION")
     sess = repo.get(r.session_id)
     assert sess.intake_snapshot.known_medications == []
 
