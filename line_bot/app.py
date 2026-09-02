@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
-HONEST_FALLBACK_PUSH_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+HONEST_FALLBACK_PUSH_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
 ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你。"
 # Canonical async boundary classification; legacy reason codes remain
@@ -895,50 +895,7 @@ def _maybe_record_question_for_doctor(
     *,
     deadline_guard: Any | None = None,
 ) -> None:
-    try:
-        if deadline_guard is None:
-            try:
-                from tfda_context_gate.e_observability.deadline import current_deadline_guard
-
-                deadline_guard = current_deadline_guard()
-            except Exception:
-                deadline_guard = None
-        if deadline_guard is not None and deadline_guard.should_abort():
-            return
-        status = getattr(workflow, "status", None) or (workflow.get("status") if isinstance(workflow, dict) else None)
-        if status != "FALLBACK":
-            return
-        push_text = _format_formal_push_text(workflow, original_text)
-        if push_text != HONEST_FALLBACK_PUSH_TEXT:
-            return
-        if orchestrator is None:
-            return
-        try:
-            session = orchestrator.session_for_user(line_user_id)
-        except Exception:
-            session = None
-        if session is None:
-            try:
-                session = orchestrator._load_or_create(line_user_id)
-            except Exception:
-                return
-        q = original_text.strip()[:200]
-        if not q or q in session.intake_snapshot.questions_for_doctor:
-            return
-        if len(session.intake_snapshot.questions_for_doctor) >= 10:
-            return
-        if deadline_guard is not None and deadline_guard.should_abort():
-            return
-        # converge to single service method: only set pending, not direct append
-        try:
-            from tfda_context_gate.product_session.schemas import PendingAction
-            import datetime
-            pending = PendingAction(type="PENDING_CONFIRM_QUESTION", proposal=q, created_at=datetime.datetime.now(datetime.timezone.utc))
-            orchestrator.repository.save(session.model_copy(update={"pending_action": pending, "pending_question_proposal": q}, deep=True), expected_version=session.version)
-        except Exception:
-            pass
-    except Exception:
-        pass
+    return
 
 
 def _should_use_async_formal(text: str, task_type: str | None = None) -> bool:
@@ -1298,24 +1255,6 @@ def _reply_text(reply_token: str, text: str, *, quick_actions: list[dict[str, st
 
 
 def _enrich_reply_with_stage_progress(reply: str, status: str, intake: Any | None = None) -> str:
-    if status != "NEEDS_CLARIFICATION":
-        return reply
-    if "已完成" in reply or ("還差" in reply and "✅" in reply):
-        return reply
-    if intake is None:
-        return reply
-    try:
-        from tfda_context_gate.intake.tool import format_stage_progress
-
-        progress = format_stage_progress(intake)
-        if not progress or "第" in progress:
-            return reply
-        if "皆已完成" in progress:
-            return f"{reply}\n\n{progress}"
-        if "已完成" in progress or "還差" in progress:
-            return f"{reply}\n\n{progress}"
-    except Exception:
-        return reply
     return reply
 
 

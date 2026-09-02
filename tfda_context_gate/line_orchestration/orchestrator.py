@@ -271,7 +271,7 @@ def _enrich_orchestrator_result(result: Any, observation: Any | None, mode: str)
         return result
 
 # ── Async formal push: honest fallback + idempotency ─────────────────────────
-HONEST_FALLBACK_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+HONEST_FALLBACK_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
 ASYNC_ADMISSION_FALLBACK_TEXT = "目前同時查詢較多，這次無法完成查詢，請稍後再試。"
 # Canonical async boundary classification.  Legacy FORMAL_TIMEOUT and
@@ -1433,8 +1433,6 @@ class ConversationOrchestrator:
             return False
         push_text = self.prepare_formal_push_text(workflow, original_text)
         ok = self._push_with_retry(line_user_id, push_text, event_id=event_id, push_sender=push_sender)
-        if ok and _should_push_honest_fallback(workflow):
-            self._maybe_record_question_for_doctor(line_user_id, original_text, workflow)
         return ok
 
     def _is_async_narrow_eligible(self, session: ProductSession, text: str) -> bool:

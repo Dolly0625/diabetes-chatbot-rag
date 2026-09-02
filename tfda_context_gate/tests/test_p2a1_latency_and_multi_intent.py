@@ -390,7 +390,7 @@ def test_education_failure_intake_preserved_honest(tmp_path: Path):
     }
     fake_interp = FakeConversationInterpreter(preset=preset)
     # Simulate education failure: workflow returns FALLBACK with honest fallback reason
-    honest_text = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
+    honest_text = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。"
     fake_wf = _fake_workflow_factory(honest_text, status="FALLBACK", fallback_reason="B_INSUFFICIENT")
     repo, orch = _new_orchestrator(tmp_path, interpreter=fake_interp, workflow_runner=fake_wf)
     _activate_intake(orch, "U-honest")
