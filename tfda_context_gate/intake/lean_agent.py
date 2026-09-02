@@ -3,7 +3,7 @@
 特色：
 1. 【3 階段主題式對話】：用藥病史 → 本次症狀與程度 → 醫病提問（2~3 輪即可完成，告別 8 題逐題拷問）。
 2. 【機會主義式萃取 (Opportunistic Slot Filling)】：病患一句話講多項，一次全部填入，只追問缺漏項。
-3. 【醫療同理心承接 (Empathetic Bridging)】：真實 LLM 動態生成有溫度的回饋，告別「收到，下一項」的機器人口吻。
+3. 【醫療同理心承接 (Empathetic Bridging)】：真實 LLM 動態生成有溫度的回饋，告別機器人口吻，且不使用表情符號。
 4. 【動態情境式快捷標籤 (Contextual Smart Chips)】：根據目前缺少的欄位，動態提供最精確的建議按鈕。
 5. 【紅旗急症即時攔截】：胸痛、呼吸困難秒級安全警示。
 6. 【離線確定性 Fallback】：無網路/測試環境 100% 穩定可用。
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # 紅旗急症提示文案
 EMERGENCY_REPLY = (
-    "⚠️ 系統偵測到可能屬於緊急醫療狀況（如呼吸困難、意識不清或劇烈胸痛）。"
+    "系統偵測到可能屬於緊急醫療狀況（如呼吸困難、意識不清或劇烈胸痛）。"
     "請勿耽擱，建議立即撥打 119 或前往最近的急診室就醫！本系統不做診斷，已為你保留目前進度。"
 )
 
@@ -39,8 +39,8 @@ STAGE_TOPIC_QUESTIONS = {
 }
 
 REVIEW_QUICK_REPLIES = [
-    {"label": "✅ 確認完成", "text": "確認完成"},
-    {"label": "✏️ 修改資料", "text": "修改看診資料"},
+    {"label": "確認完成", "text": "確認完成"},
+    {"label": "修改資料", "text": "修改看診資料"},
 ]
 
 
@@ -56,7 +56,7 @@ class LLMIntakeTurnOutput(BaseModel):
     questions_for_doctor: list[str] | None = Field(default=None, description="想問醫師的問題清單，無則 ['無']")
     empathetic_ack: str | None = Field(
         default=None,
-        description="用 1 句溫暖、口語、有同理心的話回應病患剛才說的內容（例如：聽到您頭暈到 8 分真的很不舒服，辛苦了，我已經幫您記下了！）"
+        description="用 1 句溫暖、口語、有同理心且不包含任何表情符號的話回應病患剛才說的內容（例如：聽到您頭暈到 8 分真的很不舒服，辛苦了，我已經幫您記下了！）"
     )
 
 
@@ -158,7 +158,7 @@ class LeanIntakeAgent:
         questions = "；".join(intake.questions_for_doctor) if intake.questions_for_doctor else "無特別提問"
 
         summary = (
-            "📋 【看診前資料整理摘要】\n"
+            "【看診前資料整理摘要】\n"
             "──────────────────\n"
             f"1. 目前用藥：{meds}\n"
             f"2. 過敏史：{allergies}\n"
@@ -238,7 +238,7 @@ class LeanIntakeAgent:
         return "請確認以上看診前整理資料是否正確？", None
 
     def _generate_quick_replies(self, stage: str, intake: PreVisitIntake) -> list[dict[str, str]]:
-        """根據當前缺漏欄位，動態產生高精確度的情境式快捷回答按鈕（Smart Chips）"""
+        """根據當前缺漏欄位，動態產生高精確度的情境式快捷回答按鈕（Smart Chips，乾淨無表情符號）"""
         if stage == "stage1":
             missing = []
             if not intake.known_medications:
@@ -253,40 +253,40 @@ class LeanIntakeAgent:
             # 初始完整 Stage 1
             if len(missing) == 4:
                 return [
-                    {"label": "💊 吃降血糖/降血壓藥", "text": "我有吃降血糖與降血壓藥，無過敏"},
-                    {"label": "🩺 有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
-                    {"label": "✨ 目前無吃藥無病史", "text": "目前沒有吃藥，也沒有過敏或慢性病"},
+                    {"label": "吃降血糖/降血壓藥", "text": "我有吃降血糖與降血壓藥，無過敏"},
+                    {"label": "有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
+                    {"label": "目前無吃藥無病史", "text": "目前沒有吃藥，也沒有過敏或慢性病"},
                 ]
 
             # 若僅缺家族史
             if missing == ["family"]:
                 return [
-                    {"label": "👨‍👩‍👧 父母有糖尿病", "text": "我父母有糖尿病史"},
-                    {"label": "🚫 家人無糖尿病", "text": "家裡長輩沒有糖尿病史"},
-                    {"label": "❓ 不太清楚家族史", "text": "不太清楚長輩是否有病史"},
+                    {"label": "父母有糖尿病", "text": "我父母有糖尿病史"},
+                    {"label": "家人無糖尿病", "text": "家裡長輩沒有糖尿病史"},
+                    {"label": "不太清楚家族史", "text": "不太清楚長輩是否有病史"},
                 ]
 
             # 若僅缺慢性病
             if missing == ["chronic"]:
                 return [
-                    {"label": "🩺 有高血壓與高血脂", "text": "我有高血壓和高血脂"},
-                    {"label": "🚫 無其他慢性病", "text": "沒有其他慢性病"},
-                    {"label": "❤️ 過去有心臟病史", "text": "過去有心血管相關病史"},
+                    {"label": "有高血壓與高血脂", "text": "我有高血壓和高血脂"},
+                    {"label": "無其他慢性病", "text": "沒有其他慢性病"},
+                    {"label": "過去有心臟病史", "text": "過去有心血管相關病史"},
                 ]
 
             # 若僅缺過敏
             if missing == ["allergies"]:
                 return [
-                    {"label": "🚫 無任何過敏史", "text": "我沒有藥物或食物過敏"},
-                    {"label": "🥜 對海鮮/花生過敏", "text": "我對海鮮和花生過敏"},
-                    {"label": "💊 對抗生素過敏", "text": "我對特定抗生素或西藥過敏"},
+                    {"label": "無任何過敏史", "text": "我沒有藥物或食物過敏"},
+                    {"label": "對海鮮/花生過敏", "text": "我對海鮮和花生過敏"},
+                    {"label": "對抗生素過敏", "text": "我對特定抗生素或西藥過敏"},
                 ]
 
             # 若缺過敏 + 慢性病 等組合
             return [
-                {"label": "🚫 皆無（無過敏/慢性病/家族史）", "text": "沒有過敏，沒有其他慢性病，也沒有家族史"},
-                {"label": "🩺 僅有高血壓", "text": "無過敏，有高血壓，無家族史"},
-                {"label": "👨‍👩‍👧 僅有家族糖尿病史", "text": "無過敏無慢性病，父母有糖尿病"},
+                {"label": "皆無（無過敏/慢性病/家族史）", "text": "沒有過敏，沒有其他慢性病，也沒有家族史"},
+                {"label": "僅有高血壓", "text": "無過敏，有高血壓，無家族史"},
+                {"label": "僅有家族糖尿病史", "text": "無過敏無慢性病，父母有糖尿病"},
             ]
 
         if stage == "stage2":
@@ -301,33 +301,33 @@ class LeanIntakeAgent:
             # 初始完整 Stage 2
             if len(missing) == 3:
                 return [
-                    {"label": "💧 3天前口渴頻尿(輕度3分)", "text": "三天前開始容易口渴頻尿，大概3分輕度"},
-                    {"label": "😴 1週前頭暈疲倦(中度5分)", "text": "一週前開始容易頭暈想睡覺，大約5分中度"},
-                    {"label": "⚠️ 最近很不舒服(重度8分)", "text": "最近幾天非常不舒服，大概8分很嚴重"},
+                    {"label": "3天前口渴頻尿(輕度3分)", "text": "三天前開始容易口渴頻尿，大概3分輕度"},
+                    {"label": "1週前頭暈疲倦(中度5分)", "text": "一週前開始容易頭暈想睡覺，大約5分中度"},
+                    {"label": "最近很不舒服(重度8分)", "text": "最近幾天非常不舒服，大概8分很嚴重"},
                 ]
 
             # 若僅缺嚴重程度
             if missing == ["severity"]:
                 return [
-                    {"label": "🟢 輕度 (1-3分，生活正常)", "text": "大概 2-3 分輕度，不影響平常生活"},
-                    {"label": "🟡 中度 (4-6分，有點困擾)", "text": "大約 5 分中度，有些困擾想改善"},
-                    {"label": "🔴 重度 (7-10分，很不舒服)", "text": "大概 8 分重度，非常不舒服"},
+                    {"label": "輕度 (1-3分，生活正常)", "text": "大概 2-3 分輕度，不影響平常生活"},
+                    {"label": "中度 (4-6分，有點困擾)", "text": "大約 5 分中度，有些困擾想改善"},
+                    {"label": "重度 (7-10分，很不舒服)", "text": "大概 8 分重度，非常不舒服"},
                 ]
 
             # 若僅缺時間
             if missing == ["onset"]:
                 return [
-                    {"label": "⏱️ 最近 2-3 天開始", "text": "大概兩三天前開始的"},
-                    {"label": "📅 最近一週左右", "text": "大約最近一週開始"},
-                    {"label": "⏳ 持續一個月以上", "text": "已經持續一個多月了"},
+                    {"label": "最近 2-3 天開始", "text": "大概兩三天前開始的"},
+                    {"label": "最近一週左右", "text": "大約最近一週開始"},
+                    {"label": "持續一個月以上", "text": "已經持續一個多月了"},
                 ]
 
             # 若僅缺症狀描述
             if missing == ["description"]:
                 return [
-                    {"label": "💧 常常口渴、晚上頻尿", "text": "常常覺得很口渴、晚上一直爬起來尿尿"},
-                    {"label": "😴 吃飽容易頭暈想睡", "text": "每次吃飽飯後都覺得很想睡覺、頭暈"},
-                    {"label": "📉 容易飢餓、手抖心悸", "text": "容易突然很餓、手會發抖"},
+                    {"label": "常常口渴、晚上頻尿", "text": "常常覺得很口渴、晚上一直爬起來尿尿"},
+                    {"label": "吃飽容易頭暈想睡", "text": "每次吃飽飯後都覺得很想睡覺、頭暈"},
+                    {"label": "容易飢餓、手抖心悸", "text": "容易突然很餓、手會發抖"},
                 ]
 
             # 缺時間 + 程度
@@ -346,10 +346,10 @@ class LeanIntakeAgent:
 
         if stage == "stage3":
             return [
-                {"label": "🍗 想問飲食與可否吃炸雞/澱粉", "text": "想請教醫師平常飲食有何禁忌，例如可以吃炸雞或甜食嗎？"},
-                {"label": "💊 想了解目前藥物副作用", "text": "想了解目前服用的藥物有沒有副作用或需要注意的地方"},
-                {"label": "🏃 想詢問運動與血糖控制目標", "text": "想請教適合的運動方式與平常血糖應該控制在多少"},
-                {"label": "✨ 目前沒有特別想問的", "text": "目前沒有特別想問的問題，謝謝！"},
+                {"label": "想問飲食與可否吃炸雞/澱粉", "text": "想請教醫師平常飲食有何禁忌，例如可以吃炸雞或甜食嗎？"},
+                {"label": "想了解目前藥物副作用", "text": "想了解目前服用的藥物有沒有副作用或需要注意的地方"},
+                {"label": "想詢問運動與血糖控制目標", "text": "想請教適合的運動方式與平常血糖應該控制在多少"},
+                {"label": "目前沒有特別想問的", "text": "目前沒有特別想問的問題，謝謝！"},
             ]
 
         if stage == "review":
@@ -371,7 +371,8 @@ class LeanIntakeAgent:
                 "⚠️ 請嚴格遵守規則：\n"
                 "1. 結構化欄位抽取：病患這句話中『明確提到』的項目請萃取填入；『沒提到的欄位一律保持 null』，絕對不要擅自幫未提及的欄位填無！\n"
                 "2. 嚴重程度標準化：1-3分為輕度、4-6分為中度、7-10分為重度。\n"
-                "3. 同理心口語承接 (empathetic_ack)：根據病患提到的症狀或心情，給予 1 句簡短、溫暖的醫療同理回應（例如：'頭暈到8分真的很不舒服，辛苦了，我已經幫你記下來！'；若只是單純回答無或病史，則簡短親切確認即可）。"
+                "3. 同理心口語承接 (empathetic_ack)：根據病患提到的症狀或心情，給予 1 句簡短、溫暖的醫療同理回應（例如：'頭暈到8分真的很不舒服，辛苦了，我已經幫你記下來！'；若只是單純回答無或病史，則簡短親切確認即可）。\n"
+                "4. 嚴格禁止使用任何表情符號（Emoji），保持專業俐落、乾淨溫暖的文字口吻。"
             )
             structured_llm = self.llm.with_structured_output(LLMIntakeTurnOutput)
             res: LLMIntakeTurnOutput = structured_llm.invoke(prompt)
@@ -397,7 +398,13 @@ class LeanIntakeAgent:
                 elif any(str(val).lower() in text.lower() for val in (v if isinstance(v, list) else [v])):
                     updates[k] = v
 
-            return updates, res.empathetic_ack
+            # 清除回覆中可能殘留的 emoji
+            ack = res.empathetic_ack
+            if ack:
+                # 移除 Unicode emoji 字符
+                ack = re.sub(r"[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]", "", ack).strip()
+
+            return updates, ack
         except Exception as exc:
             logger.warning("LLM extraction failed, falling back to deterministic: %s", exc)
             return {}, None
