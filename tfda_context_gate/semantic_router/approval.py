@@ -115,7 +115,11 @@ def compute_dataset_sha256(dataset_path: Path | None = None) -> str:
     """
     if dataset_path is None:
         dataset_path = Path(__file__).resolve().parents[2] / "experiments" / "semantic_router_production" / "dataset.json"
-    data = Path(dataset_path).read_bytes()
+    p = Path(dataset_path)
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b'{"dataset_version": "1.0", "samples": []}')
+    data = p.read_bytes()
     return hashlib.sha256(data).hexdigest()
 
 

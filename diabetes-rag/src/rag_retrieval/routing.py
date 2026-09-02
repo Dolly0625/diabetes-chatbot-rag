@@ -10,4 +10,13 @@ from .contract.enums import IntentTag, RetrievalRoute
 
 
 def decide_route(intent_tags: list[IntentTag]) -> RetrievalRoute:
+    if not intent_tags:
+        return RetrievalRoute.HYBRID
+    if len(intent_tags) > 1:
+        return RetrievalRoute.HYBRID
+    t = intent_tags[0]
+    if t == IntentTag.MEDICATION_CHANGE_REQUEST:
+        return RetrievalRoute.GRAPH
+    if t in (IntentTag.DIAGNOSIS_REQUEST, IntentTag.NON_MEDICAL):
+        return RetrievalRoute.VECTOR
     return RetrievalRoute.HYBRID
