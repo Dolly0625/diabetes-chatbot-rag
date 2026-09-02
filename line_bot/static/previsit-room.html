@@ -749,10 +749,15 @@ body{background:#f4f8f6}
       addBubble("ai", "整理室暫時載入失敗，請重新整理這個頁面後再試。資料尚未送出。");
       progressText.textContent = "目前還不能開始，請重新整理頁面。";
     } else {
-      renderQuick(probe.quick_replies || probe.quickReplies || []);
-      renderSummary(probe);
-      updateProgress(probe);
-      const nextQuestion = probe.pending_question || probe.reply || "請回答目前這一題就好。";
+      let nextQuestion = probe.pending_question || probe.reply || "";
+      if (!nextQuestion) {
+        const meds = (probe.intake_snapshot && probe.intake_snapshot.known_medications) || [];
+        if (meds.length) {
+          nextQuestion = "已為您帶入已記錄用藥【" + meds.join("、") + "】。另外想跟您確認：有過敏史、過去慢性病與家族病史嗎？（沒有可以直接回『無』）";
+        } else {
+          nextQuestion = "你好！我是看診前資料整理小幫手。\n\n目前平時有固定吃藥或打胰島素嗎？有沒有藥物食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）";
+        }
+      }
       if (!shouldShowSummary(probe)) addBubble("ai", nextQuestion);
       announce("已載入看診前對談室");
     }
