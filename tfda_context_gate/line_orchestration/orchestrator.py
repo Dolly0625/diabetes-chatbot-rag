@@ -1420,11 +1420,13 @@ class ConversationOrchestrator:
                 return False
         except Exception:
             pass
+        stripped = text.strip()
+        if _orch_should_use_formal(stripped, None):
+            return True
         if session.intake_stage in ("review", "submitted") or session.status in ("AWAITING_CONFIRMATION", "SUBMITTED"):
             return False
         if self._is_intake_active(session, text):
             try:
-                stripped = text.strip()
                 if _is_rephrase_request(stripped):
                     q = _resolve_rephrase_followup(session, stripped)
                     if q and _orch_should_use_formal(q, None):
@@ -1434,13 +1436,7 @@ class ConversationOrchestrator:
                 if self._looks_like_side_question(session, text):
                     return True
                 if _orch_should_use_formal(stripped, None):
-                    if "？" in stripped or "?" in stripped or bool(_QUESTION_WORD_RE.search(stripped)) or "請說明" in stripped:
-                        return True
-                    intake_part, edu_part = _split_intake_education_clauses(stripped, None)
-                    if edu_part and not intake_part.strip():
-                        return _orch_should_use_formal(edu_part, None)
-                    if edu_part is None and _extract_question_clause(stripped):
-                        return True
+                    return True
             except Exception:
                 pass
             return False
