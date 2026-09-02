@@ -89,6 +89,7 @@ class GraphTripleRecord:
 
 
 _EDUCATION_CHUNKS_FILENAME = "education_chunks_embedded.json"
+_NUTRITION_CHUNKS_FILENAME = "nutrition_diet_chunks_embedded.json"
 
 
 def _read_packaged_json(filename: str):
@@ -115,6 +116,9 @@ def load_vector_chunks(extra_paths: Optional[list[str]] = None) -> list[VectorCh
     education = _read_packaged_json_if_present(_EDUCATION_CHUNKS_FILENAME)
     if education:
         raw = raw + education
+    nutrition = _read_packaged_json_if_present(_NUTRITION_CHUNKS_FILENAME)
+    if nutrition:
+        raw = raw + nutrition
     for path in extra_paths or []:
         with open(path, "r", encoding="utf-8") as fh:
             raw = raw + json.load(fh)

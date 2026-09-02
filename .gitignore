@@ -10,9 +10,7 @@ __pycache__/
 *.sqlite3
 *.sqlite-wal
 *.sqlite-shm
-*.sqlite3-wal
 *.sqlite3-shm
-diabetes-rag/
 
 # OS
 .DS_Store
