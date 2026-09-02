@@ -1973,7 +1973,14 @@ def previsit_room_portal() -> FileResponse:
     p = Path(__file__).parent / "static" / "previsit-room.html"
     if not p.is_file():
         raise HTTPException(status_code=404, detail="Previsit room portal not found")
-    return FileResponse(p, headers={"Cache-Control": "no-store"})
+    return FileResponse(
+        p,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/demo/previsit")
@@ -1990,7 +1997,11 @@ def start_public_demo_previsit() -> RedirectResponse:
     return RedirectResponse(
         url=f"/patient/previsit-room?token={raw_token}",
         status_code=303,
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -2034,7 +2045,11 @@ def get_previsit_room(
             "quick_replies": quick_replies,
             "system_risk_classification": sess.system_risk_classification,
         },
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 

@@ -2,6 +2,9 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>看診前 AI 對談室｜糖尿病照護 Demo</title>
 <style>
@@ -79,6 +82,7 @@ body{background:#f4f8f6}
 <span id="progressText" class="muted">我們一步一步來</span>
 <span id="shareText" class="badge warn hidden">尚未分享</span>
 </div>
+<div id="medBanner" class="hidden" style="margin-top:6px;background:#e8f5f1;border:1px solid #b7dfd4;border-radius:8px;padding:6px 10px;font-size:0.84rem;color:#08634f;font-weight:600;display:flex;align-items:center;justify-content:space-between"><span>已帶入藥袋：<span id="medBannerText"></span></span><button id="clearMedBtn" type="button" style="background:transparent;border:0;color:#9b1c1c;font-size:0.8rem;cursor:pointer;text-decoration:underline">清除</button></div>
 </header>
 
 <main id="chat" class="chat" role="log" aria-live="polite" aria-relevant="additions" aria-label="對談訊息"></main>
@@ -213,6 +217,26 @@ body{background:#f4f8f6}
     progressText.textContent = stageLabels[stage] || (percent >= 100 ? "內容都整理好了" : "我們一步一步來");
     stageText.textContent = stageBadgeLabels[stage] || "一起整理";
     fill.style.width = percent + "%";
+
+    const medBanner = document.getElementById("medBanner");
+    const medBannerText = document.getElementById("medBannerText");
+    const clearMedBtn = document.getElementById("clearMedBtn");
+    if (medBanner && medBannerText) {
+      const snap = data.intake_snapshot || (data.review && data.review.intake) || {};
+      const meds = snap.known_medications || [];
+      if (Array.isArray(meds) && meds.length) {
+        medBannerText.textContent = Array.from(new Set(meds)).join("、");
+        medBanner.classList.remove("hidden");
+        if (clearMedBtn && !clearMedBtn.onclick) {
+          clearMedBtn.onclick = async () => {
+            const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+            await doChat("我想修改用藥，不帶入此藥袋紀錄", cid, false);
+          };
+        }
+      } else {
+        medBanner.classList.add("hidden");
+      }
+    }
   };
   const shouldShowSummary = (data) => {
     if (data.red_flag) return false;
