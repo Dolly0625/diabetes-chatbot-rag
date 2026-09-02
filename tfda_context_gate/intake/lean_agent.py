@@ -125,8 +125,11 @@ class LLMIntakeTurnOutput(BaseModel):
 def _clean_field_value(raw: str) -> str:
     s = raw.strip().strip("，。、；;！!？?")
     s = re.sub(r"^(我有吃|我吃|在吃|服用|每天吃|我有|我有過|有|會對|對)\s*", "", s)
-    s = re.sub(r"過敏$", "", s)
-    return s.strip()
+    s = re.sub(r"過敏$", "", s).strip()
+    # 排除單字、問候語與代名詞
+    if s in ("你", "我", "他", "您", "好", "在", "哈囉", "嗨", "安安", "早安", "午安", "晚安", "你好", "您好", "在嗎", "hello", "hi"):
+        return ""
+    return s
 
 
 class LeanIntakeAgent:
@@ -460,12 +463,17 @@ class LeanIntakeAgent:
             res: LLMIntakeTurnOutput = structured_llm.invoke(prompt)
             raw_updates = {k: v for k, v in res.model_dump().items() if v is not None and v != [] and v != "" and k != "empathetic_ack"}
             
-            # 安全防禦：過濾未提及欄位
+            # 安全防禦：過濾未提及欄位與代名詞/無效字
             updates: dict[str, Any] = {}
             for k, v in raw_updates.items():
+                if isinstance(v, list):
+                    v = [_clean_field_value(item) if isinstance(item, str) else item for item in v]
+                    v = [item for item in v if item]
+                    if not v:
+                        continue
                 if k == "symptom_severity" and (self.standardize_severity(text) is not None or any(w in text for w in ("分", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "輕", "中", "重", "嚴重"))):
                     updates[k] = self.standardize_severity(text) or v
-                elif k == "allergies" and "過敏" in text:
+                elif k == "allergies" and ("過敏" in text or "沒有" in text or "無" in text):
                     updates[k] = v
                 elif k == "chronic_conditions" and any(w in text for w in ("高血壓", "高血脂", "心臟病", "腎臟病", "糖尿病", "三高", "都有", "病", "無", "沒有")):
                     updates[k] = v
@@ -477,7 +485,7 @@ class LeanIntakeAgent:
                     updates[k] = v
                 elif k == "questions_for_doctor" and any(w in text for w in ("問", "請教", "可以", "能", "注意", "問題", "吃")):
                     updates[k] = v
-                elif any(str(val).lower() in text.lower() for val in (v if isinstance(v, list) else [v])):
+                elif any(str(val).lower() in text.lower() for val in (v if isinstance(v, list) else [v])) and not any(w in text for w in ("你好", "您好", "哈囉", "嗨", "安安", "早安", "晚安")):
                     updates[k] = v
 
             # 清除回覆中可能殘留的 emoji
