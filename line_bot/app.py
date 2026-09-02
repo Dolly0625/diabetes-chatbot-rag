@@ -1366,25 +1366,45 @@ def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, st
 
 
 def _download_image_content(message_id: str) -> bytes | None:
-    """Download image via MessagingApiBlob.get_message_content."""
+    """Download image via httpx direct endpoint with MessagingApiBlob fallback."""
     if not message_id:
         return None
-    blob_api = _get_blob_api()
-    if blob_api is None:
+    token = _get_access_token()
+    if not token:
+        logger.warning("No LINE access token available to download image")
         return None
+
+    # Method 1: Direct HTTPX download from LINE Data API (fastest, immune to SDK wrapper variations)
     try:
-        # get_message_content returns bytes or file-like
-        content = blob_api.get_message_content(message_id=message_id)
-        if isinstance(content, (bytes, bytearray)):
+        import httpx
+
+        url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = httpx.get(url, headers=headers, timeout=20.0)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+        logger.warning("HTTPX image download returned status %d: %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.warning("HTTPX image download exception for message %s: %s", message_id, exc)
+
+    # Method 2: SDK MessagingApiBlob fallback
+    blob_api = _get_blob_api()
+    if blob_api is not None:
+        try:
+            content = blob_api.get_message_content(message_id=message_id)
+            if isinstance(content, (bytes, bytearray)):
+                return bytes(content)
+            if hasattr(content, "read"):
+                return content.read()
+            if hasattr(content, "data"):
+                return bytes(getattr(content, "data"))
+            if hasattr(content, "raw_data"):
+                return bytes(getattr(content, "raw_data"))
             return bytes(content)
-        # Some SDK versions return response with .data or file object
-        if hasattr(content, "read"):
-            return content.read()  # type: ignore[union-attr]
-        if hasattr(content, "data"):
-            return bytes(getattr(content, "data"))
-        return bytes(content)  # type: ignore[arg-type]
-    except Exception:
-        return None
+        except Exception as exc:
+            logger.warning("Blob API download error for message %s: %s", message_id, exc)
+
+    return None
 
 
 # ── FastAPI routes ──────────────────────────────────────────────────────────
