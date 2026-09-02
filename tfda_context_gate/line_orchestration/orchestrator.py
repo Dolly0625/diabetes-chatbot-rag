@@ -2168,12 +2168,7 @@ class ConversationOrchestrator:
                 # Reload fresh session from repository after OCR to avoid optimistic lock conflict with concurrent user messages
                 session = self._load_or_create(line_user_id)
                 previous_version = session.version
-                current_intake = session.intake_snapshot or PreVisitIntake()
-                existing_meds = list(current_intake.known_medications or [])
-                for m in meds:
-                    if m not in existing_meds:
-                        existing_meds.append(m)
-                clean_meds = deduplicate_medications(existing_meds)
+                clean_meds = deduplicate_medications(meds)
                 meds_text = "、".join(clean_meds)
                 reply = (
                     f"為您辨識藥袋上的藥品資訊如下：\n"
@@ -2181,7 +2176,7 @@ class ConversationOrchestrator:
                     f"您可以在這裡直接向我詢問此藥品的用途、服用注意事項或副作用。\n"
                     f"若您近期要看醫生，也可以點選「我要準備看診」，我會將這筆用藥自動帶入看診資料中。"
                 )
-                current_intake = current_intake.model_copy(update={"known_medications": clean_meds}, deep=True)
+                current_intake = PreVisitIntake(known_medications=clean_meds)
                 agent = LeanIntakeAgent.from_env()
                 dyn_q, dyn_f = agent._generate_next_question("stage1", current_intake)
                 session = session.model_copy(
@@ -2199,13 +2194,8 @@ class ConversationOrchestrator:
                 except Exception:
                     # Retry with latest state on race condition
                     session = self._load_or_create(line_user_id)
-                    current_intake = session.intake_snapshot or PreVisitIntake()
-                    existing_meds = list(current_intake.known_medications or [])
-                    for m in meds:
-                        if m not in existing_meds:
-                            existing_meds.append(m)
-                    clean_meds = deduplicate_medications(existing_meds)
-                    current_intake = current_intake.model_copy(update={"known_medications": clean_meds}, deep=True)
+                    clean_meds = deduplicate_medications(meds)
+                    current_intake = PreVisitIntake(known_medications=clean_meds)
                     dyn_q, dyn_f = agent._generate_next_question("stage1", current_intake)
                     session = session.model_copy(
                         update={
