@@ -1077,14 +1077,7 @@ def build_workflow_graph(*, trace: TraceRecorder, query_expander: QueryExpander,
             result = run_output_gate(payload, verifier=verifier)
             span.set(status="COMPLETED" if result.decision == "PASS" else "FALLBACK", decision=result.decision, failure_type=result.failure_type, reason_codes=result.reason_codes, failed_claims=[claim.model_dump(mode="json") for claim in result.failed_claims], invalid_evidence_ids=result.invalid_evidence_ids, fallback_reason=None if result.decision == "PASS" else "D_FALLBACK", presentation_mode="CLINICIAN_DRAFT" if is_clinician else "PATIENT_EDUCATION", draft_type="clinician_evidence_draft" if is_clinician else "patient_education", candidate_decision=getattr(c_res, "decision", None))
             if result.decision == "PASS":
-                final = result.final_response
-                has_intake = bool(state.get("intake") or state.get("intake_data") or state.get("intake_stage"))
-                ttype_check = task_type or state.get("task_type") or getattr(state.get("a_result"), "task_type", None)
-                if ttype_check == "pre_visit_intake":
-                    has_intake = True
-                if should_append_post_answer_invitation(state.get("a_result"), has_intake):
-                    final = append_post_answer_invitation(final, has_intake=False)
-                return {"d_result": result, "status": "COMPLETED", "final_response": final}
+                return {"d_result": result, "status": "COMPLETED", "final_response": result.final_response}
             return {"d_result": result, "status": "FALLBACK", "final_response": result.final_response, "fallback_reason": "D_FALLBACK", "termination_reason": "D_FALLBACK"}
 
     def intake_stage1_route(state: WorkflowState) -> str:

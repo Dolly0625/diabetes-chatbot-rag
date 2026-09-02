@@ -60,26 +60,11 @@ def is_red_flag(text: str) -> bool:
 
 
 def should_append_post_answer_invitation(a_result: Any, has_intake: bool) -> bool:
-    if has_intake:
-        return False
-    try:
-        tags = getattr(a_result, "intent_tags", []) or []
-        tag_strs = [str(t) for t in tags]
-        if "PRE_VISIT_INTAKE" in tag_strs:
-            return False
-        if any(t in ("GENERAL_EDUCATION", "GENERAL_MEDICATION_INFORMATION", "SYMPTOM_INFORMATION") for t in tag_strs):
-            return True
-        return False
-    except Exception:
-        return False
+    return False
 
 
 def append_post_answer_invitation(response: str, has_intake: bool = False) -> str:
-    if has_intake:
-        return response
-    if POST_ANSWER_INVITATION in response:
-        return response
-    return f"{response}\n\n{POST_ANSWER_INVITATION}（可點「我要準備看診」快速開始）"
+    return response
 
 
 def is_intake_query(

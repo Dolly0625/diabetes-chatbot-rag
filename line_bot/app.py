@@ -41,7 +41,7 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 HONEST_FALLBACK_PUSH_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
-ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你 📋"
+ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你。"
 # Canonical async boundary classification; legacy reason codes remain
 # readable for stored workflow records and compatibility tests.
 DEPENDENCY_OR_TIMEOUT_REASON = "DEPENDENCY_OR_TIMEOUT"
