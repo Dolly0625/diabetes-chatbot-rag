@@ -44,6 +44,68 @@ REVIEW_QUICK_REPLIES = [
 ]
 
 
+def deduplicate_medications(meds: list[str] | None) -> list[str]:
+    """Clean, normalize and deduplicate medication name list."""
+    if not meds:
+        return []
+    cleaned: list[str] = []
+    for m in meds:
+        if not m:
+            continue
+        s = str(m).strip()
+        s = s.replace("（", "(").replace("）", ")").replace("【", "[").replace("】", "]")
+        s = re.sub(r"[\uff01-\uff5e]", lambda c: chr(ord(c.group(0)) - 0xfee0), s)  # fullwidth to halfwidth
+        s = re.sub(r"\s+", " ", s).strip()
+        if s and s not in cleaned:
+            cleaned.append(s)
+
+    # Substring / variant deduplication: if A is completely contained in B, keep B
+    result: list[str] = []
+    for m in cleaned:
+        is_sub = False
+        for other in cleaned:
+            if m != other and m.lower() in other.lower():
+                is_sub = True
+                break
+        if not is_sub:
+            result.append(m)
+
+    # Ingredient root clustering
+    root_groups = [
+        {"carbamazepine", "tegretol", "癲通", "卡巴氮平"},
+        {"metformin", "二甲雙胍", "glucophage", "庫魯化"},
+        {"glipizide", "格列匹特", "minidiab"},
+        {"gliclazide", "格列齊特", "diamicron", "岱蜜克龍"},
+        {"sitagliptin", "西格列汀", "januvia", "佳糖維"},
+        {"linagliptin", "利格列汀", "trajenta", "糖漸平"},
+        {"empagliflozin", "恩格列淨", "jardiance", "恩排糖"},
+        {"dapagliflozin", "達格列淨", "forxiga", "福適佳"},
+    ]
+
+    final: list[str] = []
+    seen_groups: set[int] = set()
+    for m in result:
+        low = m.lower()
+        matched_group_idx = None
+        for g_idx, group in enumerate(root_groups):
+            if any(k in low for k in group):
+                matched_group_idx = g_idx
+                break
+        if matched_group_idx is None:
+            final.append(m)
+        else:
+            if matched_group_idx not in seen_groups:
+                seen_groups.add(matched_group_idx)
+                final.append(m)
+            else:
+                for idx, existing in enumerate(final):
+                    if any(k in existing.lower() for k in root_groups[matched_group_idx]):
+                        if len(m) > len(existing):
+                            final[idx] = m
+
+    return final
+
+
 class LLMIntakeTurnOutput(BaseModel):
     """LLM 雙軌輸出結構（結構化數據 + 醫療同理回饋）"""
     known_medications: list[str] | None = Field(default=None, description="目前用藥清單，如 ['美獲明']，無則 ['無']")
@@ -213,16 +275,21 @@ class LeanIntakeAgent:
             pending_field = "known_medications" if not intake.known_medications else ("allergies" if not intake.allergies else ("chronic_conditions" if not intake.chronic_conditions else "family_history"))
             if len(missing) == 4:
                 return STAGE_TOPIC_QUESTIONS["stage1"], pending_field
-            if intake.known_medications and len(missing) < 4:
-                med_list = list(dict.fromkeys(intake.known_medications))
+            if intake.known_medications:
+                med_list = deduplicate_medications(intake.known_medications)
                 med_str = "、".join(med_list)
                 miss_str = "與".join(missing)
-                return (
-                    f"你好！已為您自動帶入藥袋用藥【{med_str}】（若資料有誤或不需帶入，隨時告訴我即可取消或修改）。\n\n"
-                    f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）"
-                ), pending_field
+                if len(missing) == 3:
+                    # 第一題開場：明確告知已自動帶入藥袋，並詢問剩餘過敏與病史
+                    return (
+                        f"你好！已為您自動帶入藥袋用藥【{med_str}】（若資料有誤或不需帶入，隨時告訴我即可取消或修改）。\n\n"
+                        f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）"
+                    ), pending_field
+                else:
+                    # 後續追問：不再重複帶入問候，直接追問剩餘缺漏項
+                    return f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）", pending_field
             miss_str = "與".join(missing)
-            return f"另外想跟你確認：有{miss_str}嗎？（沒有可以直接回「無」）", pending_field
+            return f"另外想跟您確認：有{miss_str}嗎？（沒有可以直接點選下方快捷按鈕或回「無」）", pending_field
 
         if stage == "stage2":
             missing = []

@@ -2164,24 +2164,30 @@ class ConversationOrchestrator:
             extracted = svc.extract(image_bytes)
             meds = extracted.get("meds") or []
             if meds:
-                meds_text = "、".join(meds)
+                from tfda_context_gate.intake.lean_agent import deduplicate_medications, LeanIntakeAgent
+                current_intake = session.intake_snapshot or PreVisitIntake()
+                existing_meds = list(current_intake.known_medications or [])
+                for m in meds:
+                    if m not in existing_meds:
+                        existing_meds.append(m)
+                clean_meds = deduplicate_medications(existing_meds)
+                meds_text = "、".join(clean_meds)
                 reply = (
                     f"為您辨識藥袋上的藥品資訊如下：\n"
                     f"藥品名稱：{meds_text}\n\n"
                     f"您可以在這裡直接向我詢問此藥品的用途、服用注意事項或副作用。\n"
                     f"若您近期要看醫生，也可以點選「我要準備看診」，我會將這筆用藥自動帶入看診資料中。"
                 )
-                current_intake = session.intake_snapshot or PreVisitIntake()
-                existing_meds = list(current_intake.known_medications or [])
-                for m in meds:
-                    if m not in existing_meds:
-                        existing_meds.append(m)
-                current_intake = current_intake.model_copy(update={"known_medications": existing_meds}, deep=True)
+                current_intake = current_intake.model_copy(update={"known_medications": clean_meds}, deep=True)
+                agent = LeanIntakeAgent.from_env()
+                dyn_q, dyn_f = agent._generate_next_question("stage1", current_intake)
                 session = session.model_copy(
                     update={
                         "intake_snapshot": current_intake,
                         "status": "ACTIVE",
                         "intake_stage": "stage1",
+                        "pending_question": dyn_q,
+                        "pending_field": dyn_f,
                     },
                     deep=True,
                 )

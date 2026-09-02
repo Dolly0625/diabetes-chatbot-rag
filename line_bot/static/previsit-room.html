@@ -774,13 +774,11 @@ body{background:#f4f8f6}
       progressText.textContent = "目前還不能開始，請重新整理頁面。";
     } else {
       let nextQuestion = probe.pending_question || probe.reply || "";
-      if (!nextQuestion) {
-        const meds = (probe.intake_snapshot && probe.intake_snapshot.known_medications) || [];
-        if (meds.length) {
-          nextQuestion = "你好！已為您自動帶入藥袋用藥【" + Array.from(new Set(meds)).join("、") + "】（若資料有誤或不需帶入，隨時告訴我即可取消或修改）。\n\n另外想跟您確認：有過敏史、過去慢性病與家族病史嗎？（沒有可以直接點選下方快捷按鈕或回『無』）";
-        } else {
-          nextQuestion = "你好！我是看診前資料整理小幫手。\n\n目前平時有固定吃藥或打胰島素嗎？有沒有藥物食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）";
-        }
+      const meds = (probe.intake_snapshot && probe.intake_snapshot.known_medications) || [];
+      if (meds.length && (probe.intake_stage === "stage1" || !probe.intake_stage) && (!nextQuestion || nextQuestion.includes("目前平時有固定吃藥或打胰島素嗎"))) {
+        nextQuestion = "你好！已為您自動帶入藥袋用藥【" + Array.from(new Set(meds)).join("、") + "】（若資料有誤或不需帶入，隨時告訴我即可取消或修改）。\n\n另外想跟您確認：有過敏史、過去慢性病與家族病史嗎？（沒有可以直接點選下方快捷按鈕或回『無』）";
+      } else if (!nextQuestion) {
+        nextQuestion = "你好！我是看診前資料整理小幫手。\n\n目前平時有固定吃藥或打胰島素嗎？有沒有藥物食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）";
       }
       if (!shouldShowSummary(probe)) addBubble("ai", nextQuestion);
       announce("已載入看診前對談室");
