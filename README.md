@@ -48,9 +48,31 @@
 * 支援對象辨識（本人填寫與家人代填）與斷點續填狀態恢復。
 
 ### 5. 醫護端調閱後台（Clinician Portal）
-* 前端相機掃描：內建離線 jsQR 解碼函式庫，醫師可使用手機相機掃描病患出示之 QR Code 分享碼。
+* 前端相機掃描：內建離線 jsQR 解碼函式庫，醫師可使用手機相機或筆電鏡頭掃描病患出示之 QR Code 分享碼，0.1 秒秒級辨識。
 * 閱後即焚資安機制：分享碼具備 15 分鐘時效，後端兌換解密後立即標記為已使用並銷毀，防止二次調閱。
-* 審計日誌：所有調閱操作均記錄於 audit_logs 資料庫。
+* 審計日誌：所有調閱操作均自動記錄於 audit_logs 資料庫。
+
+### 6. 系統審計與全鏈路追蹤（Audit Logs & Latency Transparency）
+* 毫秒級模組耗時分解：每次對話回覆後，系統自動送出全鏈路追蹤日誌，精確拆解 Gate A 安全掃描、語意意圖辨識（Semantic Router）、雙軌 RAG 知識檢索、Gate B 證據可靠度審核、Gate C 生成、對話狀態流轉與 Gate D 輸出防線之個別耗時與總耗時。
+* 高度可解釋性與稽核軌跡：符合臨床醫療資安與 SHA-256 去識別化規範，提供落地評估之關鍵透明指標。
+
+---
+
+## 完整 Demo 操作成果報告 (Demo Walkthrough Report)
+
+專案已完成包含病患端衛教整理與醫護端相機調閱之 **10 大閉環步驟實測與螢幕截圖**：
+* **圖文完整報告**：詳見 [DEMO_WALKTHROUGH_REPORT.md](docs/DEMO_WALKTHROUGH_REPORT.md)
+* **涵蓋流程**：
+  1. 急性危急紅旗即時攔截（0.1ms 119 防禦）
+  2. 雙軌 RAG 臨床衛教生成與免責聲明
+  3. 藥袋處方 QR Code 優先解析（醫院藥袋秒級萃取藥名並自動帶入）
+  4. 看診前對談室安全跳轉引導（LINE 與 Web 隱私安全隔離）
+  5. 看診整理第一階段：用藥帶入與過敏病史
+  6. 看診整理第二階段：口語化自然語言多實體抽取
+  7. 看診整理第三階段：生活影響與就診提問釐清
+  8. 結構化摘要確認卡片（8 欄位 Review & Confirm）
+  9. 醫護端調閱入口與相機掃描 QR Code（前端離線 jsQR 秒級解碼）
+  10. 醫護端調閱與閱後即焚（Gate D: PASS 臨床摘要）
 
 ---
 
@@ -77,7 +99,9 @@
 
 ## 展示與操作指南 (Demo Walkthrough)
 
-> 說明：目前展示與原型測試環境採用本機 FastAPI 伺服器搭配 ngrok 外網穿透方式運行，尚未進行雲端伺服器部署；未來的雲端主機與部署方案待團隊後續共同討論定案。
+> 說明：目前系統支援雙軌運行環境：
+> 1. **GCP 雲端伺服器（Compute Engine VM）**：全天候 24 小時在線運行，搭配 Cloudflare 安全穿透隧道提供公開 Webhook 與醫護端入口。
+> 2. **本機開發與測試**：支援本機 FastAPI 伺服器搭配 ngrok 外網穿透，便於本地單元除錯與功能快速驗證。
 
 ### 步驟一：環境建置與初始化
 
@@ -154,8 +178,8 @@ python3 -m uvicorn line_bot.app:app --host 0.0.0.0 --port 8000 --reload
 
 ### 1. 醫護端入口連結
 醫師使用電腦瀏覽器或手機打開以下網址：
-* 本地測試：`http://localhost:8000/clinician`
-* 外網展示：`https://xxxx.ngrok-free.dev/clinician`
+* 雲端線上展示：`https://dsc-neural-annual-physics.trycloudflare.com/clinician`（Demo 模式自動預填 `doctor-demo` 授權身分）
+* 本地開發測試：`http://localhost:8000/clinician`
 
 ### 2. 病患端產生分享碼（QR Code）
 * **途徑 A（LINE 聊天室）**：病患在 LINE 輸入 `準備看診`，回答問卷（或傳送藥袋 QR 相片），完成後系統生成 15 分鐘時效之 QR Code 圖片與代碼。
