@@ -4,8 +4,9 @@
 1. 【3 階段主題式對話】：用藥病史 → 本次症狀與程度 → 醫病提問（2~3 輪即可完成，告別 8 題逐題拷問）。
 2. 【機會主義式萃取 (Opportunistic Slot Filling)】：病患一句話講多項，一次全部填入，只追問缺漏項。
 3. 【醫療同理心承接 (Empathetic Bridging)】：真實 LLM 動態生成有溫度的回饋，告別「收到，下一項」的機器人口吻。
-4. 【紅旗急症即時攔截】：胸痛、呼吸困難秒級安全警示。
-5. 【離線確定性 Fallback】：無網路/測試環境 100% 穩定可用。
+4. 【動態情境式快捷標籤 (Contextual Smart Chips)】：根據目前缺少的欄位，動態提供最精確的建議按鈕。
+5. 【紅旗急症即時攔截】：胸痛、呼吸困難秒級安全警示。
+6. 【離線確定性 Fallback】：無網路/測試環境 100% 穩定可用。
 """
 
 from __future__ import annotations
@@ -32,33 +33,14 @@ EMERGENCY_REPLY = (
 
 # 3 大主題的自然口語提問
 STAGE_TOPIC_QUESTIONS = {
-    "stage1": "你好！我是看診前資料整理小幫手。\n\n目前平時有固定吃什麼藥物或打胰島素嗎？有沒有藥物食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）",
+    "stage1": "你好！我是看診前資料整理小幫手。\n\n目前平時有固定吃藥或打胰島素嗎？有沒有藥物食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）",
     "stage2": "那這次想看診主要是哪裡不舒服呢？大概從什麼時候開始、如果用 1 到 10 分來評估，嚴重程度大概是幾分呢？",
     "stage3": "好的，我都幫你記下來了。這次看診有什麼特別想請教醫師或討論的問題嗎？（例如飲食原則、藥物副作用，沒有也可以說「沒有」）",
 }
 
-# 快捷回答預設（Smart Chips）
-STAGE_QUICK_REPLIES = {
-    "stage1": [
-        {"label": "有吃降血糖/血壓藥", "text": "有吃降血糖與降血壓藥，無過敏"},
-        {"label": "三高皆有，家人有糖尿病", "text": "有高血壓高血糖高血脂，父母有糖尿病"},
-        {"label": "無用藥無病史", "text": "目前沒有吃藥，也沒有過敏或慢性病"},
-    ],
-    "stage2": [
-        {"label": "最近三天口渴、輕度(3分)", "text": "三天前開始容易口渴頻尿，大概3分輕度"},
-        {"label": "一週前頭暈疲倦、中度(5分)", "text": "一週前開始頭暈想睡覺，大約5分中度"},
-        {"label": "最近很不舒服、重度(8分)", "text": "最近幾天很不舒服，大概8分重度"},
-    ],
-    "stage3": [
-        {"label": "想詢問飲食與運動原則", "text": "想請教醫師平常飲食與運動該怎麼控制"},
-        {"label": "想了解藥物副作用", "text": "想了解目前藥物的副作用與注意事項"},
-        {"label": "沒有其他問題", "text": "目前沒有特別想問的"},
-    ],
-}
-
 REVIEW_QUICK_REPLIES = [
-    {"label": "確認完成", "text": "確認完成"},
-    {"label": "修改資料", "text": "修改看診資料"},
+    {"label": "✅ 確認完成", "text": "確認完成"},
+    {"label": "✏️ 修改資料", "text": "修改看診資料"},
 ]
 
 
@@ -255,6 +237,126 @@ class LeanIntakeAgent:
 
         return "請確認以上看診前整理資料是否正確？", None
 
+    def _generate_quick_replies(self, stage: str, intake: PreVisitIntake) -> list[dict[str, str]]:
+        """根據當前缺漏欄位，動態產生高精確度的情境式快捷回答按鈕（Smart Chips）"""
+        if stage == "stage1":
+            missing = []
+            if not intake.known_medications:
+                missing.append("meds")
+            if not intake.allergies:
+                missing.append("allergies")
+            if not intake.chronic_conditions:
+                missing.append("chronic")
+            if not intake.family_history:
+                missing.append("family")
+
+            # 初始完整 Stage 1
+            if len(missing) == 4:
+                return [
+                    {"label": "💊 吃降血糖/降血壓藥", "text": "我有吃降血糖與降血壓藥，無過敏"},
+                    {"label": "🩺 有高血壓，父母有糖尿病", "text": "有高血壓，父母有糖尿病，無過敏"},
+                    {"label": "✨ 目前無吃藥無病史", "text": "目前沒有吃藥，也沒有過敏或慢性病"},
+                ]
+
+            # 若僅缺家族史
+            if missing == ["family"]:
+                return [
+                    {"label": "👨‍👩‍👧 父母有糖尿病", "text": "我父母有糖尿病史"},
+                    {"label": "🚫 家人無糖尿病", "text": "家裡長輩沒有糖尿病史"},
+                    {"label": "❓ 不太清楚家族史", "text": "不太清楚長輩是否有病史"},
+                ]
+
+            # 若僅缺慢性病
+            if missing == ["chronic"]:
+                return [
+                    {"label": "🩺 有高血壓與高血脂", "text": "我有高血壓和高血脂"},
+                    {"label": "🚫 無其他慢性病", "text": "沒有其他慢性病"},
+                    {"label": "❤️ 過去有心臟病史", "text": "過去有心血管相關病史"},
+                ]
+
+            # 若僅缺過敏
+            if missing == ["allergies"]:
+                return [
+                    {"label": "🚫 無任何過敏史", "text": "我沒有藥物或食物過敏"},
+                    {"label": "🥜 對海鮮/花生過敏", "text": "我對海鮮和花生過敏"},
+                    {"label": "💊 對抗生素過敏", "text": "我對特定抗生素或西藥過敏"},
+                ]
+
+            # 若缺過敏 + 慢性病 等組合
+            return [
+                {"label": "🚫 皆無（無過敏/慢性病/家族史）", "text": "沒有過敏，沒有其他慢性病，也沒有家族史"},
+                {"label": "🩺 僅有高血壓", "text": "無過敏，有高血壓，無家族史"},
+                {"label": "👨‍👩‍👧 僅有家族糖尿病史", "text": "無過敏無慢性病，父母有糖尿病"},
+            ]
+
+        if stage == "stage2":
+            missing = []
+            if not intake.symptom_onset:
+                missing.append("onset")
+            if not intake.symptom_description:
+                missing.append("description")
+            if not intake.symptom_severity:
+                missing.append("severity")
+
+            # 初始完整 Stage 2
+            if len(missing) == 3:
+                return [
+                    {"label": "💧 3天前口渴頻尿(輕度3分)", "text": "三天前開始容易口渴頻尿，大概3分輕度"},
+                    {"label": "😴 1週前頭暈疲倦(中度5分)", "text": "一週前開始容易頭暈想睡覺，大約5分中度"},
+                    {"label": "⚠️ 最近很不舒服(重度8分)", "text": "最近幾天非常不舒服，大概8分很嚴重"},
+                ]
+
+            # 若僅缺嚴重程度
+            if missing == ["severity"]:
+                return [
+                    {"label": "🟢 輕度 (1-3分，生活正常)", "text": "大概 2-3 分輕度，不影響平常生活"},
+                    {"label": "🟡 中度 (4-6分，有點困擾)", "text": "大約 5 分中度，有些困擾想改善"},
+                    {"label": "🔴 重度 (7-10分，很不舒服)", "text": "大概 8 分重度，非常不舒服"},
+                ]
+
+            # 若僅缺時間
+            if missing == ["onset"]:
+                return [
+                    {"label": "⏱️ 最近 2-3 天開始", "text": "大概兩三天前開始的"},
+                    {"label": "📅 最近一週左右", "text": "大約最近一週開始"},
+                    {"label": "⏳ 持續一個月以上", "text": "已經持續一個多月了"},
+                ]
+
+            # 若僅缺症狀描述
+            if missing == ["description"]:
+                return [
+                    {"label": "💧 常常口渴、晚上頻尿", "text": "常常覺得很口渴、晚上一直爬起來尿尿"},
+                    {"label": "😴 吃飽容易頭暈想睡", "text": "每次吃飽飯後都覺得很想睡覺、頭暈"},
+                    {"label": "📉 容易飢餓、手抖心悸", "text": "容易突然很餓、手會發抖"},
+                ]
+
+            # 缺時間 + 程度
+            if "onset" in missing and "severity" in missing:
+                return [
+                    {"label": "三天前開始，輕度(3分)", "text": "大概三天前開始，程度大約3分輕度"},
+                    {"label": "一週前開始，中度(5分)", "text": "大約一週前開始，程度約5分中度"},
+                    {"label": "最近幾天，重度(8分)", "text": "最近幾天開始，程度大概8分很嚴重"},
+                ]
+
+            return [
+                {"label": "最近幾天開始，輕度(3分)", "text": "最近幾天開始，大約3分輕度"},
+                {"label": "大約一週左右，中度(5分)", "text": "大約一週左右，約5分中度"},
+                {"label": "持續一陣子，重度(8分)", "text": "已經持續一陣子，大概8分重度"},
+            ]
+
+        if stage == "stage3":
+            return [
+                {"label": "🍗 想問飲食與可否吃炸雞/澱粉", "text": "想請教醫師平常飲食有何禁忌，例如可以吃炸雞或甜食嗎？"},
+                {"label": "💊 想了解目前藥物副作用", "text": "想了解目前服用的藥物有沒有副作用或需要注意的地方"},
+                {"label": "🏃 想詢問運動與血糖控制目標", "text": "想請教適合的運動方式與平常血糖應該控制在多少"},
+                {"label": "✨ 目前沒有特別想問的", "text": "目前沒有特別想問的問題，謝謝！"},
+            ]
+
+        if stage == "review":
+            return REVIEW_QUICK_REPLIES
+
+        return []
+
     def extract_with_llm(self, text: str, stage: str, current_intake: PreVisitIntake) -> tuple[dict[str, Any], str | None]:
         """透過 LLM 進行雙軌萃取（結構化欄位 + 溫暖同理回饋）"""
         if self.llm is None:
@@ -282,9 +384,9 @@ class LeanIntakeAgent:
                     updates[k] = self.standardize_severity(text) or v
                 elif k == "allergies" and "過敏" in text:
                     updates[k] = v
-                elif k == "chronic_conditions" and any(w in text for w in ("高血壓", "高血脂", "心臟病", "腎臟病", "糖尿病", "三高", "都有", "病", "無")):
+                elif k == "chronic_conditions" and any(w in text for w in ("高血壓", "高血脂", "心臟病", "腎臟病", "糖尿病", "三高", "都有", "病", "無", "沒有")):
                     updates[k] = v
-                elif k == "family_history" and any(w in text for w in ("家人", "父母", "爸", "媽", "遺傳", "長輩", "家裡", "無")):
+                elif k == "family_history" and any(w in text for w in ("家人", "父母", "爸", "媽", "遺傳", "長輩", "家裡", "無", "沒有")):
                     updates[k] = v
                 elif k == "symptom_onset" and any(w in text for w in ("天", "週", "月", "年", "前", "昨天", "最近", "開始", "禮拜")):
                     updates[k] = v
@@ -407,6 +509,7 @@ class LeanIntakeAgent:
                 "intake_stage": updated_session.intake_stage,
                 "version": updated_session.version,
                 "intake_snapshot": updated_session.intake_snapshot.model_dump(mode="json"),
+                "quick_replies": [],
             }
 
         # ── 2. 重新整理 / 初始化 ──
@@ -429,7 +532,7 @@ class LeanIntakeAgent:
                 "intake_stage": "stage1",
                 "version": updated_session.version,
                 "intake_snapshot": intake.model_dump(mode="json"),
-                "quick_replies": STAGE_QUICK_REPLIES["stage1"],
+                "quick_replies": self._generate_quick_replies("stage1", intake),
             }
 
         # ── 3. Review 階段確認完成（交卷） ──
@@ -526,9 +629,9 @@ class LeanIntakeAgent:
                 },
             }
 
-        # ── 6. 產生下一個自然引導問題 ──
+        # ── 6. 產生下一個自然引導問題與動態情境按鈕 ──
         next_q, pending_field = self._generate_next_question(new_stage, current_intake)
-        quick_replies = STAGE_QUICK_REPLIES.get(new_stage, [])
+        quick_replies = self._generate_quick_replies(new_stage, current_intake)
 
         updated_session = session.model_copy(
             update={
