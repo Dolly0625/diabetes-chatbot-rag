@@ -217,8 +217,8 @@ body{background:#f4f8f6}
   const shouldShowSummary = (data) => {
     if (data.red_flag) return false;
     if (data.system_risk_classification && data.system_risk_classification.level === "RED_FLAG") return false;
-    if (data.status === "COMPLETED") return true;
-    if (data.intake_stage === "submitted") return true;
+    if (data.intake_stage === "stage1" || data.intake_stage === "stage2" || data.intake_stage === "stage3") return false;
+    if (data.intake_stage === "submitted" || data.status === "SUBMITTED") return true;
     if (data.status === "AWAITING_CONFIRMATION" || data.status === "NEEDS_CONFIRMATION") return true;
     if (data.intake_stage === "review" && data.intake_snapshot) {
       const snap = data.intake_snapshot;

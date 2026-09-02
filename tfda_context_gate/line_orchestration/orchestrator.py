@@ -2177,7 +2177,14 @@ class ConversationOrchestrator:
                     if m not in existing_meds:
                         existing_meds.append(m)
                 current_intake = current_intake.model_copy(update={"known_medications": existing_meds}, deep=True)
-                session = session.model_copy(update={"intake_snapshot": current_intake}, deep=True)
+                session = session.model_copy(
+                    update={
+                        "intake_snapshot": current_intake,
+                        "status": "ACTIVE",
+                        "intake_stage": "stage1",
+                    },
+                    deep=True,
+                )
                 self.repository.save(session, expected_version=previous_version)
             else:
                 reply = "這張照片未能清楚辨識出藥袋上的藥品名稱或 QR Code。建議您重新拍攝光線充足、文字清晰的藥袋正面再試一次喔！"

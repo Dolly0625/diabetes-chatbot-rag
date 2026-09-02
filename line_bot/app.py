@@ -1746,20 +1746,19 @@ def _is_previsit_room_meta_text(text: str) -> bool:
 
 
 def _previsit_room_current_question(session: Any) -> str:
-    if hasattr(session, "pending_question") and session.pending_question:
-        return str(session.pending_question)
     if hasattr(session, "intake_snapshot") and session.intake_snapshot:
         try:
             from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
 
             agent = LeanIntakeAgent.from_env()
-            q, _ = agent._generate_next_question(
-                getattr(session, "intake_stage", "stage1") or "stage1", session.intake_snapshot
-            )
+            stage = getattr(session, "intake_stage", "stage1") or "stage1"
+            q, _ = agent._generate_next_question(stage, session.intake_snapshot)
             if q:
                 return q
         except Exception:
             pass
+    if hasattr(session, "pending_question") and session.pending_question:
+        return str(session.pending_question)
     return "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。"
 
 
