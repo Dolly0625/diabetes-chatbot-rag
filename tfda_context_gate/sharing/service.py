@@ -79,6 +79,7 @@ class ShareGrantService:
             output_gate_result=gate.model_dump(mode="json"),
             system_risk_classification=session.system_risk_classification,
             information_source=session.information_source,
+            intake_field_provenance=dict(getattr(session, "intake_field_provenance", {}) or {}),
             single_use=single_use,
             created_at=now,
             expires_at=now + self.grant_ttl,
@@ -118,6 +119,36 @@ class ShareGrantService:
             output_gate_result=grant.output_gate_result,
             system_risk_classification=grant.system_risk_classification,
             information_source=grant.information_source,
+            intake_field_provenance=dict(getattr(grant, "intake_field_provenance", {}) or {}),
+            expires_at=grant.expires_at,
+            accessed_at=now,
+        )
+
+    def read_by_session(
+        self,
+        session_id: str,
+        practitioner: ActorAccessContext,
+    ) -> ClinicianSharedSummary:
+        now = datetime.now(timezone.utc)
+        if not practitioner.can(PermissionScope.VIEW_GRANTED_CLINICAL_SUMMARY):
+            self._log(practitioner.principal_id_hash, "unknown", "DENIED", "missing permission")
+            raise ShareGrantDenied("practitioner is not authorized to view shared summaries")
+        grant = self.repository.get_share_grant_for_session(session_id, practitioner.principal_id_hash, now=now)  # type: ignore[attr-defined]
+        if grant is None:
+            self._log(practitioner.principal_id_hash, "unknown", "DENIED", "no active share grant for session")
+            raise ShareGrantDenied("no active share grant for this session")
+        if grant.output_gate_result.get("decision") != "PASS":
+            self._log(practitioner.principal_id_hash, grant.grant_id, "DENIED", "snapshot was not output-gated")
+            raise ShareGrantDenied("shared summary was not approved by the mandatory output gate")
+        self._log(practitioner.principal_id_hash, grant.grant_id, "ALLOWED", None)
+        return ClinicianSharedSummary(
+            grant_id=grant.grant_id,
+            intake_snapshot=grant.intake_snapshot,
+            previsit_summary=grant.previsit_summary,
+            output_gate_result=grant.output_gate_result,
+            system_risk_classification=grant.system_risk_classification,
+            information_source=grant.information_source,
+            intake_field_provenance=dict(getattr(grant, "intake_field_provenance", {}) or {}),
             expires_at=grant.expires_at,
             accessed_at=now,
         )

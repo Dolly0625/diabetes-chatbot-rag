@@ -35,9 +35,14 @@ class ProductSessionRepository(Protocol):
     def create_share_grant(self, grant: ShareGrant) -> ShareGrant: ...
     def consume_share_grant(self, token_hash: str, practitioner_hash: str, *, now: datetime | None = None) -> ShareGrant: ...
     def revoke_share_grant(self, grant_id: str, grantor_hash: str) -> ShareGrant: ...
+    def get_share_grant_for_session(self, session_id: str, practitioner_hash: str, *, now: datetime | None = None) -> ShareGrant | None: ...
     def append_clinician_access_log(self, log: ClinicianAccessLog) -> None: ...
     def list_clinician_access_logs(self, practitioner_hash: str) -> list[ClinicianAccessLog]: ...
     def purge_expired(self, *, now: datetime | None = None) -> dict[str, int]: ...
+    def create_intake_token(self, token_hash: str, session_id: str, expires_at: datetime) -> None: ...
+    def get_intake_token(self, token_hash: str) -> dict[str, Any] | None: ...
+    def consume_intake_token(self, token_hash: str) -> None: ...
+    def delete_intake_token_for_session(self, session_id: str) -> None: ...
 
 
 class SQLiteProductSessionRepository:
@@ -87,6 +92,11 @@ class SQLiteProductSessionRepository:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS clinician_access_logs ("
                 "log_id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS intake_launch_tokens ("
+                "token_hash TEXT PRIMARY KEY, product_session_id TEXT NOT NULL, "
+                "created_at TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT)"
             )
         self.purge_expired()
 
@@ -311,6 +321,39 @@ class SQLiteProductSessionRepository:
             )
             return revoked
 
+    def get_share_grant_for_session(
+        self,
+        session_id: str,
+        practitioner_hash: str,
+        *,
+        now: datetime | None = None,
+    ) -> ShareGrant | None:
+        check_at = now or datetime.now(timezone.utc)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM share_grants WHERE payload LIKE ? ORDER BY expires_at DESC",
+                (f'%"session_id":"{session_id}"%',),
+            ).fetchall()
+            candidates: list[ShareGrant] = []
+            for row in rows:
+                try:
+                    grant = ShareGrant.model_validate_json(row["payload"])
+                except Exception:
+                    continue
+                if grant.session_id != session_id:
+                    continue
+                if grant.is_expired(check_at):
+                    continue
+                if grant.status not in ("ACTIVE", "USED"):
+                    continue
+                if grant.allowed_practitioner_hash not in (None, practitioner_hash):
+                    continue
+                candidates.append(grant)
+            if not candidates:
+                return None
+            candidates.sort(key=lambda g: g.created_at, reverse=True)
+            return candidates[0]
+
     def append_clinician_access_log(self, log: ClinicianAccessLog) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -351,11 +394,46 @@ class SQLiteProductSessionRepository:
             deleted["clinician_access_logs"] = connection.execute(
                 "DELETE FROM clinician_access_logs WHERE created_at<=?", (audit_cutoff,)
             ).rowcount
+            deleted["intake_tokens"] = connection.execute(
+                "DELETE FROM intake_launch_tokens WHERE expires_at<=? OR consumed_at IS NOT NULL", (cutoff.isoformat(),)
+            ).rowcount
         # 讓 secure_delete 的結果離開 WAL，避免已刪除健康 payload 長期留在 -wal。
         with self._lock, self._connect() as connection:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._last_purge_at = cutoff
         return deleted
+
+    # ── Intake launch token (opaque, hashed, 30min TTL, single session binding) ──
+    def create_intake_token(self, token_hash: str, session_id: str, expires_at: datetime) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM intake_launch_tokens WHERE product_session_id=?", (session_id,))
+            connection.execute(
+                "INSERT INTO intake_launch_tokens(token_hash, product_session_id, created_at, expires_at, consumed_at) VALUES(?,?,?,?,?)",
+                (token_hash, session_id, now, expires_at.isoformat(), None),
+            )
+
+    def get_intake_token(self, token_hash: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT token_hash, product_session_id, created_at, expires_at, consumed_at FROM intake_launch_tokens WHERE token_hash=?",
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            return dict(row)
+
+    def consume_intake_token(self, token_hash: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE intake_launch_tokens SET consumed_at=? WHERE token_hash=? AND consumed_at IS NULL",
+                (now, token_hash),
+            )
+
+    def delete_intake_token_for_session(self, session_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM intake_launch_tokens WHERE product_session_id=?", (session_id,))
 
     def _maybe_purge_expired(self) -> None:
         now = datetime.now(timezone.utc)

@@ -49,6 +49,15 @@ def _is_formal_eligible(request_context: Any, task_type: str | None) -> bool:
     if task_type == "pre_visit_intake":
         return False
     raw = getattr(request_context, "user_raw_input", "") or ""
+    # Education rephrase / education keyword helpers (B 方案：教育走 LLM，intake 走快線)
+    _REPHRASE_PAT = r"口語化|口语化|白話|白话|簡單一點|简单一点|簡單點|简单点|淺顯|浅显|易懂|口語|口语"
+    _EDU_KEYWORDS_PAT = (
+        r"糖尿病|高血糖|低血糖|血糖|胰島素|胰岛素|飲食|饮食|吃什麼|吃什么|可以吃|能吃|水果|蛋糕|甜食|澱粉|淀粉|"
+        r"三高|血壓|血压|膽固醇|胆固醇|碳水|醣|糖化|HbA1c|hba1c|"
+        r"營養|营养|運動|食物|幾份|几份|份量|熱量|热量|"
+        r"口渴|頻尿|频尿|嘴巴乾|嘴乾|多尿|多渴|多飲|跑廁所|上廁所|廁所|"
+        r"為什麼會有|为什么会有|怎麼會|怎么会|原因|成因|症狀|症状|併發|并发|預防|预防|控制|原則|原则"
+    )
     try:
         from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor
         from tfda_context_gate.workflow.intake_router import is_red_flag as _is_red
@@ -57,8 +66,21 @@ def _is_formal_eligible(request_context: Any, task_type: str | None) -> bool:
             return False
         if RuleBasedSignalExtractor.is_pre_visit_intake_text(raw):
             return False
-        if RuleBasedSignalExtractor.is_chit_chat_text(raw):
-            return False
+        # b) 口語化/白話/簡單一點 視為 education rephrase，不應被 chit_chat 誤攔
+        # 若含 rephrase 且同時含教育關鍵詞或糖尿病範疇，優先放行，不走 chit_chat fast
+        import re as _re_tmp
+        _has_rephrase = bool(_re_tmp.search(_REPHRASE_PAT, raw))
+        _has_edu_kw = bool(_re_tmp.search(_EDU_KEYWORDS_PAT, raw))
+        if not (_has_rephrase and (_has_edu_kw or _re_tmp.search(r"糖尿病|血糖|飲食|解释|解釋", raw))):
+            # 單純 rephrase 如「口語化解釋」「白話一點」也視為教育意圖，不攔
+            if _has_rephrase and _re_tmp.search(r"解釋|说明|說明|講|說", raw):
+                pass  # allow through, skip chit_chat block
+            elif RuleBasedSignalExtractor.is_chit_chat_text(raw):
+                # 若 chit_chat 但實際含教育關鍵詞（防誤攔），則不擋
+                if _has_edu_kw or _has_rephrase:
+                    pass
+                else:
+                    return False
         if RuleBasedSignalExtractor.is_identity_text(raw):
             return False
         import re as _re_emp
@@ -71,8 +93,21 @@ def _is_formal_eligible(request_context: Any, task_type: str | None) -> bool:
         import unicodedata as _ud
 
         n = _ud.normalize("NFKC", raw).strip()
-        if len(n) < 4 or n in ("怎麼辦", "怎辦", "怎麼半", "help", "？", "?", "…"):
+        # c) 長度<4 精細化：避免「三高」等短實體被擋；僅對真正模糊短句 fast
+        _has_rephrase_n = bool(_re.search(_REPHRASE_PAT, n))
+        _has_edu_n = bool(_re.search(_EDU_KEYWORDS_PAT, n))
+        if n in ("？", "?", "…", "。", ".", "！", "!"):
             return False
+        if n in ("怎麼辦", "怎辦", "怎麼半", "help", "幫幫我"):
+            return False
+        if len(n) < 2:
+            return False
+        if len(n) < 4:
+            # 短實體含教育關鍵詞/rephrase 則放行，否則視為模糊 chitchat
+            if _has_edu_n or _has_rephrase_n or _re.search(r"三高|血糖|糖尿病|飲食", n):
+                pass
+            else:
+                return False
         if _re.search(r"可以跟我說什麼|可以說什麼|能做什麼|會做什麼|能幫什麼|我能幫什麼|介紹一下|你會什麼|功能有哪些", n, _re.IGNORECASE):
             return False
         from tfda_context_gate.a_router.policy import DEFAULT_POLICY, policy_gate
@@ -84,9 +119,17 @@ def _is_formal_eligible(request_context: Any, task_type: str | None) -> bool:
         except Exception:
             return False
         decision = policy_gate(sig, DEFAULT_POLICY)
-        if getattr(decision.status, "value", str(decision.status)) != "G_GENERAL_EDUCATION":
+        status_val = getattr(decision.status, "value", str(decision.status))
+        if status_val == "G_GENERAL_EDUCATION":
+            return True
+        # a) 放寬：Q_CLARIFICATION 但含教育關鍵詞/口語化 rephrase → 視為 G 候選，放行 formal
+        # 仍保留 R/O/F/M/E 等非 G 直接 fast，不讓 intake 變慢
+        if status_val == "Q_CLARIFICATION":
+            if _has_edu_n or _has_rephrase_n:
+                return True
+            # 額外：症狀口語描述「嘴巴乾」「跑廁所」等已含在 _EDU_KEYWORDS，未命中則仍 false
             return False
-        return True
+        return False
     except Exception:
         return False
 

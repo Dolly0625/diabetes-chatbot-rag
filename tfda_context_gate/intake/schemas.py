@@ -136,7 +136,7 @@ FHIR_LINKID_REVERSE: dict[str, str] = {v["linkId"]: k for k, v in FHIR_LINKID_MA
 # Confidence <0.7 triggers clarification; max 2 attempts before marking unknown.
 # Attempt 1: ask to check medication bag; Attempt 2: ask color/shape/time; then unknown.
 MEDICATION_CLARIFICATION_QUESTIONS: dict[int, str] = {
-    1: "如果方便的話，幫我看一下藥袋上的藥名嗎？",
+    1: "如果方便的話，幫我看一下藥袋上的藥名嗎？不確定也可以直接說「不確定」。",
     2: "請問藥物的顏色、形狀或服用時間？（如白色圓形、早上服用等）",
 }
 

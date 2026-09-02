@@ -12,6 +12,7 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setenv("LINE_CHANNEL_SECRET", "")
     monkeypatch.setenv("LINE_ALLOW_UNSIGNED_WEBHOOK", "true")
     monkeypatch.setenv("LINE_DEMO_MODE", "true")
+    monkeypatch.setenv("DEMO_WEB_ENABLED", "true")
     monkeypatch.setattr(line_app, "LINE_CHANNEL_SECRET", "")
     monkeypatch.setattr(line_app, "_conversation_orchestrator", None)
     replies: list[str] = []
@@ -37,10 +38,11 @@ def test_callback_uses_persistent_orchestrator_and_replays_duplicate(tmp_path, m
     duplicate = client.post("/callback", json=_text_event("evt-1", "不同內容"))
 
     assert first.status_code == duplicate.status_code == 200
-    assert replies == [
-        "我是 AI 看診前整理助理，只協助衛教與資料整理，不做診斷，也不是緊急醫療服務。Demo session 最多保存 7 天；確認前不會分享給醫護。這份資料是為誰整理？請選擇「為自己整理」或「代家人整理」。",
-        "我是 AI 看診前整理助理，只協助衛教與資料整理，不做診斷，也不是緊急醫療服務。Demo session 最多保存 7 天；確認前不會分享給醫護。這份資料是為誰整理？請選擇「為自己整理」或「代家人整理」。",
-    ]
+    assert len(replies) == 2
+    assert "看診前對談室" in replies[0]
+    assert "/demo/previsit" in replies[0]
+    assert "token=" not in replies[0]
+    assert "剛剛收到的卡片" in replies[1]
     session = line_app._get_conversation_orchestrator().session_for_user("U-callback")
     assert session is not None and len(session.conversation_context.recent_turns) == 2
 

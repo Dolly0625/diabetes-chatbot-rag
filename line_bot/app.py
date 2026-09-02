@@ -28,6 +28,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -285,7 +286,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from fastapi import FastAPI, Header, HTTPException, Request  # noqa: E402
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 # ── Env loading ──────────────────────────────────────────────────────────────
@@ -1212,7 +1213,10 @@ def _reply_text(reply_token: str, text: str, *, quick_actions: list[dict[str, st
             messages=[TextMessage(text=text, quick_reply=quick_reply)],
         ))
         return True
-    except Exception:
+    except Exception as exc:
+        # Do not expose tokens or payloads, but make real LINE delivery
+        # failures diagnosable instead of silently returning a webhook 503.
+        logger.warning("LINE reply_message failed: %s", exc)
         return False
 
 
@@ -1235,6 +1239,26 @@ def _enrich_reply_with_stage_progress(reply: str, status: str, intake: Any | Non
             return f"{reply}\n\n{progress}"
     except Exception:
         return reply
+    return reply
+
+
+def _resolve_resume_quick_actions(product_result: Any) -> list[dict[str, str]] | None:
+    try:
+        from line_bot.intake_entry import get_resume_actions_for_result
+
+        return get_resume_actions_for_result(product_result)
+    except Exception:
+        return None
+
+
+def _maybe_enrich_entry_reply(reply: str, original_text: str) -> str:
+    try:
+        from line_bot.intake_entry import build_entry_enriched_reply, is_entry_trigger
+
+        if is_entry_trigger(original_text):
+            return build_entry_enriched_reply(reply, is_entry=True)
+    except Exception:
+        pass
     return reply
 
 
@@ -1296,7 +1320,7 @@ def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, st
         if base is not None:
             return [{"label": "正確", "text": "正確"}, {"label": "更正", "text": "更正"}] + base[:2]
         return [{"label": "正確", "text": "正確"}, {"label": "更正", "text": "更正"}]
-    if status == "NEEDS_CONFIRMATION":
+    if status in ("NEEDS_CONFIRMATION", "AWAITING_CONFIRMATION") or "請確認是否完成" in reply or "確認完成" in reply or "看診前資料已整理完成" in reply or "修改看診資料" in reply:
         return REVIEW_ACTIONS
     if status == "NEEDS_CLARIFICATION" and "家人本人描述" in reply:
         return PROXY_SOURCE_ACTIONS
@@ -1395,27 +1419,850 @@ def patient_portal() -> FileResponse:
 
 @app.get("/clinician", response_class=FileResponse)
 def clinician_portal() -> FileResponse:
-    return FileResponse(Path(__file__).parent / "static" / "clinician.html")
+    # Demo pages evolve frequently; an old cached clinician page can hide a
+    # newly deployed safety/scan control while the API is already current.
+    return FileResponse(
+        Path(__file__).parent / "static" / "clinician.html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/static/{file_name}", response_class=FileResponse)
+def get_static_asset(file_name: str) -> FileResponse:
+    # Sanitize to base filename only to prevent path traversal
+    safe_name = Path(file_name).name
+    p = Path(__file__).parent / "static" / safe_name
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="Static asset not found")
+    return FileResponse(p, headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/api/line/rich-menu")
 def rich_menu_definition(patient_portal_url: str) -> JSONResponse:
     """回傳部署用定義，不主動呼叫 LINE API 或覆寫既有 Rich Menu。"""
-    from line_bot.ui import build_rich_menu_payload
-    if not patient_portal_url.startswith("https://"):
-        raise HTTPException(status_code=422, detail="patient_portal_url must use https")
+    from line_bot.ui import build_rich_menu_payload, is_valid_rich_menu_url
+    if not is_valid_rich_menu_url(patient_portal_url):
+        raise HTTPException(status_code=422, detail="patient_portal_url must be a tokenless HTTPS URL")
     return JSONResponse(content=build_rich_menu_payload(patient_portal_url=patient_portal_url))
 
 
 @app.get("/api/line/client-config")
-def line_client_config() -> dict[str, Any]:
-    return {
-        "liff_id": os.getenv("LINE_LIFF_ID", ""),
-        "demo_identity_headers": _demo_identity_headers_enabled(),
-        # This is intentionally a boolean.  The configured clinician IDs are
-        # an authorization boundary and must not be enumerated to browsers.
-        "demo_clinician_enabled": _demo_clinician_enabled(),
+def line_client_config() -> JSONResponse:
+    return JSONResponse(
+        content={
+            "liff_id": os.getenv("LINE_LIFF_ID", ""),
+            "demo_identity_headers": _demo_identity_headers_enabled(),
+            # This is intentionally a boolean.  The configured clinician IDs are
+            # an authorization boundary and must not be enumerated to browsers.
+            "demo_clinician_enabled": _demo_clinician_enabled(),
+            "demo_intake_token_enabled": _is_demo_intake_token_enabled(),
+            "previsit_room_url": "/patient/previsit-room",
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ── Previsit Room (dedicated) ─────────────────────────────────────────────
+# Only line_bot/intake_token.py and this section may handle demo tokens.
+# LIFF Bearer (verified via api.line.me) takes precedence, fail-closed.
+
+def _is_demo_intake_token_enabled() -> bool:
+    return os.getenv("DEMO_INTAKE_TOKEN_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def _is_public_demo_web_enabled() -> bool:
+    """A deliberately opt-in, isolated no-login route for presentations."""
+    return (
+        os.getenv("LINE_DEMO_MODE", "false").strip().lower() in {"1", "true", "yes"}
+        and os.getenv("DEMO_WEB_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+    )
+
+
+def _hash_intake_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _get_previsit_base_url(request: Any | None = None) -> str:
+    env_url = os.getenv("PATIENT_INTAKE_BASE_URL", "").strip() or os.getenv("LINE_PATIENT_PORTAL_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    cb_url = os.getenv("LINE_CALLBACK_URL", "").strip()
+    if cb_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(cb_url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    if request is not None:
+        try:
+            base = str(request.base_url).rstrip("/")
+            return base
+        except Exception:
+            pass
+    return "https://example.com"
+
+
+def _previsit_launch_url(request: Any | None = None) -> tuple[str, str | None]:
+    """Return the one supported pre-visit entry URL for this deployment.
+
+    In the public demo, every LINE entry deliberately starts at ``/demo/previsit``.
+    That endpoint creates a fresh browser-only session and then redirects to the
+    dedicated room.  In particular, do not reuse the old LINE ProductSession via
+    a token here: doing so makes an old, half-finished LINE questionnaire appear
+    inside the new room.
+
+    A production LIFF deployment keeps its identity flow and opens the same
+    dedicated room without putting a credential in the URL.
+    """
+    base = _get_previsit_base_url(request)
+    if _is_public_demo_web_enabled():
+        return f"{base}/demo/previsit", None
+    # LIFF mode: no token in URL; the browser verifies the LIFF ID token.
+    return f"{base}/patient/previsit-room", None
+
+
+def _create_previsit_token_for_user(line_user_id: str) -> tuple[str, str]:
+    import secrets as _sec
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise RuntimeError("ProductSession not configured")
+    sess = orch._load_or_create(line_user_id)
+    raw = _sec.token_urlsafe(16)
+    h = _hash_intake_token(raw)
+    exp = _dt.now(_tz.utc) + _td(minutes=30)
+    orch.repository.create_intake_token(h, sess.session_id, exp)
+    return raw, sess.session_id
+
+
+def _record_previsit_room_entry(orchestrator: Any, line_user_id: str, text: str) -> None:
+    """Audit a delivered room card without starting the old LINE intake flow.
+
+    The dedicated room owns the clinical interview.  LINE still needs the
+    minimal user/assistant pair so retry handling and subsequent conversation
+    context remain coherent.  This is deliberately called only after LINE has
+    accepted the card, so a failed one-time reply can be retried without
+    duplicate history.
+    """
+    session = orchestrator.session_for_user(line_user_id)
+    if session is None:
+        session = orchestrator._load_or_create(line_user_id)
+    context = orchestrator.context_manager.append_turn(
+        session.conversation_context, role="user", content=text,
+    )
+    context = orchestrator.context_manager.append_turn(
+        context, role="assistant", content="已開啟看診前對談室，請點卡片開始整理。",
+    )
+    updated = session.model_copy(update={"conversation_context": context}, deep=True)
+    orchestrator.repository.save(updated, expected_version=session.version)
+
+
+PREVISIT_TRIGGER_TEXTS = {
+    "我要準備看診",
+    "開啟看診前對談室",
+    "整理看診資料",
+    "準備看診",
+    # Existing production Rich Menu sends this exact message action.  Keep it
+    # as an explicit product entry point so tapping the old menu cannot fall
+    # into the retired LINE intake state machine.
+    "開始看診前整理",
+    "開始看診整理",
+    "看診前整理",
+    "看診整理",
+    "我要整理看診資料",
+    "我要看診",
+    "我要看醫生",
+    "我要回診",
+    "回診",
+}
+PREVISIT_KEYWORDS = [
+    "我要準備看診",
+    "開啟看診前對談室",
+    "整理看診資料",
+    "準備看診",
+    "開始看診前整理",
+    "看診前整理",
+    "看診整理",
+    "我要整理看診資料",
+]
+PREVISIT_NATURAL_INTENT_RE = re.compile(
+    r"(?:我要|我想(?:要)?|想看|想要看|(?:下週|最近|近期)要|準備|開始|需要).{0,8}(?:看診|看醫生|回診)"
+)
+
+
+def _is_previsit_trigger_text(text: str) -> bool:
+    norm = unicodedata.normalize("NFKC", text).strip()
+    if norm in PREVISIT_TRIGGER_TEXTS:
+        return True
+    if any(kw in norm for kw in PREVISIT_KEYWORDS):
+        return True
+    return bool(PREVISIT_NATURAL_INTENT_RE.search(norm))
+
+
+def _is_expired_line_reply_event(event: dict[str, Any], *, now_ms: int | None = None) -> bool:
+    """Ignore webhook retries whose reply token can no longer be valid.
+
+    LINE retries a non-2xx callback with the *same* one-time reply token.
+    Recreating a pre-visit launch token for each retry invalidates the link
+    that was already delivered.  A callback older than one minute cannot
+    safely produce a reply, so it must be acknowledged without side effects.
+    """
+    try:
+        event_ms = int(event.get("timestamp"))
+        current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        return event_ms > 0 and current_ms - event_ms > 60_000
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _portal_available() -> bool:
+    has_liff = bool(os.getenv("LINE_LIFF_ID", "").strip() and os.getenv("LINE_LOGIN_CHANNEL_ID", "").strip())
+    return has_liff or _is_demo_intake_token_enabled()
+
+
+def _build_previsit_flex_message(previsit_url: str) -> dict:
+    # UI payload has one source of truth; this transport layer only supplies the
+    # already-authorized short-lived URL.
+    from line_bot.ui import build_previsit_room_flex_message
+
+    return build_previsit_room_flex_message(room_url=previsit_url)
+
+
+# Web chat idempotency (dedup by client_message_id, in-memory per process)
+_web_chat_dedup: dict[tuple[str, str], dict[str, Any]] = {}
+_web_chat_lock = threading.Lock()
+
+
+def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: str):
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+
+    bearer_token = authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else ""
+    candidate_token = intake_token.strip() if intake_token else ""
+    # 若前端以 Bearer 傳送 demo intake token（非 JWT），優先作為 intake token 解析
+    if not candidate_token and bearer_token and "." not in bearer_token:
+        candidate_token = bearer_token
+
+    if candidate_token and _is_demo_intake_token_enabled():
+        import re as _re
+        if not _re.match(r"^[A-Za-z0-9_-]{16,64}$", candidate_token):
+            raise HTTPException(status_code=401, detail="Invalid intake token")
+        h = _hash_intake_token(candidate_token)
+        rec = orch.repository.get_intake_token(h)
+        if rec is None:
+            raise HTTPException(status_code=403, detail="Invalid intake token")
+        from datetime import datetime as _dt, timezone as _tz
+        try:
+            exp_raw = rec.get("expires_at") or rec.get("expiresAt") or ""
+            exp_dt = _dt.fromisoformat(str(exp_raw))
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=_tz.utc)
+            if _dt.now(_tz.utc) >= exp_dt:
+                raise HTTPException(status_code=401, detail="Intake token expired")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+        if rec.get("consumed_at"):
+            pass
+        sess_id = str(rec.get("product_session_id") or "")
+        sess = orch.repository.get(sess_id)
+        if sess is None:
+            raise HTTPException(status_code=403, detail="Token session not found")
+        return sess
+
+    if bearer_token:
+        channel_id = os.getenv("LINE_LOGIN_CHANNEL_ID", "").strip()
+        if channel_id:
+            uid = _verify_line_id_token(bearer_token)
+            sess = orch.session_for_user(uid)
+            if sess is None:
+                sess = orch._load_or_create(uid)
+            return sess
+
+    if _demo_identity_headers_enabled() and demo_user_id:
+        sess = orch.session_for_user(demo_user_id)
+        if sess is None:
+            sess = orch._load_or_create(demo_user_id)
+        return sess
+    raise HTTPException(status_code=401, detail="Verified LINE LIFF identity is required")
+
+
+def _previsit_room_token(
+    request: Request,
+    x_intake_token: str,
+    intake_token: str,
+) -> str:
+    """Resolve the opaque room token exactly as the room read/chat routes do."""
+    token_q = ""
+    try:
+        token_q = request.query_params.get("token") or request.query_params.get("intake_token") or ""
+    except Exception:
+        token_q = ""
+    return x_intake_token or intake_token or token_q
+
+
+def _is_general_education_in_previsit(text: str) -> bool:
+    """Detect general education question to avoid polluting intake stage."""
+    low = text.strip().lower()
+    edu_keywords = ["糖尿病的一般飲食", "飲食原則", "衛教", "一般飲食", "血糖正常值", "胰島素是什麼"]
+    if any(k in text for k in edu_keywords):
+        return True
+    # Fallback heuristic: if text looks like general knowledge without personal context
+    if len(text) < 60 and any(k in low for k in ["什麼是", "是什麼", "如何", "怎麼"]):
+        # limit to education-like
+        if "看診" not in text and "症狀" not in text and "藥" not in text:
+            return True
+    return False
+
+
+_PREVISIT_ROOM_META_TEXTS = {
+    "你好", "您好", "嗨", "哈囉", "hello", "hi",
+    "我要看診", "我要看診啊", "我要準備看診", "整理看診資料",
+    "有病啊", "我有病啊",
+}
+
+
+def _is_previsit_room_meta_text(text: str) -> bool:
+    """A room-opening/greeting utterance is not a clinical field answer."""
+    normalized = unicodedata.normalize("NFKC", text).strip().lower()
+    return normalized in _PREVISIT_ROOM_META_TEXTS
+
+
+def _previsit_room_current_question(session: Any) -> str:
+    return str(getattr(session, "pending_question", "") or "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。")
+
+
+_PREVISIT_CONFIRMATION_RE = re.compile(
+    r"你提到[「\"](?P<raw>.*?)[」\"]\s*[，,]?\s*"
+    r"我記為[「\"](?P<normalized>.*?)[」\"]\s*[，,]?\s*對嗎？"
+    r"(?:\s*如果不對，直接告訴我就好。)?",
+    re.DOTALL,
+)
+_PREVISIT_LEGACY_CONFIRMATION_RE = re.compile(
+    r"我先把[「\"](?P<raw>.*?)[」\"]記為[「\"](?P<normalized>.*?)[」\"]"
+    r"[；;]\s*如果哪裡不對，直接說要改哪一項就好。?",
+    re.DOTALL,
+)
+_PREVISIT_NONE_ACK_RE = re.compile(
+    r"(?:好|好的)，我先記成目前沒有[；;，,][^\n。]*。?",
+    re.DOTALL,
+)
+_PREVISIT_UNCERTAIN_RE = re.compile(r"不確定|不清楚|不知道|沒概念|不曉得")
+_PREVISIT_CORRECTION_RE = re.compile(r"剛才|剛剛|前面|其實|不是|更正|改成|改為|修正|錯了")
+_PREVISIT_DOCTOR_QUESTION_PREFIX_RE = re.compile(
+    r"^(?:我\s*)?(?:(?:想|要)\s*)?(?:請\s*)?問(?:一下)?(?:醫師|醫生)(?:的問題)?[：:\s，,]*"
+)
+
+
+def _clean_previsit_doctor_question(raw: str) -> str:
+    """Store the question, not its conversational lead-in, in a room summary."""
+    cleaned = _PREVISIT_DOCTOR_QUESTION_PREFIX_RE.sub("", raw.strip())
+    return cleaned.strip()[:200]
+
+
+def _previsit_natural_ack(field: str, text: str, snapshot: Any) -> str:
+    """Return a short patient-facing acknowledgement for a completed field.
+
+    This is deliberately a presentation projection.  The intake normalizer may
+    use sentinel values such as ``none`` internally; those values must never be
+    exposed in a patient-facing reply, and this helper never writes anything.
+    """
+    normalized = unicodedata.normalize("NFKC", text or "").strip().lower()
+    negative = bool(re.search(r"(?:^|\s)(?:沒有|無|未有|没|否)(?:\s|$)", normalized))
+    if field == "known_medications" and ("沒有吃藥" in normalized or "沒有固定吃藥" in normalized):
+        return "了解，我先記為目前沒有固定用藥。"
+    if field == "allergies" and negative:
+        return "了解，我先記為目前沒有已知的藥物或食物過敏。"
+
+    labels = {
+        "known_medications": "目前用藥",
+        "allergies": "過敏資訊",
+        "chronic_conditions": "慢性病史",
+        "family_history": "家族病史",
+        "symptom_onset": "症狀開始時間",
+        "symptom_description": "主要症狀",
+        "symptom_severity": "症狀程度",
+        "questions_for_doctor": "想問醫師的問題",
     }
+    label = labels.get(field, "這項資料")
+    if negative:
+        return f"了解，我先記為目前沒有{label}。"
+
+    # Do not derive a patient-facing value from a sentinel or an absent field.
+    # The original utterance is safe to acknowledge when no normalized value is
+    # available, but avoid repeating a long/raw sentence as a pseudo-summary.
+    value: Any = None
+    try:
+        value = getattr(snapshot, field, None)
+    except Exception:
+        value = None
+    values = value if isinstance(value, list) else [value]
+    display_values = [
+        str(item).strip()
+        for item in values
+        if item is not None and str(item).strip().lower() not in {"none", "null", "unknown"}
+    ]
+    if display_values:
+        shown = "、".join(display_values)[:120]
+        return f"了解，我先記下{label}：{shown}。"
+    if field == "questions_for_doctor":
+        return "了解，我先幫你記下這個想問醫師的問題。"
+    return f"了解，我先記下你的{label}。"
+
+
+def _naturalize_previsit_reply(reply: str, user_text: str, before: Any, after: Any, status: str) -> str:
+    """Naturalize only a dedicated web intake transition response.
+
+    The web room calls the existing orchestrator, so this function is kept at
+    the response boundary.  It is intentionally conservative: red flags,
+    uncertainty, corrections, errors, submitted summaries, and responses that
+    did not advance to another pending field are returned unchanged.
+    """
+    original = str(reply or "")
+    if not original or status in {"FALLBACK", "SUBMITTED", "CANCELLED", "ERROR"}:
+        return original
+    # In the dedicated room, a question for the clinician is a note to save,
+    # not a second request to answer through the education/RAG path.  The core
+    # interpreter can classify wording such as 「可以吃炸雞嗎」 as both; once it
+    # landed safely, keep the patient on the review path.
+    if getattr(before, "pending_field", None) == "questions_for_doctor":
+        before_questions = list(getattr(getattr(before, "intake_snapshot", None), "questions_for_doctor", []) or [])
+        after_questions = list(getattr(getattr(after, "intake_snapshot", None), "questions_for_doctor", []) or [])
+        added_questions = [question for question in after_questions if question not in before_questions]
+        if added_questions:
+            added = "、".join(str(question) for question in added_questions[:2])
+            if getattr(after, "intake_stage", None) == "review":
+                return (
+                    f"了解，我先幫你記下想問醫師的問題：{added}。\n\n"
+                    "資料已整理好，請查看摘要；內容正確請按「確認完成」，需要調整可按「修改資料」。"
+                )
+            return f"了解，我先幫你記下想問醫師的問題：{added}。"
+    if getattr(after, "status", None) in {"SUBMITTED", "CLOSED"} or getattr(after, "intake_stage", None) in {"submitted", "review"}:
+        return original
+    if "119" in original or "急診" in original or "目前無法驗證" in original:
+        return original
+    text = str(user_text or "").strip()
+    # Check the user's turn only.  The next-question prompt itself normally
+    # contains "不確定也可以說", which must not make every successful answer
+    # look like an uncertainty response.
+    if _PREVISIT_UNCERTAIN_RE.search(text):
+        return original
+    if _PREVISIT_CORRECTION_RE.search(text) or "已更新成" in original:
+        return original
+
+    before_field = getattr(before, "pending_field", None)
+    after_field = getattr(after, "pending_field", None)
+    next_question = str(getattr(after, "pending_question", "") or "").strip()
+    if not before_field or not after_field or before_field == after_field or not next_question:
+        return original
+
+    match = _PREVISIT_CONFIRMATION_RE.search(original) or _PREVISIT_LEGACY_CONFIRMATION_RE.search(original)
+    if match is None and str(before_field) == "known_medications":
+        # The deterministic fast path has a shorter variant for an explicit
+        # negative answer ("好，我先記成目前沒有；...").  Treat it as the
+        # same presentation-only confirmation, without touching its write.
+        match = _PREVISIT_NONE_ACK_RE.match(original.lstrip())
+    # Only replace known confirmation templates.  This avoids changing an AI
+    # education answer or an honest fallback that happens to contain a question.
+    if match is None:
+        return original
+
+    ack = _previsit_natural_ack(str(before_field), text, getattr(after, "intake_snapshot", None))
+    remainder = original[match.end():].strip()
+    question_pos = remainder.find(next_question)
+    if question_pos >= 0:
+        leading = remainder[:question_pos].strip()
+        question_and_tail = remainder[question_pos:]
+        if leading:
+            follow_up = f"{leading}\n\n接下來想確認：{question_and_tail}"
+        else:
+            follow_up = f"接下來想確認：{question_and_tail}"
+    else:
+        follow_up = f"接下來想確認：{next_question}"
+        if remainder:
+            follow_up = f"{follow_up}\n\n{remainder}"
+    # A final guard prevents a sentinel from leaking if an upstream template
+    # changes but still happens to match this boundary adapter.
+    follow_up = re.sub(r"(?i)(?<![A-Za-z])(?:none|null|unknown)(?![A-Za-z])", "目前沒有", follow_up)
+    return f"{ack}\n\n{follow_up}"
+
+
+@app.get("/patient/previsit-room", response_class=FileResponse)
+def previsit_room_portal() -> FileResponse:
+    p = Path(__file__).parent / "static" / "previsit-room.html"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="Previsit room portal not found")
+    return FileResponse(p, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/demo/previsit")
+def start_public_demo_previsit() -> RedirectResponse:
+    """Start an isolated browser-only demo without LINE/LIFF login.
+
+    This route intentionally creates a fresh anonymous ProductSession every
+    time.  It is unavailable unless both demo flags are explicitly enabled,
+    so it cannot become a production authentication bypass.
+    """
+    if not _is_public_demo_web_enabled():
+        raise HTTPException(status_code=404, detail="Demo entry is not enabled")
+    raw_token, _ = _create_previsit_token_for_user(f"web-demo-{uuid.uuid4().hex}")
+    return RedirectResponse(
+        url=f"/patient/previsit-room?token={raw_token}",
+        status_code=303,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/patient/previsit-room")
+def get_previsit_room(
+    request: Request,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> JSONResponse:
+    token = _previsit_room_token(request, x_intake_token, intake_token)
+    sess = _get_previsit_session(authorization, x_line_user_id, token)
+    return JSONResponse(
+        content={
+            "session_id": sess.session_id,
+            "version": sess.version,
+            "status": sess.status,
+            "intake_stage": sess.intake_stage,
+            "intake_snapshot": sess.intake_snapshot.model_dump(mode="json"),
+            "pending_question": sess.pending_question,
+            "pending_field": sess.pending_field,
+            "system_risk_classification": sess.system_risk_classification,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+class PrevisitChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=1, max_length=2000)
+    version: int = Field(ge=0)
+    client_message_id: str | None = Field(default=None, max_length=256)
+
+
+def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any) -> dict[str, Any]:
+    """Shared core for chat and chat/stream: all safety checks, no HTTP layer.
+
+    Reuses exact validation order of the original post_previsit_chat:
+    idempotency(replay) → 409 SUBMITTED → 409 version → 422 empty → RED_FLAG → education → normal intake.
+    Caller is responsible for auth/session retrieval and 503 orch check.
+    """
+    # idempotency before version check — cached reply is replay verbatim
+    if body.client_message_id:
+        key = (sess.session_id, body.client_message_id)
+        with _web_chat_lock:
+            cached = _web_chat_dedup.get(key)
+            if cached is not None:
+                return cached
+    if sess.status == "SUBMITTED":
+        raise HTTPException(status_code=409, detail="Cannot modify SUBMITTED session")
+    text = body.message.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="message is required")
+    # "開始新的整理" is the idempotent reset / bootstrap command: allow it even if initial version is 0
+    if text not in ("開始新的整理", "開始整理"):
+        if body.version != sess.version:
+            raise HTTPException(status_code=409, detail="Version conflict")
+    # red-flag pre-check before AI, does not pollute intake
+    try:
+        from tfda_context_gate.clinical_safety import RiskSignalPolicy
+        risk = RiskSignalPolicy().classify(text)
+        if risk.level == "RED_FLAG":
+            red_payload = {"level": risk.level, "signals": risk.signals}
+            new_sess = sess.model_copy(update={"system_risk_classification": red_payload}, deep=True)
+            try:
+                saved = orch.repository.save(new_sess, expected_version=sess.version)
+            except Exception as exc:
+                from tfda_context_gate.product_session import ProductSessionConflict as _PSC
+                if isinstance(exc, _PSC) or "conflict" in str(exc).lower():
+                    raise HTTPException(status_code=409, detail="Version conflict") from exc
+                raise
+            resp = {"reply": "偵測到可能的緊急警訊。請立即撥打 119 或前往急診；若身旁有人請請他協助。本系統不做診斷，已為你保留目前進度。", "status": "FALLBACK", "intake_stage": saved.intake_stage, "version": saved.version, "intake_snapshot": saved.intake_snapshot.model_dump(mode="json")}
+            if body.client_message_id:
+                with _web_chat_lock:
+                    _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+            return resp
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    if _is_previsit_room_meta_text(text):
+        # The room is a focused intake conversation, not a second copy of the
+        # LINE general-chat bot.  Never turn greetings/frustration/opening
+        # phrases into a medication, condition, or family-history value.
+        return {
+            "reply": f"這裡是看診前資料整理室，我們直接從目前這題開始：\n{_previsit_room_current_question(sess)}",
+            "status": sess.status,
+            "intake_stage": sess.intake_stage,
+            "version": sess.version,
+            "intake_snapshot": sess.intake_snapshot.model_dump(mode="json"),
+        }
+    if _is_general_education_in_previsit(text):
+        resp = {
+            "reply": "這個問題比較偏一般衛教，建議回 LINE 聊天問衛教小幫手；我這裡先幫你保留看診前整理的進度。你可以繼續整理看診資料。",
+            "status": sess.status,
+            "intake_stage": sess.intake_stage,
+            "version": sess.version,
+            "intake_snapshot": sess.intake_snapshot.model_dump(mode="json"),
+        }
+        if body.client_message_id:
+            with _web_chat_lock:
+                _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+        return resp
+    # Pre-Visit Room 專屬授權與狀態保證
+    from tfda_context_gate.product_session.schemas import AuthorizationStatus, PreVisitIntake
+    from tfda_context_gate.access_control import InformationSource, PermissionScope
+    if sess.authorization_status == AuthorizationStatus.UNVERIFIED or sess.status not in ("ACTIVE", "AWAITING_CONFIRMATION", "PAUSED"):
+        sess = sess.model_copy(update={
+            "authorization_status": AuthorizationStatus.PATIENT_SELF,
+            "subject_id_hash": sess.principal_id_hash,
+            "information_source": InformationSource.SELF_REPORTED,
+            "permission_scopes": [
+                PermissionScope.CREATE_OWN_INTAKE,
+                PermissionScope.VIEW_OWN_SUMMARY,
+                PermissionScope.SHARE_OWN_SUMMARY,
+            ],
+            "status": "ACTIVE",
+        }, deep=True)
+        try:
+            sess = orch.repository.save(sess, expected_version=sess.version)
+        except Exception:
+            pass
+
+    if text in ("開始新的整理", "開始整理"):
+        first_q = "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。"
+        new_sess = sess.model_copy(update={
+            "authorization_status": AuthorizationStatus.PATIENT_SELF,
+            "subject_id_hash": sess.principal_id_hash,
+            "information_source": InformationSource.SELF_REPORTED,
+            "permission_scopes": [
+                PermissionScope.CREATE_OWN_INTAKE,
+                PermissionScope.VIEW_OWN_SUMMARY,
+                PermissionScope.SHARE_OWN_SUMMARY,
+            ],
+            "status": "ACTIVE",
+            "intake_snapshot": PreVisitIntake(),
+            "intake_stage": "stage1",
+            "pending_field": "known_medications",
+            "pending_question": first_q,
+            "pending_action": None,
+        }, deep=True)
+        try:
+            saved = orch.repository.save(new_sess, expected_version=sess.version)
+        except Exception:
+            saved = new_sess
+        resp = {
+            "reply": first_q,
+            "status": "ACTIVE",
+            "intake_stage": "stage1",
+            "version": getattr(saved, "version", sess.version + 1),
+            "intake_snapshot": saved.intake_snapshot.model_dump(mode="json"),
+            "quick_replies": [{"label": "沒有吃藥", "text": "沒有吃藥"}, {"label": "不確定藥名", "text": "不確定藥名"}],
+        }
+        if body.client_message_id:
+            with _web_chat_lock:
+                _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+        return resp
+
+    text_for_processing = text
+    if getattr(sess, "pending_field", None) == "questions_for_doctor":
+        # Keep the patient bubble verbatim, but avoid storing its lead-in as a
+        # second doctor question.
+        text_for_processing = _clean_previsit_doctor_question(text) or text
+    try:
+        result = orch._process_text(sess, text_for_processing)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    saved = orch.repository.get(sess.session_id)
+    if saved is None:
+        try:
+            saved = orch.repository.get(result.session_id)  # type: ignore[attr-defined]
+        except Exception:
+            saved = sess
+    if saved is None:
+        saved = sess
+    result_status = getattr(result, "status", saved.status)
+    resp = {"reply": getattr(result, "reply", ""), "status": result_status, "intake_stage": getattr(saved, "intake_stage", sess.intake_stage), "version": getattr(saved, "version", sess.version), "intake_snapshot": saved.intake_snapshot.model_dump(mode="json") if hasattr(saved, "intake_snapshot") else sess.intake_snapshot.model_dump(mode="json")}
+    resp["reply"] = _naturalize_previsit_reply(
+        resp["reply"],
+        text,
+        sess,
+        saved,
+        result_status,
+    )
+    if body.client_message_id:
+        with _web_chat_lock:
+            _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
+    return resp
+
+
+@app.post("/api/patient/previsit-room/chat")
+def post_previsit_chat(
+    body: PrevisitChatRequest,
+    request: Request,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> JSONResponse:
+    token = _previsit_room_token(request, x_intake_token, intake_token)
+    sess = _get_previsit_session(authorization, x_line_user_id, token)
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+    resp = _execute_previsit_chat_core(sess, body, orch)
+    return JSONResponse(content=resp)
+
+
+@app.post("/api/patient/previsit-room/chat/stream")
+def post_previsit_chat_stream(
+    body: PrevisitChatRequest,
+    request: Request,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> StreamingResponse:
+    """Minimal SSE variant: reuses all safety/processing of post_previsit_chat, streams final_only events.
+
+    Sequence: phase → delta (single, full reply) → complete.  NOT a token stream: no character slicing,
+    no fake verbatim; each event JSON contains stream_mode:"final_only".
+    """
+    import json as _json
+
+    token = _previsit_room_token(request, x_intake_token, intake_token)
+    sess = _get_previsit_session(authorization, x_line_user_id, token)
+    orch = _get_conversation_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+    # All validation + processing reused; on 409/422 etc this raises before streaming (no SSE body).
+    resp = _execute_previsit_chat_core(sess, body, orch)
+
+    def _sse_event(payload: dict[str, Any], *, event: str) -> str:
+        # Use same SSE wire format as callback/stream; payload already contains stream_mode
+        data = _json.dumps(payload, ensure_ascii=False)
+        # event + data + blank line
+        return f"event: {event}\ndata: {data}\n\n"
+
+    def _gen() -> Iterator[str]:
+        # Phase event (processing start)
+        yield _sse_event({"type": "phase", "phase": "processing", "stream_mode": "final_only"}, event="phase")
+        # Single delta — full reply, not sliced
+        yield _sse_event({"type": "delta", "content": resp.get("reply", ""), "stream_mode": "final_only"}, event="delta")
+        # Complete — full final result with final_only marker
+        complete_payload: dict[str, Any] = {**resp, "type": "complete", "stream_mode": "final_only"}
+        yield _sse_event(complete_payload, event="complete")
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
+def _create_previsit_room_share(
+    *,
+    expected_session_id: str | None,
+    body: CreateShareRequest | None,
+    request: Request,
+    authorization: str,
+    x_line_user_id: str,
+    x_intake_token: str,
+    intake_token: str,
+) -> JSONResponse:
+    """Issue a short-lived grant using the room's own token-bound session.
+
+    The browser does not need to send a session id.  The optional path variant
+    exists only for explicit API callers and is checked against the token-bound
+    session, so a token can never be used to share another session.
+    """
+    token = _previsit_room_token(request, x_intake_token, intake_token)
+    session = _get_previsit_session(authorization, x_line_user_id, token)
+    if expected_session_id is not None and session.session_id != expected_session_id:
+        raise HTTPException(status_code=403, detail="Session does not belong to this intake token")
+    orchestrator = _get_conversation_orchestrator()
+    if orchestrator is None:
+        raise HTTPException(status_code=503, detail="ProductSession is not configured")
+
+    allowed_hash = None
+    clinician_id = body.allowed_clinician_id.strip() if body and body.allowed_clinician_id else ""
+    if clinician_id:
+        _require_demo_clinician(clinician_id)
+        allowed_hash = orchestrator.principal_hash(f"clinician:{clinician_id}")
+
+    from tfda_context_gate.product_session import ShareGrantDenied
+    from tfda_context_gate.sharing import ShareGrantService
+
+    try:
+        issue = ShareGrantService(orchestrator.repository).create(
+            session,
+            allowed_practitioner_hash=allowed_hash,
+        )
+    except ShareGrantDenied as exc:
+        # Keep the existing share API's conflict semantics for unconfirmed,
+        # pending, red-flag, or otherwise non-shareable sessions.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Build the QR locally from the same short-lived, one-time share code.
+    # A third-party QR service would receive the share credential, so never use
+    # one here.
+    try:
+        from io import BytesIO
+
+        import qrcode
+
+        image = qrcode.make(issue.token)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        qr_code_data_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="QR code generator is unavailable") from exc
+
+    payload = issue.model_dump(mode="json")
+    payload["qr_code_data_uri"] = qr_code_data_uri
+    return JSONResponse(content=payload)
+
+
+@app.post("/api/patient/previsit-room/share")
+def create_previsit_room_share(
+    request: Request,
+    body: CreateShareRequest | None = None,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> JSONResponse:
+    return _create_previsit_room_share(
+        expected_session_id=None,
+        body=body,
+        request=request,
+        authorization=authorization,
+        x_line_user_id=x_line_user_id,
+        x_intake_token=x_intake_token,
+        intake_token=intake_token,
+    )
+
+
+@app.post("/api/patient/previsit-room/share/{session_id}")
+def create_previsit_room_share_for_session(
+    session_id: str,
+    request: Request,
+    body: CreateShareRequest | None = None,
+    authorization: str = Header(default="", alias="Authorization"),
+    x_line_user_id: str = Header(default="", alias="X-Line-User-Id"),
+    x_intake_token: str = Header(default="", alias="X-Intake-Token"),
+    intake_token: str = "",
+) -> JSONResponse:
+    return _create_previsit_room_share(
+        expected_session_id=session_id,
+        body=body,
+        request=request,
+        authorization=authorization,
+        x_line_user_id=x_line_user_id,
+        x_intake_token=x_intake_token,
+        intake_token=intake_token,
+    )
 
 
 _PATIENT_REVIEW_FIELDS: tuple[tuple[str, str], ...] = (
@@ -1540,7 +2387,22 @@ def create_patient_share(
         )
     except ShareGrantDenied as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return JSONResponse(content=issue.model_dump(mode="json"))
+
+    qr_code_data_uri = ""
+    try:
+        from io import BytesIO
+        import qrcode
+
+        image = qrcode.make(issue.token)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        qr_code_data_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception as exc:
+        logger.warning("QR code generation failed: %s", exc)
+
+    payload = issue.model_dump(mode="json")
+    payload["qr_code_data_uri"] = qr_code_data_uri
+    return JSONResponse(content=payload)
 
 
 @app.post("/api/patient/share/{grant_id}/revoke")
@@ -1626,14 +2488,21 @@ async def callback(
 
     reply_failed = False
 
-    def _send(reply_token: str, reply: str, *, quick_actions: list[dict[str, str]] | None = None) -> None:
+    def _send(reply_token: str, reply: str, *, quick_actions: list[dict[str, str]] | None = None) -> bool:
         nonlocal reply_failed
-        if not _reply_text(reply_token, reply, quick_actions=quick_actions):
+        delivered = _reply_text(reply_token, reply, quick_actions=quick_actions)
+        if not delivered:
             reply_failed = True
+        return delivered
 
     for ev in events:
         try:
             ev_type = ev.get("type", "")
+            if _is_expired_line_reply_event(ev):
+                # A retry cannot use its original reply token.  Returning 200
+                # stops retry storms and, crucially, avoids replacing a valid
+                # pre-visit-room launch token with an undeliverable one.
+                continue
             if ev_type != "message":
                 continue
             message = ev.get("message", {})
@@ -1686,6 +2555,99 @@ async def callback(
                 except Exception:
                     pass
                 orchestrator = _get_conversation_orchestrator()
+                if _is_previsit_trigger_text(text):
+                    # A pre-visit phrase is a product boundary, not an intake
+                    # answer.  If the dedicated room is not configured, fail
+                    # closed with an actionable message; never fall through to
+                    # the legacy multi-field LINE questionnaire.
+                    if not _portal_available():
+                        _send(reply_token, "看診前整理網頁目前尚未設定，請稍後再試。")
+                        _mark_text_dedup(str(user_id), text)
+                        continue
+                    try:
+                        previsit_event_id = str(ev.get("webhookEventId") or message.get("id") or "")
+                        previsit_claim = None
+                        if previsit_event_id and orchestrator is not None:
+                            previsit_claim = orchestrator.repository.claim_webhook_event(
+                                previsit_event_id, orchestrator._hash(str(user_id)),
+                            )
+                            if not previsit_claim:
+                                existing = orchestrator.repository.get_webhook_event(previsit_event_id)
+                                if (
+                                    existing is not None
+                                    and existing.status == "COMPLETED"
+                                    and isinstance(existing.result, dict)
+                                    and existing.result.get("kind") == "PREVISIT_ROOM_OPENED"
+                                ):
+                                    _send(reply_token, "看診前對談室已開啟，請使用剛剛收到的卡片繼續。")
+                                else:
+                                    _send(reply_token, "這則訊息正在處理中，請稍候再試。")
+                                continue
+                        # fail-closed: any exception skips card and falls through to normal flow
+                        # The old LINE questionnaire has been retired.  This
+                        # card always opens the dedicated patient room; demo
+                        # uses /demo/previsit so it cannot resurrect a stale
+                        # LINE intake session.
+                        previsit_url, sess_id = _previsit_launch_url(request)
+                        flex = _build_previsit_flex_message(previsit_url)
+                        sent = False
+                        try:
+                            api = _get_messaging_api()
+                            if api is not None:
+                                from linebot.v3.messaging import FlexContainer, FlexMessage, ReplyMessageRequest
+
+                                # The generated SDK accepts a plain dict at construction but
+                                # silently serializes it as an empty ``{"type": "bubble"}``.
+                                # Convert it first so LINE receives the actual body/footer.
+                                contents = FlexContainer.from_dict(flex["contents"])
+                                api.reply_message(ReplyMessageRequest(
+                                    reply_token=reply_token,
+                                    messages=[FlexMessage(altText=flex["altText"], contents=contents)],
+                                ))
+                                sent = True
+                        except Exception:
+                            sent = False
+                        if not sent:
+                            sent = _send(reply_token, f"已為你準備好看診前對談室：{previsit_url}")
+                        if sent:
+                            # Keep a minimal durable turn pair for webhook
+                            # retries/context, but do not start LINE intake.
+                            if orchestrator is not None:
+                                try:
+                                    _record_previsit_room_entry(orchestrator, str(user_id), text)
+                                except Exception:
+                                    # Delivery of the entry card is the user-
+                                    # visible success.  A best-effort audit
+                                    # write must not turn that into a second
+                                    # error reply or legacy intake fallback.
+                                    logger.warning("previsit room audit write failed")
+                            _mark_text_dedup(str(user_id), text)
+                            if previsit_claim:
+                                orchestrator.repository.complete_webhook_event(
+                                    previsit_event_id,
+                                    {
+                                        "kind": "PREVISIT_ROOM_OPENED",
+                                        "session_id": sess_id,
+                                        "reply": "已開啟看診前對談室。",
+                                        "pushed": True,
+                                    },
+                                    claim_token=previsit_claim,
+                                )
+                            _mark_pushed(previsit_event_id)
+                        elif previsit_claim:
+                            # Release a failed reply so LINE's retry can make
+                            # a fresh launch link instead of waiting for lease.
+                            orchestrator.repository.fail_webhook_event(
+                                previsit_event_id, claim_token=previsit_claim,
+                            )
+                        continue
+                    except Exception:
+                        # Do not route a failed room launch into the legacy
+                        # LINE intake.  That would make the same user intent
+                        # behave differently depending on a transient error.
+                        _send(reply_token, "看診前整理網頁目前無法開啟，請稍後再試。")
+                        _mark_text_dedup(str(user_id), text)
+                        continue
                 webhook_event_id = ev.get("webhookEventId") or message.get("id")
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":
                     # Crash recovery: the first process may have committed
@@ -1738,6 +2700,9 @@ async def callback(
                         try:
                             existing = orchestrator.repository.get_webhook_event(str(webhook_event_id))
                             if existing is not None and existing.status == "COMPLETED" and existing.result:
+                                if existing.result.get("kind") == "PREVISIT_ROOM_OPENED":
+                                    _send(reply_token, "看診前對談室已開啟，請使用剛剛收到的卡片繼續。")
+                                    continue
                                 product_result = orchestrator.handle_text(
                                     event_id=str(webhook_event_id),
                                     line_user_id=str(user_id),
@@ -1750,7 +2715,12 @@ async def callback(
                                     reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
                                 except Exception:
                                     pass
-                                quick_actions = _quick_actions_for_status(product_result.status, reply)
+                                resume_actions = _resolve_resume_quick_actions(product_result)
+                                if resume_actions is not None:
+                                    quick_actions = resume_actions
+                                else:
+                                    reply = _maybe_enrich_entry_reply(reply, text)
+                                    quick_actions = _quick_actions_for_status(product_result.status, reply)
                                 _send(reply_token, reply, quick_actions=quick_actions)
                                 continue
                         except Exception:
@@ -1837,7 +2807,12 @@ async def callback(
                         reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
                     except Exception:
                         pass
-                    quick_actions = _quick_actions_for_status(product_result.status, reply)
+                    resume_actions = _resolve_resume_quick_actions(product_result)
+                    if resume_actions is not None:
+                        quick_actions = resume_actions
+                    else:
+                        reply = _maybe_enrich_entry_reply(reply, text)
+                        quick_actions = _quick_actions_for_status(product_result.status, reply)
                     _send(reply_token, reply, quick_actions=quick_actions)
                     _mark_text_dedup(str(user_id), text)
                 else:
@@ -1901,7 +2876,11 @@ async def callback(
                         reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
                     except Exception:
                         pass
-                    quick_actions = _quick_actions_for_status(product_result.status, reply)
+                    resume_actions = _resolve_resume_quick_actions(product_result)
+                    if resume_actions is not None:
+                        quick_actions = resume_actions
+                    else:
+                        quick_actions = _quick_actions_for_status(product_result.status, reply)
                 else:
                     # P0.5 fail-closed: no ProductSession → image/OCR must not start intake
                     reply = "目前無法安全開始整理，請先完成身分與授權設定後再試。"

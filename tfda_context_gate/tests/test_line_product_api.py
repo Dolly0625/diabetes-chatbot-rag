@@ -166,4 +166,11 @@ def test_portals_and_rich_menu_definition_are_available(tmp_path, monkeypatch):
     valid = client.get("/api/line/rich-menu", params={"patient_portal_url": "https://demo.example/patient"})
     assert invalid.status_code == 422
     assert valid.status_code == 200
-    assert len(valid.json()["areas"]) == 6
+    payload = valid.json()
+    assert len(payload["areas"]) == 1
+    assert payload["areas"][0]["action"] == {
+        "type": "uri",
+        "label": "開始看診前整理",
+        "uri": "https://demo.example/patient",
+    }
+    assert "clinician" not in valid.text.lower()

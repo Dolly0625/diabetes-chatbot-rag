@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>看診前 AI 對談室｜糖尿病照護 Demo</title>
+<style>
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17352f;background:#f4f8f6;line-height:1.55}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:#f4f8f6}
+.app{width:min(760px,100vw);margin:0 auto;height:100dvh;height:100vh;display:flex;flex-direction:column;background:#f4f8f6}
+@supports (height:100dvh){.app{height:100dvh}}
+.header{position:sticky;top:0;z-index:10;background:#ffffffee;backdrop-filter:saturate(180%) blur(8px);border-bottom:1px solid #d9e6e1;padding:10px 12px 8px;padding-top:calc(10px + env(safe-area-inset-top,0px))}
+.header-top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.title{font-weight:800;font-size:1.02rem}
+.progress{height:6px;background:#e3ece8;border-radius:999px;overflow:hidden;margin:8px 0 0}
+.fill{height:100%;background:#087f67;transition:width .25s;width:0%}
+.badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-weight:700;font-size:.78rem;background:#e7f4ef;color:#08634f}
+.badge.warn{background:#fff4dc;color:#8a4b00}
+.badge.error{background:#fde8e8;color:#9b1c1c}
+.muted{color:#5f746d;font-size:.82rem}
+.chat{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:12px 10px 12px;max-width:760px;margin:0 auto;width:100%;display:flex;flex-direction:column;gap:10px;scroll-behavior:smooth}
+.bubble{max-width:82%;padding:10px 12px;border-radius:16px;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
+.bubble.ai{background:#fff;border:1px solid #d9e6e1;border-top-left-radius:6px;align-self:flex-start}
+.bubble.user{background:#087f67;color:#fff;align-self:flex-end;margin-left:auto;border-top-right-radius:6px}
+.bubble.ai.sending{opacity:.6}
+.bubble.ai.redflag{background:#fde8e8;border:1px solid #f5b5b5;color:#8a1a1a}
+.bubble.ai.safety{background:#fff7e6;border:1px solid #f2d19a;color:#7a4a00}
+.quick{display:flex;gap:8px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:8px 10px;max-width:760px;margin:0 auto;width:100%;scrollbar-width:none;-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity}
+.quick::-webkit-scrollbar{display:none}
+.quick button{flex:0 0 auto;scroll-snap-align:start;background:#fff;border:1px solid #cfe0da;color:#17352f;border-radius:999px;padding:7px 12px;font-weight:600;font-size:.88rem;cursor:pointer;white-space:nowrap}
+.quick button:active{background:#087f67;color:#fff}
+.summary-card{background:#fff;border:1px solid #0a5c4a;border-radius:16px;padding:14px;margin:12px 10px}
+.share-box{background:#eef8f4;border:1px solid #9acbbb;border-radius:12px;padding:10px;margin-top:10px}
+.share-code{font-size:1.15rem;letter-spacing:.08em;font-weight:800;color:#0a5c4a;background:#fff;padding:9px 10px;border-radius:8px;overflow-wrap:anywhere;user-select:all;margin-top:6px}
+.share-qr{display:block;width:180px;height:180px;max-width:100%;margin:12px auto 6px;background:#fff;border-radius:8px;padding:8px}
+.summary-row{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #eef2f0;padding:6px 0}
+.summary-row:last-child{border-bottom:0}
+.summary-label{color:#5f746d;font-size:.9rem}
+.summary-value{color:#0a5c4a;font-weight:600;font-size:.92rem;text-align:right;max-width:58%;overflow-wrap:anywhere}
+.action-bar{display:flex;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#ffffffee;border-top:1px solid #e3ece8;max-width:760px;margin:0 auto;width:100%}
+.action-bar button{flex:1 1 auto;background:#e7f1ee;color:#08634f;border:1px solid #cfe0da;border-radius:999px;padding:9px 10px;font-weight:700;cursor:pointer;font-size:.9rem}
+.action-bar button.danger{background:#fff0f0;color:#9b1c1c;border-color:#f5b5b5}
+.input-bar{display:flex;gap:8px;align-items:center;padding:8px 10px;padding-bottom:calc(8px + env(safe-area-inset-bottom,0px) + var(--keyboard-h,0px) + env(keyboard-inset-height,0px));background:#fff;border-top:1px solid #d9e6e1;max-width:760px;margin:0 auto;width:100%;flex-shrink:0}
+.input-bar input{flex:1;border:1px solid #a9beb7;border-radius:999px;padding:11px 14px;font:inherit;min-width:0}
+.input-bar button{background:#087f67;color:#fff;border:0;border-radius:999px;padding:11px 16px;font-weight:800;cursor:pointer;white-space:nowrap}
+.input-bar button:disabled{opacity:.5;cursor:not-allowed}
+.error-banner{margin:6px 10px;background:#fde8e8;border:1px solid #f5b5b5;color:#8a1a1a;border-radius:10px;padding:9px 12px;font-size:.9rem;max-width:760px;align-self:center;width:calc(100% - 20px)}
+.subtitle{color:#5f746d;font-size:.82rem;margin-top:1px}
+.secondary-actions{max-width:760px;margin:0 auto;width:100%;padding:0 10px 4px;color:#5f746d;font-size:.8rem}
+.secondary-actions summary{cursor:pointer;display:inline-block;padding:4px 2px;list-style:none}
+.secondary-actions summary::-webkit-details-marker{display:none}
+.secondary-actions summary::before{content:"⋯ ";font-size:1rem}
+.secondary-actions[open] summary{color:#08634f}
+.secondary-actions-inner{display:flex;gap:8px;align-items:center;padding:4px 0 2px}
+.secondary-actions button{background:transparent;border:0;color:#5f746d;padding:4px 2px;font:inherit;cursor:pointer}
+.secondary-actions button.danger{color:#9b1c1c}
+.btn-primary{background:#087f67;color:#fff}
+.btn-secondary{background:#e7f1ee;color:#08634f;border:1px solid #cfe0da}
+.btn-ghost{background:#fff;color:#5f746d;border:1px solid #d9e6e1}
+.hidden{display:none!important}
+@media (max-width:375px){.bubble{max-width:86%}}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+<header class="header" aria-label="對談室標頭">
+<div class="header-top">
+<div>
+<div class="title">看診前資料整理</div>
+<div class="subtitle">回答幾個問題，最後一起確認摘要</div>
+</div>
+<span id="stageText" class="badge">準備開始</span>
+</div>
+<div class="progress" aria-hidden="true"><div id="fill" class="fill"></div></div>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+<span id="progressText" class="muted">我們一步一步來</span>
+<span id="shareText" class="badge warn hidden">尚未分享</span>
+</div>
+</header>
+
+<main id="chat" class="chat" role="log" aria-live="polite" aria-relevant="additions" aria-label="對談訊息"></main>
+
+<div id="quick" class="quick hidden" role="toolbar" aria-label="快速回覆"></div>
+
+<div id="summaryWrap" class="hidden" aria-live="polite"></div>
+
+<div id="errorBanner" class="error-banner hidden" role="alert" aria-live="assertive"></div>
+
+<div class="action-bar" aria-label="其他操作">
+<details class="secondary-actions">
+<summary>需要先離開嗎？</summary>
+<div class="secondary-actions-inner">
+<button id="pauseBtn" type="button">先暫停，稍後繼續</button>
+<button id="clearBtn" type="button" class="danger">清除這次整理</button>
+</div>
+</details>
+</div>
+
+<div class="input-bar" id="inputBar">
+<input id="input" type="text" placeholder="輸入回覆…" autocomplete="off" enterkeyhint="send" aria-label="輸入回覆" maxlength="2000">
+<button id="send" type="button">送出</button>
+</div>
+</div>
+
+<div id="liveStatus" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+<script>
+(() => {
+  const qs = new URLSearchParams(location.search);
+  let opaqueToken = qs.get("token") || "";
+  const chat = document.getElementById("chat");
+  const quick = document.getElementById("quick");
+  const input = document.getElementById("input");
+  const send = document.getElementById("send");
+  const fill = document.getElementById("fill");
+  const progressText = document.getElementById("progressText");
+  const stageText = document.getElementById("stageText");
+  const errorBanner = document.getElementById("errorBanner");
+  const summaryWrap = document.getElementById("summaryWrap");
+  const liveStatus = document.getElementById("liveStatus");
+  const pauseBtn = document.getElementById("pauseBtn");
+  const clearBtn = document.getElementById("clearBtn");
+  const state = { version: 0, sessionId: "", hasDraft: false, draftLoaded: false, sending: false, pendingId: "", lastDraft: null, redFlag: false, abortController: null, sseCompleted: false, pendingAiBubbleRef: null, shareCode: "", shareQrDataUri: "", shareExpiresAt: "", shareBusy: false, composing: false };
+  const fieldLabels = { known_medications:"目前用藥", allergies:"過敏史", chronic_conditions:"慢性病史", family_history:"家族史", symptom_onset:"症狀開始時間", symptom_description:"主要症狀", symptom_severity:"症狀程度", questions_for_doctor:"想問醫師的問題" };
+  const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const announce = (msg) => { liveStatus.textContent = msg; };
+  const buildUrl = (path) => {
+    if (!opaqueToken) return path;
+    const sep = path.includes("?") ? "&" : "?";
+    return path + sep + "token=" + encodeURIComponent(opaqueToken);
+  };
+  const authHeaders = () => {
+    const h = { "content-type": "application/json" };
+    if (opaqueToken) h["Authorization"] = "Bearer " + opaqueToken;
+    return h;
+  };
+  const humanError = (status, detail) => {
+    const d = typeof detail === "string" ? detail : "";
+    if (status === 401) return "身分驗證失敗，請從提供的連結重新開啟整理室。";
+    if (status === 403) return "沒有權限存取此整理室，請確認連結是否正確。";
+    if (status === 409) return "剛剛的資料有更新，我已重新整理，請再送一次。";
+    if (status === 422) return "輸入格式不符，請調整後重試。";
+    if (status === 429) return "系統忙碌中，請稍後再試，資料未儲存。";
+    if (status >= 500) return "伺服器暫時忙碌，請稍後再試，資料未儲存。";
+    if (status === 0) return "網路連線失敗，資料未儲存，請檢查網路後重試。";
+    return d || "操作失敗，請稍後再試，資料未儲存。";
+  };
+  const showError = (msg) => {
+    errorBanner.textContent = msg;
+    errorBanner.classList.remove("hidden");
+    announce(msg);
+  };
+  const clearError = () => {
+    errorBanner.textContent = "";
+    errorBanner.classList.add("hidden");
+  };
+  const isNearBottom = () => chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 80;
+  const smartScroll = () => { if (isNearBottom()) chat.scrollTop = chat.scrollHeight; };
+  const addBubble = (role, text, extra) => {
+    if (!text) return null;
+    const div = document.createElement("div");
+    div.className = "bubble " + (role === "user" ? "user" : "ai") + (extra ? " " + extra : "");
+    div.textContent = text;
+    chat.appendChild(div);
+    smartScroll();
+    if (isNearBottom()) chat.scrollTop = chat.scrollHeight;
+    return div;
+  };
+  const renderQuick = (list) => {
+    quick.replaceChildren();
+    if (!list || !list.length) { quick.classList.add("hidden"); return; }
+    quick.classList.remove("hidden");
+    list.forEach((item) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = item.label || item.text || "";
+      b.addEventListener("click", () => {
+        input.value = item.text || item.label || "";
+        sendMessage();
+      });
+      quick.appendChild(b);
+    });
+  };
+  const updateProgress = (data) => {
+    let filled = 0; let total = 8; let stage = data.intake_stage || "";
+    if (data.progress && typeof data.progress.filled === "number") {
+      filled = data.progress.filled;
+      total = data.progress.total || 8;
+      stage = data.progress.stage || stage;
+    } else if (data.intake_snapshot) {
+      const snap = data.intake_snapshot;
+      const vals = [snap.known_medications, snap.allergies, snap.chronic_conditions, snap.family_history, snap.symptom_onset, snap.symptom_description, snap.symptom_severity, snap.questions_for_doctor];
+      filled = vals.filter((v) => Array.isArray(v) ? v.length > 0 : (v !== null && v !== undefined && String(v).trim() !== "")).length;
+    }
+    const percent = total ? Math.round((filled / total) * 100) : 0;
+    const stageLabels = {
+      stage1: "先整理用藥與過敏",
+      stage2: "接著了解症狀",
+      stage3: "最後記下想問醫師的事",
+      review: "請確認整理內容",
+      submitted: "看診前資料已整理好",
+    };
+    const stageBadgeLabels = {
+      stage1: "第一段",
+      stage2: "第二段",
+      stage3: "第三段",
+      review: "確認內容",
+      submitted: "已完成",
+    };
+    progressText.textContent = stageLabels[stage] || (percent >= 100 ? "內容都整理好了" : "我們一步一步來");
+    stageText.textContent = stageBadgeLabels[stage] || "一起整理";
+    fill.style.width = percent + "%";
+  };
+  const shouldShowSummary = (data) => {
+    if (data.red_flag) return false;
+    if (data.system_risk_classification && data.system_risk_classification.level === "RED_FLAG") return false;
+    if (data.status === "COMPLETED") return true;
+    if (data.intake_stage === "submitted") return true;
+    if (data.status === "AWAITING_CONFIRMATION" || data.status === "NEEDS_CONFIRMATION") return true;
+    if (data.intake_stage === "review" && data.intake_snapshot) {
+      const snap = data.intake_snapshot;
+      const hasAll = ["known_medications","allergies","chronic_conditions","family_history","symptom_onset","symptom_description","symptom_severity","questions_for_doctor"].every((k) => {
+        const v = snap[k];
+        return Array.isArray(v) ? v.length > 0 : (v !== null && v !== undefined && String(v).trim() !== "");
+      });
+      if (hasAll) return true;
+    }
+    if (data.review && data.review.confirmation_status === "AWAITING_CONFIRMATION") return true;
+    return false;
+  };
+  const renderShareCode = () => {
+    const button = summaryWrap.querySelector("#shareBtn");
+    const result = summaryWrap.querySelector("#shareResult");
+    const code = summaryWrap.querySelector("#shareCode");
+    const qr = summaryWrap.querySelector("#shareQr");
+    const expiry = summaryWrap.querySelector("#shareExpiry");
+    const shareText = document.getElementById("shareText");
+    if (!button || !result || !code || !qr) return;
+    if (!state.shareCode) {
+      button.disabled = false;
+      button.textContent = "產生給醫護的分享碼";
+      result.classList.add("hidden");
+      if (shareText) shareText.classList.add("hidden");
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "分享碼已產生";
+    code.textContent = state.shareCode;
+    qr.src = state.shareQrDataUri;
+    if (expiry) expiry.textContent = state.shareExpiresAt ? "有效期限：" + new Date(state.shareExpiresAt).toLocaleString() : "10 分鐘內可使用一次";
+    result.classList.remove("hidden");
+    if (shareText) {
+      shareText.textContent = "分享碼已產生";
+      shareText.className = "badge";
+      shareText.classList.remove("hidden");
+    }
+  };
+  const createShareCode = async () => {
+    if (state.shareCode || state.shareBusy) return;
+    const button = summaryWrap.querySelector("#shareBtn");
+    if (!button) return;
+    state.shareBusy = true;
+    button.disabled = true;
+    button.textContent = "建立中…";
+    clearError();
+    try {
+      const data = await fetchJson("/api/patient/previsit-room/share", { method: "POST", headers: authHeaders(), body: JSON.stringify({ allowed_clinician_id: "doctor-demo" }) });
+      if (!data.token) throw new Error("伺服器未回傳分享碼，請稍後再試。");
+      state.shareCode = String(data.token);
+      state.shareQrDataUri = String(data.qr_code_data_uri || "");
+      if (!state.shareQrDataUri.startsWith("data:image/png;base64,")) throw new Error("伺服器未回傳 QR Code，請稍後再試。");
+      state.shareExpiresAt = data.expires_at || "";
+      renderShareCode();
+      announce("已產生給醫護的一次性分享碼");
+    } catch (e) {
+      showError(e.message || "分享碼建立失敗，請稍後再試。");
+      button.disabled = false;
+      button.textContent = "產生給醫護的分享碼";
+    } finally {
+      state.shareBusy = false;
+    }
+  };
+  const renderSummary = (data) => {
+    if (!shouldShowSummary(data)) { summaryWrap.classList.add("hidden"); summaryWrap.replaceChildren(); return; }
+    summaryWrap.classList.remove("hidden");
+    const snap = data.intake_snapshot || (data.review && data.review.intake) || {};
+    const humanize = (val) => {
+      if (val === null || val === undefined || String(val).trim() === "") return "—";
+      const s = String(val).trim();
+      const map = {
+        "no_current_medications": "目前無用藥",
+        "no_medications": "目前無用藥",
+        "no_meds": "目前無用藥",
+        "no_allergies": "無",
+        "no_allergy": "無",
+        "no_chronic_conditions": "無",
+        "no_chronic": "無",
+        "no_family_history": "無",
+        "no_questions": "無",
+        "no_question": "無",
+        "none": "無",
+        "diabetes": "糖尿病",
+        "diabetes_mellitus": "糖尿病",
+        "dm": "糖尿病",
+        "hypertension": "高血壓",
+        "htn": "高血壓",
+        "hyperlipidemia": "高血脂",
+        "two_weeks_ago": "兩週前",
+        "two_week_ago": "兩週前",
+        "2_weeks_ago": "兩週前",
+        "one_week_ago": "一週前",
+        "one_month_ago": "一個月前",
+        "three_months_ago": "三個月前",
+        "mild": "輕度",
+        "moderate": "中度",
+        "severe": "重度"
+      };
+      const key = s.toLowerCase().replace(/[\s\-_]+/g, "_");
+      return map[key] || s;
+    };
+    const rows = Object.keys(fieldLabels).map((key) => {
+      const v = snap[key];
+      const display = Array.isArray(v) ? (v.length ? v.map(humanize).join("、") : "—") : humanize(v);
+      return '<div class="summary-row"><span class="summary-label">' + esc(fieldLabels[key]) + '</span><span class="summary-value">' + esc(display) + '</span></div>';
+    }).join("");
+    const disclaimer = (data.review && data.review.disclaimer) || "本資料僅供看診前整理，需由醫師確認，不是診斷或治療建議。";
+    const confirmed = data.status === "SUBMITTED" && data.intake_stage === "submitted";
+    const controls = confirmed
+      ? '<div style="margin-top:10px"><button id="shareBtn" type="button" style="width:100%;background:#087f67;color:#fff;border:0;border-radius:999px;padding:10px 14px;font-weight:800;cursor:pointer">產生給醫護的分享碼</button><div id="shareResult" class="share-box hidden" role="status"><strong>一次性分享碼</strong><div id="shareCode" class="share-code"></div><img id="shareQr" class="share-qr" alt="一次性分享碼 QR Code"><div class="muted" style="text-align:center">醫護可掃描 QR Code 或輸入上方分享碼。</div><div id="shareExpiry" class="muted" style="margin-top:6px">10 分鐘內可由指定醫護使用一次。</div><div class="muted" style="margin-top:4px">請把分享碼交給 /clinician，Demo 醫護 ID 輸入 doctor-demo。此碼只顯示在目前頁面。</div></div></div>'
+      : '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button id="confirmBtn" type="button" style="flex:1;background:#087f67;color:#fff;border:0;border-radius:999px;padding:10px 14px;font-weight:800;cursor:pointer">確認完成</button><button id="modifyBtn" type="button" style="flex:1;background:#fff;border:1px solid #cfe0da;border-radius:999px;padding:10px 14px;cursor:pointer">修改資料</button></div>';
+    summaryWrap.innerHTML = '<div class="summary-card"><div style="font-weight:800;margin-bottom:6px">看診前摘要</div>' + rows + '<p class="muted" style="margin:8px 0 0">' + esc(disclaimer) + '</p>' + controls + '</div>';
+    const confirmBtn = summaryWrap.querySelector("#confirmBtn");
+    const modifyBtn = summaryWrap.querySelector("#modifyBtn");
+    const shareBtn = summaryWrap.querySelector("#shareBtn");
+    if (confirmBtn) confirmBtn.addEventListener("click", async () => {
+      const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+      await doChat("確認完成", cid, true);
+    });
+    if (modifyBtn) modifyBtn.addEventListener("click", () => {
+      addBubble("ai", "請告訴我哪一項要修改，例如：我剛才說錯了，是對盤尼西林過敏");
+      input.focus();
+    });
+    if (shareBtn) shareBtn.addEventListener("click", createShareCode);
+    if (confirmed) renderShareCode();
+    smartScroll();
+  };
+  const fetchJson = async (url, opts) => {
+    let res;
+    try {
+      res = await fetch(buildUrl(url), opts);
+    } catch (e) {
+      const err = new Error(humanError(0, ""));
+      err.status = 0;
+      throw err;
+    }
+    let data = {};
+    try { data = await res.json(); } catch (_) { data = {}; }
+    if (!res.ok) {
+      const msg = humanError(res.status, data.detail || data.message || "");
+      const err = new Error(msg);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  };
+  const renderHistory = (data) => {
+    const msgs = data.messages || data.history || [];
+    if (Array.isArray(msgs) && msgs.length) {
+      const seen = new Set();
+      msgs.forEach((m) => {
+        const role = m.role || m.sender || (m.is_user ? "user" : "ai");
+        const content = m.content || m.text || m.message || "";
+        if (!content) return;
+        const key = role + ":" + content;
+        if (seen.has(key)) return;
+        seen.add(key);
+        addBubble(role === "user" ? "user" : "ai", content);
+      });
+    }
+  };
+  const loadDraftProbe = async () => {
+    try {
+      const data = await fetchJson("/api/patient/previsit-room", { headers: authHeaders() });
+      state.version = typeof data.version === "number" ? data.version : 0;
+      state.sessionId = data.session_id || data.sessionId || "";
+      state.lastDraft = data;
+      state.draftLoaded = true;
+      const hasContent = !!(data.intake_snapshot && Object.values(data.intake_snapshot).some((v) => Array.isArray(v) ? v.length > 0 : (v !== null && v !== undefined && String(v).trim() !== "")));
+      const hasMessages = Array.isArray(data.messages) && data.messages.length > 0;
+      const hasPendingIntake = !!(data.pending_field || data.pending_question);
+      state.hasDraft = hasContent || hasMessages || hasPendingIntake;
+      updateProgress(data);
+      return data;
+    } catch (e) {
+      state.draftLoaded = false;
+      if (e.status === 401 || e.status === 403) {
+        showError(e.message);
+        state.hasDraft = false;
+        return null;
+      }
+      if (e.status === 404) {
+        state.hasDraft = false;
+        return null;
+      }
+      showError(e.message);
+      state.hasDraft = false;
+      return null;
+    }
+  };
+  const doChatFallback = async (message, clientId, isConfirm, userBubble) => {
+    if (state.sseCompleted) return;
+    try {
+      const payload = { message: message, version: state.version, client_message_id: clientId };
+      const data = await fetchJson("/api/patient/previsit-room/chat", { method: "POST", headers: authHeaders(), body: JSON.stringify(payload) });
+      if (state.sseCompleted) return;
+      state.version = typeof data.version === "number" ? data.version : state.version;
+      if (data.session_id) state.sessionId = data.session_id;
+      const isRed = !!(data.red_flag || (data.system_risk_classification && data.system_risk_classification.level === "RED_FLAG") || (data.reply && (data.reply.includes("119") || data.reply.includes("急診") || data.reply.includes("RED_FLAG"))));
+      const extra = isRed ? "redflag" : (data.safety ? "safety" : "");
+      if (data.reply) addBubble("ai", data.reply, extra);
+      state.redFlag = !!isRed;
+      updateProgress(data);
+      renderQuick(data.quick_replies || data.quickReplies || []);
+      if (isRed) {
+        renderQuick([]);
+        summaryWrap.classList.add("hidden");
+      } else {
+        renderSummary(data);
+      }
+      if (isConfirm && data.status === "COMPLETED") {
+        addBubble("ai", "看診前資料已整理完成，目前只有你可以查看，尚未自動分享給醫護。");
+      }
+    } catch (e) {
+      if (e.status === 409) {
+        showError(e.message);
+        try {
+          const fresh = await fetchJson("/api/patient/previsit-room", { headers: authHeaders() });
+          state.version = typeof fresh.version === "number" ? fresh.version : state.version;
+          updateProgress(fresh);
+        } catch (_) {}
+        input.value = message;
+      } else if (e.status === 401 || e.status === 403) {
+        showError(e.message);
+        input.value = message;
+      } else {
+        showError(e.message);
+        input.value = message;
+      }
+      if (userBubble) {
+        userBubble.style.opacity = "0.7";
+        userBubble.title = "未送達，資料未儲存";
+      }
+      throw e;
+    }
+  };
+  // System bootstrap is not something the patient typed, so do not render it
+  // as a chat bubble.  Real replies continue to appear as normal bubbles.
+  const doChat = async (message, clientId, isConfirm, showUserBubble = true) => {
+    if (state.sending) return;
+    if (!state.draftLoaded) {
+      showError("整理室資料尚未載入，請先重新載入後再開始。資料尚未送出。");
+      return;
+    }
+    state.sending = true;
+    send.disabled = true;
+    clearError();
+    state.sseCompleted = false;
+    const userBubble = showUserBubble ? addBubble("user", message) : null;
+    const pendingAi = document.createElement("div");
+    pendingAi.className = "bubble ai sending";
+    pendingAi.textContent = "正在理解…";
+    chat.appendChild(pendingAi);
+    state.pendingAiBubbleRef = pendingAi;
+    smartScroll();
+    state.abortController = new AbortController();
+    const payload = { message: message, version: state.version, client_message_id: clientId };
+    let streamFailed = false;
+    let shouldFallback = false;
+    try {
+      const canStream = typeof ReadableStream !== "undefined";
+      if (!canStream) {
+        shouldFallback = true;
+        throw new Error("fallback_no_stream");
+      }
+      let res;
+      try {
+        res = await fetch(buildUrl("/api/patient/previsit-room/chat/stream"), { method: "POST", headers: Object.assign({}, authHeaders(), { "Accept": "text/event-stream" }), body: JSON.stringify(payload), signal: state.abortController.signal });
+      } catch (err) {
+        if (err && err.name === "AbortError") throw err;
+        shouldFallback = true;
+        throw err;
+      }
+      if (!res.ok) {
+        if ([404,405,501].includes(res.status)) {
+          shouldFallback = true;
+          if (pendingAi.parentNode) pendingAi.remove();
+          state.pendingAiBubbleRef = null;
+          await doChatFallback(message, clientId, isConfirm, userBubble);
+          return;
+        }
+        let data = {};
+        try { data = await res.json(); } catch (_) { data = {}; }
+        const msg = humanError(res.status, data.detail || data.message || "");
+        const err = new Error(msg);
+        err.status = res.status;
+        err.data = data;
+        throw err;
+      }
+      if (!res.body || typeof res.body.getReader !== "function") {
+        shouldFallback = true;
+        throw new Error("fallback_no_body");
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let currentEvent = "";
+      let hasDelta = false;
+      let sseErrorHandled = false;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split(String.fromCharCode(10));
+          buffer = lines.pop();
+          for (let raw of lines) {
+            const line = raw.trim();
+            if (!line) { currentEvent = ""; continue; }
+            if (line.startsWith("event:")) {
+              currentEvent = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+              const dataStr = line.slice(5).trim();
+              let dataJson = {};
+              try { dataJson = dataStr ? JSON.parse(dataStr) : {}; } catch (_) { dataJson = {}; }
+              if (currentEvent === "delta") {
+                const deltaText = dataJson.delta || dataJson.text || dataJson.content || dataJson.reply || "";
+                if (deltaText) {
+                  if (!hasDelta) {
+                    state.pendingAiBubbleRef.textContent = "";
+                    hasDelta = true;
+                  }
+                  state.pendingAiBubbleRef.textContent += deltaText;
+                  smartScroll();
+                }
+              } else if (currentEvent === "phase") {
+                // keep showing 正在理解… until delta arrives
+              } else if (currentEvent === "complete") {
+                state.sseCompleted = true;
+                if (state.pendingAiBubbleRef) state.pendingAiBubbleRef.classList.remove("sending");
+                if (!hasDelta && dataJson.reply) {
+                  state.pendingAiBubbleRef.textContent = dataJson.reply;
+                }
+                state.version = typeof dataJson.version === "number" ? dataJson.version : state.version;
+                if (dataJson.session_id) state.sessionId = dataJson.session_id;
+                const isRed = !!(dataJson.red_flag || (dataJson.system_risk_classification && dataJson.system_risk_classification.level === "RED_FLAG") || (dataJson.reply && (dataJson.reply.includes("119") || dataJson.reply.includes("急診") || dataJson.reply.includes("RED_FLAG"))));
+                if (isRed) state.pendingAiBubbleRef.classList.add("redflag");
+                else if (dataJson.safety) state.pendingAiBubbleRef.classList.add("safety");
+                state.redFlag = !!isRed;
+                updateProgress(dataJson);
+                if (isRed) {
+                  renderQuick([]);
+                  summaryWrap.classList.add("hidden");
+                } else {
+                  renderQuick(dataJson.quick_replies || dataJson.quickReplies || []);
+                  renderSummary(dataJson);
+                }
+                if (isConfirm && dataJson.status === "COMPLETED") {
+                  addBubble("ai", "看診前資料已整理完成，目前只有你可以查看，尚未自動分享給醫護。");
+                }
+              } else if (currentEvent === "error") {
+                sseErrorHandled = true;
+                const detail = dataJson.detail || dataJson.message || "";
+                const msg = detail ? detail : "這次沒有成功儲存，請稍後再試。";
+                const showMsg = msg.includes("這次沒有成功儲存") ? msg : "這次沒有成功儲存，" + msg;
+                if (state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode) state.pendingAiBubbleRef.remove();
+                state.pendingAiBubbleRef = null;
+                showError(showMsg);
+                input.value = message;
+                if (userBubble) { userBubble.style.opacity = "0.7"; userBubble.title = "未送達，資料未儲存"; }
+                try { await reader.cancel(); } catch (_) {}
+                const err = new Error(showMsg);
+                err.isSseError = true;
+                throw err;
+              }
+            }
+          }
+          if (sseErrorHandled) break;
+        }
+        if (!state.sseCompleted && !sseErrorHandled) {
+          shouldFallback = true;
+          throw new Error("fallback_incomplete");
+        }
+      } catch (innerErr) {
+        if (innerErr && innerErr.name === "AbortError") throw innerErr;
+        if (innerErr && innerErr.isSseError) throw innerErr;
+        if (!state.sseCompleted) {
+          shouldFallback = true;
+          throw innerErr;
+        }
+        throw innerErr;
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        if (state.pendingAiBubbleRef && !state.sseCompleted && state.pendingAiBubbleRef.parentNode && state.pendingAiBubbleRef.textContent === "正在理解…") {
+          // keep aborted bubble removed to avoid stale placeholder when aborted via pause
+          // but do not show error on abort via navigation
+        }
+        throw e;
+      }
+      if (e && e.isSseError) {
+        if (userBubble) { userBubble.style.opacity = "0.7"; userBubble.title = "未送達，資料未儲存"; }
+        throw e;
+      }
+      if (shouldFallback) {
+        if (state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode) { state.pendingAiBubbleRef.remove(); state.pendingAiBubbleRef = null; }
+        if (state.sseCompleted) return;
+        try {
+          await doChatFallback(message, clientId, isConfirm, userBubble);
+          return;
+        } catch (fallbackErr) {
+          throw fallbackErr;
+        }
+      }
+      if (state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode) { state.pendingAiBubbleRef.remove(); state.pendingAiBubbleRef = null; }
+      if (e.status === 409) {
+        showError(e.message);
+        try {
+          const fresh = await fetchJson("/api/patient/previsit-room", { headers: authHeaders() });
+          state.version = typeof fresh.version === "number" ? fresh.version : state.version;
+          state.lastDraft = fresh;
+          state.draftLoaded = true;
+          updateProgress(fresh);
+          // If the session was already initialized on the server, display its current question
+          if (fresh && (fresh.pending_question || fresh.reply)) {
+            clearError();
+            renderQuick(fresh.quick_replies || fresh.quickReplies || [{"label":"沒有吃藥","text":"沒有吃藥"},{"label":"不確定藥名","text":"不確定藥名"}]);
+            renderSummary(fresh);
+            const nextQuestion = fresh.pending_question || fresh.reply;
+            if (!shouldShowSummary(fresh) && (!chat.lastElementChild || !chat.lastElementChild.textContent.includes(nextQuestion))) {
+              addBubble("ai", nextQuestion);
+            }
+          } else if (message === "開始新的整理" && !clientId.includes("-retry")) {
+            input.value = "";
+            const baseId = clientId.length > 80 ? clientId.slice(0, 40) : clientId;
+            const retryId = baseId + "-retry";
+            queueMicrotask(() => doChat(message, retryId, isConfirm, showUserBubble));
+          } else {
+            input.value = message;
+          }
+        } catch (_) {}
+      } else if (e.status === 401 || e.status === 403) {
+        showError(e.message);
+        input.value = message;
+      } else {
+        const msg = e.message && e.message.includes("這次沒有成功儲存") ? e.message : (e.message || humanError(e.status || 0, ""));
+        const shouldAppend = !msg.includes("這次沒有成功儲存") && !msg.includes("資料未儲存");
+        const finalMsg = shouldAppend ? msg : msg;
+        if (!e.status && shouldFallback) {
+          // already handled
+        } else {
+          const displayMsg = msg.includes("這次沒有成功儲存") ? msg : (e.status ? e.message : "這次沒有成功儲存，請稍後再試。");
+          // ensure phrase exists for generic network error
+          if (!displayMsg.includes("這次沒有成功儲存") && !e.status) {
+            showError("這次沒有成功儲存，請檢查網路後重試。");
+          } else {
+            showError(displayMsg);
+          }
+          input.value = message;
+        }
+      }
+      if (userBubble) {
+        userBubble.style.opacity = "0.7";
+        userBubble.title = "未送達，資料未儲存";
+      }
+      streamFailed = true;
+    } finally {
+      state.sending = false;
+      send.disabled = false;
+      if (state.abortController) state.abortController = null;
+      input.focus();
+      if (streamFailed && state.pendingAiBubbleRef && state.pendingAiBubbleRef.parentNode && state.pendingAiBubbleRef.textContent === "正在理解…") {
+        state.pendingAiBubbleRef.remove();
+        state.pendingAiBubbleRef = null;
+      }
+    }
+  };
+  const sendMessage = async () => {
+    if (state.sending) return;
+    const text = input.value.trim();
+    if (!text) return;
+    if (text.length > 2000) { showError("輸入過長，請分段傳送。"); return; }
+    const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(36).slice(2,6);
+    state.pendingId = cid;
+    input.value = "";
+    renderQuick([]);
+    await doChat(text, cid, false);
+  };
+  send.addEventListener("click", sendMessage);
+  // Chinese IME uses Enter to choose a character.  Do not send until the
+  // composition is finished, otherwise partial text such as 「我」 is sent.
+  input.addEventListener("compositionstart", () => { state.composing = true; });
+  input.addEventListener("compositionend", () => { state.composing = false; });
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing || state.composing || e.keyCode === 229) return;
+    e.preventDefault();
+    sendMessage();
+  });
+  pauseBtn.addEventListener("click", () => {
+    if (state.sending && state.abortController) { try { state.abortController.abort(); } catch (_) {} }
+    addBubble("ai", "好的，資料會先幫你保留。下次回來就從這裡繼續。");
+    renderQuick([{ label: "繼續整理", text: "繼續整理" }]);
+    announce("已暫停並保存");
+  });
+  clearBtn.addEventListener("click", async () => {
+    if (state.sending && state.abortController) { try { state.abortController.abort(); } catch (_) {} }
+    const ok = window.confirm("要清除這次已整理的內容嗎？清除後就不能復原。");
+    if (!ok) return;
+    chat.replaceChildren();
+    summaryWrap.classList.add("hidden");
+    summaryWrap.replaceChildren();
+    renderQuick([]);
+    updateProgress({ intake_snapshot: {}, progress: { filled: 0, total: 8 } });
+    stageText.textContent = "準備開始";
+    state.version = 0;
+    addBubble("ai", "這次整理已清除。如果要重新開始，重新整理頁面即可。");
+    announce("已結束並清除");
+  });
+  window.addEventListener("beforeunload", () => { if (state.abortController) try { state.abortController.abort(); } catch (_) {} });
+  window.addEventListener("pagehide", () => { if (state.abortController) try { state.abortController.abort(); } catch (_) {} });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && state.abortController) try { state.abortController.abort(); } catch (_) {} });
+  const vv = window.visualViewport;
+  if (vv) {
+    const onResize = () => {
+      const kh = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      document.documentElement.style.setProperty("--keyboard-h", kh + "px");
+      smartScroll();
+    };
+    vv.addEventListener("resize", onResize);
+    vv.addEventListener("scroll", onResize);
+  }
+  input.addEventListener("focus", () => { requestAnimationFrame(() => { if (isNearBottom()) chat.scrollTop = chat.scrollHeight; }); });
+  (async () => {
+    const probe = await loadDraftProbe();
+    if (!probe) {
+      addBubble("ai", "整理室暫時載入失敗，請重新整理這個頁面後再試。資料尚未送出。");
+      progressText.textContent = "目前還不能開始，請重新整理頁面。";
+    } else if (state.hasDraft) {
+      // A room link means the user has already chosen this task.  Resume the
+      // focused question directly instead of making them decide through a
+      // blocking system dialog.
+      renderQuick(state.lastDraft.quick_replies || state.lastDraft.quickReplies || []);
+      renderSummary(state.lastDraft);
+      updateProgress(state.lastDraft);
+      const nextQuestion = state.lastDraft.pending_question || state.lastDraft.reply || "請回答目前這一題就好。";
+      if (!shouldShowSummary(state.lastDraft)) addBubble("ai", "我們接著整理，請回答這一題：" + nextQuestion);
+      announce("已載入目前整理進度");
+    } else {
+      // Opening the dedicated room is an explicit request to begin intake.
+      // Do not show the LINE welcome flow or treat a session version as a
+      // draft; start the first focused question instead.
+      addBubble("ai", "好，我們一起整理看診前資料。一次回答一題就好。");
+      const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + "-initial";
+      await doChat("開始新的整理", cid, false, false);
+      announce("已開始新的整理");
+    }
+  })();
+})();
+</script>
+</body>
+</html>

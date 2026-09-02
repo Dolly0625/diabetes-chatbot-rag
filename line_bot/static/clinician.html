@@ -10,8 +10,9 @@
     .status{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.badge{display:inline-flex;border-radius:999px;padding:4px 10px;font-weight:700;font-size:.87rem;background:#e7f0ff;color:#194b8f}.badge.off{background:#fff4dc;color:#8a4b00}.badge.error{background:#fde8e8;color:#9b1c1c}
     label{display:block;margin-top:12px;font-weight:650}input,button{box-sizing:border-box;width:100%;font:inherit;border-radius:10px;padding:11px;margin-top:6px}input{border:1px solid #aab4c3;background:#fff}button{border:0;background:#2457a6;color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#e8edf5;color:#21446f}button:disabled{opacity:.5;cursor:not-allowed}
     .error{color:#9b1c1c;background:#fff0f0;border-radius:10px;padding:10px;margin:10px 0}.success{color:#155d36;background:#eaf7ef;border-radius:10px;padding:10px;margin:10px 0}.hidden{display:none!important}
-    .field-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}.field{border:1px solid #dce2eb;border-radius:12px;padding:11px;min-width:0}.field dt{font-weight:700}.field dd{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}.field.missing{background:#f8f9fb;color:#667085}.field.pending{background:#fffaf0;border-color:#eabf71}.field-state{display:block;margin-top:5px;font-size:.8rem;font-weight:700;color:#2457a6}.field.missing .field-state{color:#667085}.field.pending .field-state{color:#9a5b00}
-    .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}.meta{background:#f5f7fa;border-radius:10px;padding:9px;font-size:.88rem}.meta strong{display:block}.summary-list{margin:6px 0;padding-left:1.2rem}.summary-list li{margin:3px 0}.audit-table{width:100%;border-collapse:collapse;font-size:.87rem}.audit-table th,.audit-table td{text-align:left;vertical-align:top;border-bottom:1px solid #e4e8ee;padding:8px 5px}.audit-table th{color:#667085}.audit-table td{overflow-wrap:anywhere}.readonly{font-size:.9rem;color:#21446f;background:#f0f5ff;padding:10px;border-radius:10px}
+    .field-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}.field{border:1px solid #dce2eb;border-radius:12px;padding:11px;min-width:0}.field dt{font-weight:700}.field dd{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}.field.missing{background:#f8f9fb;color:#667085}.field.pending{background:#fffaf0;border-color:#eabf71}     .field-state{display:block;margin-top:5px;font-size:.8rem;font-weight:700;color:#2457a6}.field.missing .field-state{color:#667085}.field.pending .field-state{color:#9a5b00}
+    .provenance{font-size:.78rem;color:#667085;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere}.provenance code{background:#f5f7fa;padding:1px 4px;border-radius:4px}
+    .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}.meta{background:#f5f7fa;border-radius:10px;padding:9px;font-size:.88rem}.meta strong{display:block}.summary-list{margin:6px 0;padding-left:1.2rem}.summary-list li{margin:3px 0}.timeline-list{margin:6px 0;padding-left:1.2rem}.timeline-list li{margin:4px 0}.audit-table{width:100%;border-collapse:collapse;font-size:.87rem}.audit-table th,.audit-table td{text-align:left;vertical-align:top;border-bottom:1px solid #e4e8ee;padding:8px 5px}.audit-table th{color:#667085}.audit-table td{overflow-wrap:anywhere}.readonly{font-size:.9rem;color:#21446f;background:#f0f5ff;padding:10px;border-radius:10px}
     @media (max-width:580px){.wrap{padding:16px 12px 32px}.card{padding:15px}.field-list,.meta-grid{grid-template-columns:1fr}.audit-table{font-size:.78rem}.audit-table th:nth-child(4),.audit-table td:nth-child(4){display:none}}
   </style>
 </head>
@@ -25,19 +26,24 @@
     <p id="demo-message" class="muted">只有伺服器同時開啟 LINE_DEMO_MODE 且目前 ID 命中 allowlist 時，才可使用這個展示入口。</p>
     <label for="cid">Demo 醫護 ID</label><input id="cid" autocomplete="username" placeholder="例如 doctor-demo">
     <label for="token">病患一次性分享碼</label><input id="token" autocomplete="one-time-code" spellcheck="false" placeholder="請貼上病患提供的分享碼">
-    <button id="redeem" type="button" disabled>讀取唯讀摘要</button>
+    <button id="redeem" type="button" disabled>讀取唯讀摘要（分享碼）</button>
+    <label for="sid">或病患 session_id（已分享才可讀）</label><input id="sid" autocomplete="off" spellcheck="false" placeholder="例如 line-abc123…（僅 demo 展示）">
+    <button id="load-summary" class="secondary" type="button" disabled>依 session_id 讀取唯讀摘要</button>
     <div id="error" class="error hidden" role="alert"></div>
+    <p class="muted">醫護只能讀取已完成 Review & Confirm 並由病患主動分享的摘要，未確認前讀取會被拒絕（403/404）。所有欄位皆唯讀，不可編輯。</p>
   </section>
 
   <section id="summary" class="card hidden" aria-labelledby="summary-title">
     <div class="status"><h2 id="summary-title">看診前摘要（唯讀）</h2><span id="gate-status" class="badge">D gate</span></div>
     <div class="meta-grid"><div class="meta"><strong>資料來源</strong><span id="source">—</span></div><div class="meta"><strong>分享碼狀態</strong><span id="grant-meta">已使用一次</span></div><div class="meta"><strong>有效期限</strong><span id="expires">—</span></div><div class="meta"><strong>讀取時間</strong><span id="accessed">—</span></div></div>
     <p id="summary-text" class="readonly"></p>
-    <h3>8 項資料</h3><dl id="fields" class="field-list"></dl>
+    <h3>8 項資料（去重後）</h3><dl id="fields" class="field-list"></dl>
+    <div id="timeline-box" class="hidden"><h3>時間軸（按發生時間）</h3><ul id="timeline" class="timeline-list"></ul></div>
     <div id="missing-box" class="hidden"><h3>尚未提供／待確認</h3><ul id="missing-fields" class="summary-list"></ul></div>
     <div id="questions-box" class="hidden"><h3>病患想問醫師</h3><ul id="questions" class="summary-list"></ul></div>
     <p id="disclaimer" class="muted"></p>
     <p id="risk" class="muted"></p>
+    <p class="muted">此摘要為唯讀，不可編輯；每個欄位下方顯示 source_quote 追溯原始表述。</p>
   </section>
 
   <section class="card" aria-labelledby="audit-title"><h2 id="audit-title">我的存取紀錄</h2><p class="muted">只顯示目前已驗證 Demo 醫護 ID 的 audit，不顯示其他醫護或病患識別資訊。</p><button id="load-audit" class="secondary" type="button" disabled>載入存取紀錄</button><div id="audit-error" class="error hidden" role="alert"></div><div id="audit-empty" class="muted">尚未載入</div><div class="hidden" id="audit-table-wrap"><table class="audit-table"><thead><tr><th>時間</th><th>結果</th><th>動作</th><th>授權</th></tr></thead><tbody id="audit-rows"></tbody></table></div></section>
@@ -55,10 +61,14 @@
       if (text.includes('another practitioner') || text.includes('assigned')) return '此分享碼指定給其他醫護，請請病患建立指定給你的新分享碼。';
       if (text.includes('expired')) return '分享碼已過期，請請病患重新建立短效分享碼。';
       if (text.includes('not active') || text.includes('used') || text.includes('revok')) return '分享碼已使用、撤銷或失效，不能再次讀取。';
-      if (text.includes('not found')) return '找不到分享碼，請確認貼上的內容完整且未被更換。';
+      if (text.includes('not found') || text.includes('no active share grant')) return '此 session 尚未完成確認分享，或分享碼已失效（未確認前醫護看不到）。';
       return '醫護身分或分享碼未獲授權，請確認 Demo 醫護 ID 已在伺服器 allowlist。';
     }
-    if (status === 422) return '分享碼格式不正確，請重新貼上完整分享碼。';
+    if (status === 404) {
+      if (text.includes('no active share grant') || text.includes('not found')) return '尚未分享：病患未完成 Review & Confirm 或分享已過期，醫護無法讀取。';
+      return '找不到可讀取的分享摘要，請確認 session 已完成確認並分享。';
+    }
+    if (status === 422) return '分享碼或 session_id 格式不正確，請重新填寫。';
     return detail || '操作失敗，請稍後再試。';
   };
   const showError = (selector, message) => { const node = $(selector); node.textContent = message || ''; node.classList.toggle('hidden', !message); };
@@ -66,20 +76,27 @@
   const format = (value) => Array.isArray(value) ? (value.length ? value.join('、') : '—') : ((value === null || value === undefined || value === '') ? '—' : String(value));
   const date = (value) => value ? new Date(value).toLocaleString() : '—';
   const label = (name) => fieldLabels[name] || name;
-  const renderFields = (snapshot, missing) => {
+  const renderFields = (snapshot, missing, provenance) => {
     const list = $('#fields'); list.replaceChildren(); const missingSet = new Set(missing || []);
-    Object.keys(fieldLabels).forEach((name) => { const value = snapshot ? snapshot[name] : null; const pending = Array.isArray(value) ? value.some((item) => String(item).includes('待確認')) : String(value || '').includes('待確認'); const wrapper = document.createElement('div'); wrapper.className = 'field ' + ((pending ? 'pending' : missingSet.has(name) ? 'missing' : '')); const dt = document.createElement('dt'); dt.textContent = label(name); const dd = document.createElement('dd'); dd.textContent = format(value); const state = document.createElement('span'); state.className = 'field-state'; state.textContent = pending ? '待看診確認' : missingSet.has(name) ? '尚未提供' : '病患已提供'; wrapper.append(dt, dd, state); list.append(wrapper); });
+    Object.keys(fieldLabels).forEach((name) => { const value = snapshot ? snapshot[name] : null; const pending = Array.isArray(value) ? value.some((item) => String(item).includes('待確認')) : String(value || '').includes('待確認'); const wrapper = document.createElement('div'); wrapper.className = 'field ' + ((pending ? 'pending' : missingSet.has(name) ? 'missing' : '')); const dt = document.createElement('dt'); dt.textContent = label(name); const dd = document.createElement('dd'); dd.textContent = format(value); const state = document.createElement('span'); state.className = 'field-state'; state.textContent = pending ? '待看診確認' : missingSet.has(name) ? '尚未提供' : '病患已提供'; wrapper.append(dt, dd, state); const prov = provenance && provenance[name] ? String(provenance[name]) : ''; if (prov) { const p = document.createElement('div'); p.className = 'provenance'; p.textContent = '來源：'; const code = document.createElement('code'); code.textContent = prov; p.append(code); wrapper.append(p); } else if (!missingSet.has(name) && value && format(value) !== '—') { const p = document.createElement('div'); p.className = 'provenance'; p.textContent = '來源：病患提供（去重後）'; wrapper.append(p); } list.append(wrapper); });
+  };
+  const renderTimeline = (summary) => {
+    const box = $('#timeline-box'); const list = $('#timeline'); const timeline = (summary && summary.timeline) || [];
+    if (!timeline.length) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden'); list.replaceChildren(...timeline.map((entry) => { const li = document.createElement('li'); const onset = entry.onset ? `【${entry.onset}】` : ''; const meds = entry.medications && entry.medications.length ? `（用藥：${entry.medications.join('、')}）` : ''; li.textContent = `${onset}${entry.description || ''}${meds}`; return li; }));
   };
   const renderSummary = (data) => {
     const summary = data.previsit_summary || {}; const snapshot = data.intake_snapshot || summary.intake || {}; const missing = summary.missing_fields || [];
-    $('#summary').classList.remove('hidden'); $('#gate-status').textContent = data.output_gate_result && data.output_gate_result.decision === 'PASS' ? 'D gate：PASS' : 'D gate：未通過'; $('#source').textContent = data.information_source || '病患／家屬提供'; $('#grant-meta').textContent = '已使用一次（不可重放）'; $('#expires').textContent = date(data.expires_at); $('#accessed').textContent = date(data.accessed_at); $('#summary-text').textContent = summary.summary_text || '目前沒有可顯示的摘要文字。';
-    renderFields(snapshot, missing); $('#missing-box').classList.toggle('hidden', missing.length === 0); $('#missing-fields').replaceChildren(...missing.map((name) => { const li = document.createElement('li'); li.textContent = label(name); return li; }));
+    const provenance = data.intake_field_provenance || summary.intake_field_provenance || {};
+    $('#summary').classList.remove('hidden'); $('#gate-status').textContent = data.output_gate_result && data.output_gate_result.decision === 'PASS' ? 'D gate：PASS' : 'D gate：未通過'; $('#source').textContent = data.information_source || '病患／家屬提供'; $('#grant-meta').textContent = data.single_use === false ? '可重複讀取（demo）' : '已使用一次（不可重放）'; if (data.single_use === false) { $('#grant-meta').textContent = '唯讀分享（session 授權）'; } $('#expires').textContent = date(data.expires_at); $('#accessed').textContent = date(data.accessed_at); $('#summary-text').textContent = summary.summary_text || '目前沒有可顯示的摘要文字。';
+    renderFields(snapshot, missing, provenance); renderTimeline(summary); $('#missing-box').classList.toggle('hidden', missing.length === 0); $('#missing-fields').replaceChildren(...missing.map((name) => { const li = document.createElement('li'); li.textContent = label(name); return li; }));
     const questions = Array.isArray(snapshot.questions_for_doctor) ? snapshot.questions_for_doctor : []; $('#questions-box').classList.toggle('hidden', questions.length === 0); $('#questions').replaceChildren(...questions.map((question) => { const li = document.createElement('li'); li.textContent = question; return li; })); $('#disclaimer').textContent = summary.disclaimer || '本資料僅供看診前整理，需由醫師確認，不是診斷或治療建議。';
     const risk = data.system_risk_classification; $('#risk').textContent = risk && risk.level ? `系統安全分流：${risk.level}（不是診斷；請依院內流程確認）` : '';
   };
   const renderAudit = (data) => { const events = data.events || []; $('#audit-empty').classList.toggle('hidden', events.length > 0); $('#audit-empty').textContent = events.length ? '' : '目前沒有存取紀錄'; $('#audit-table-wrap').classList.toggle('hidden', events.length === 0); $('#audit-rows').replaceChildren(...events.map((event) => { const row = document.createElement('tr'); [date(event.created_at), event.result === 'ALLOWED' ? '允許' : '拒絕', event.action || '—', event.reason || '—'].forEach((value) => { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }); return row; })); };
-  const setAvailable = (enabled) => { state.enabled = enabled; $('#redeem').disabled = !enabled; $('#load-audit').disabled = !enabled; $('#demo-status').textContent = enabled ? 'Demo 已啟用' : 'Demo 未啟用'; $('#demo-status').className = 'badge ' + (enabled ? '' : 'off'); $('#demo-message').textContent = enabled ? '目前伺服器允許 allowlist 內的 Demo 醫護 ID。每次讀取都會消耗分享碼並留下 audit。' : '伺服器必須同時開啟 LINE_DEMO_MODE 且目前 ID 命中 allowlist，這個入口目前拒絕讀取。'; };
-  $('#redeem').addEventListener('click', async () => { showError('#error',''); const button = $('#redeem'); button.disabled = true; button.textContent = '驗證中…'; try { renderSummary(await api('/api/clinician/share/redeem',{method:'POST',headers:{'content-type':'application/json','X-Demo-Clinician-Id':$('#cid').value.trim()},body:JSON.stringify({token:$('#token').value.trim()})})); } catch (error) { showError('#error', error.message); } finally { button.disabled = !state.enabled; button.textContent = '讀取唯讀摘要'; } });
+  const setAvailable = (enabled) => { state.enabled = enabled; $('#redeem').disabled = !enabled; $('#load-summary').disabled = !enabled; $('#load-audit').disabled = !enabled; $('#demo-status').textContent = enabled ? 'Demo 已啟用' : 'Demo 未啟用'; $('#demo-status').className = 'badge ' + (enabled ? '' : 'off'); $('#demo-message').textContent = enabled ? '目前伺服器允許 allowlist 內的 Demo 醫護 ID。每次讀取都會留下 audit；未分享前醫護看不到資料。' : '伺服器必須同時開啟 LINE_DEMO_MODE 且目前 ID 命中 allowlist，這個入口目前拒絕讀取。'; };
+  $('#redeem').addEventListener('click', async () => { showError('#error',''); const button = $('#redeem'); button.disabled = true; button.textContent = '驗證中…'; try { renderSummary(await api('/api/clinician/share/redeem',{method:'POST',headers:{'content-type':'application/json','X-Demo-Clinician-Id':$('#cid').value.trim()},body:JSON.stringify({token:$('#token').value.trim()})})); } catch (error) { showError('#error', error.message); } finally { button.disabled = !state.enabled; button.textContent = '讀取唯讀摘要（分享碼）'; } });
+  $('#load-summary').addEventListener('click', async () => { showError('#error',''); const button = $('#load-summary'); button.disabled = true; button.textContent = '讀取中…'; try { const sid = $('#sid').value.trim(); if (!sid) throw new Error('請先填入病患 session_id'); renderSummary(await api('/api/clinician/summary?session_id=' + encodeURIComponent(sid), {headers:{'X-Demo-Clinician-Id':$('#cid').value.trim()}})); } catch (error) { showError('#error', error.message); } finally { button.disabled = !state.enabled; button.textContent = '依 session_id 讀取唯讀摘要'; } });
   $('#load-audit').addEventListener('click', async () => { showError('#audit-error',''); const button = $('#load-audit'); button.disabled = true; button.textContent = '載入中…'; try { renderAudit(await api('/api/clinician/audit',{headers:{'X-Demo-Clinician-Id':$('#cid').value.trim()}})); } catch (error) { showError('#audit-error', error.message); } finally { button.disabled = !state.enabled; button.textContent = '載入存取紀錄'; } });
   (async () => { try { const config = await api('/api/line/client-config'); state.configLoaded = true; setAvailable(Boolean(config.demo_clinician_enabled)); } catch (error) { setAvailable(false); $('#startup-message').textContent = error.message || '無法檢查 Demo 設定。'; } })();
 })();
