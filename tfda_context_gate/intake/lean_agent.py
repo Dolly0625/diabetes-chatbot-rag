@@ -102,7 +102,7 @@ class LeanIntakeAgent:
             if "mimo" in bare_model.lower():
                 kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
                 kwargs["reasoning_effort"] = "none"
-            kwargs["timeout"] = 5.0
+            kwargs["timeout"] = 15.0
             llm = ChatOpenAI(**kwargs)
             return cls(llm=llm)
         except Exception as exc:
