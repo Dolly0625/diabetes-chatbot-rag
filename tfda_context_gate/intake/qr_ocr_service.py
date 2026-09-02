@@ -564,11 +564,45 @@ class MedicationBagOCRService:
             except Exception:
                 pass
 
-        # Fallback to easyocr or just return empty
+        # Fallback to Vision LLM (mimo-v2.5) if available and traditional OCR text is still empty
+        if not ocr_text:
+            try:
+                import base64
+                from tfda_context_gate.run_config import env_value
+                from langchain_openai import ChatOpenAI
+                from langchain_core.messages import HumanMessage
+
+                model = env_value("ROUTER_LLM_MODEL", "") or ""
+                base_url = env_value("OPENCODE_BASE_URL") or env_value("OPENAI_BASE_URL")
+                api_key = env_value("OPENCODE_API_KEY") or env_value("OPENAI_API_KEY")
+                if model and (base_url or api_key):
+                    bare = model.split("/", 1)[-1] if "/" in model else model
+                    llm = ChatOpenAI(
+                        model=bare,
+                        api_key=api_key,
+                        base_url=base_url,
+                        temperature=0,
+                        timeout=25.0,
+                        extra_body={"reasoning": {"effort": "none"}} if "mimo" in model.lower() else {},
+                    )
+                    b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    msg = HumanMessage(content=[
+                        {"type": "text", "text": "請辨識這張藥袋照片上的所有文字與藥品資訊（包含中文藥名、英文學名/商品名、劑量規格、用法用量）。請以條列方式輸出辨識出的文字。"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ])
+                    resp = llm.invoke([msg])
+                    if resp and resp.content:
+                        ocr_text = str(resp.content).strip()
+                        ocr_used = True
+                        ocr_confidence = 0.85
+            except Exception:
+                pass
+
         if not ocr_text:
             # Try to at least detect if image is valid
             try:
                 from PIL import Image
+
                 img = Image.open(io.BytesIO(image_bytes))
                 # If image is valid but OCR failed, mark low-res
                 if img.size[0] < 500 or img.size[1] < 500:
@@ -587,6 +621,17 @@ class MedicationBagOCRService:
         # Apply hospital mask and TFDA correction
         masked = _hospital_mask_text(ocr_text)
         meds, tfda_conf = _tfda_44k_correction(ocr_text, self._drug_list)
+
+        # Fallback: Structured key-value regex extraction for Vision LLM / OCR outputs
+        if not meds and ocr_text:
+            for line in ocr_text.split("\n"):
+                line = line.strip()
+                m_drug = re.search(r"[\*]*(?:藥名|中文名|英文名|學名|商品名|藥品)[^*：:\n]*[：:]\s*(.+)", line)
+                if m_drug:
+                    val = m_drug.group(1).strip().strip("*").strip()
+                    if val and len(val) >= 2 and val not in meds:
+                        meds.append(val)
+                        tfda_conf = 0.85
 
         # Fallback: Drug Name regex for medication bags (e.g., TEGRETOL/Carbamazepine)
         # TFDA list may not contain all drugs (e.g., TEGRETOL), so try direct extraction
