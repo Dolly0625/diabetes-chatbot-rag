@@ -734,6 +734,7 @@ def _push_text(
     event_id: str | None = None,
     *,
     deadline_guard: Any | None = None,
+    quick_actions: list[dict[str, str]] | None = None,
 ) -> bool:
     if deadline_guard is None:
         try:
@@ -759,7 +760,13 @@ def _push_text(
                 api = _get_messaging_api()
                 if api is None:
                     return False
-                from linebot.v3.messaging import PushMessageRequest, TextMessage
+                from linebot.v3.messaging import (
+                    MessageAction,
+                    PushMessageRequest,
+                    QuickReply,
+                    QuickReplyItem,
+                    TextMessage,
+                )
 
                 kwargs: dict[str, Any] = {}
                 # LINE's generated SDK exposes both a retry key and a native
@@ -784,8 +791,19 @@ def _push_text(
                             kwargs["_request_timeout"] = max(0.001, remaining)
                 except Exception:
                     pass
+
+                quick_reply = None
+                if quick_actions:
+                    items = [
+                        QuickReplyItem(action=MessageAction(label=item["label"], text=item["text"]))
+                        for item in quick_actions
+                        if isinstance(item, dict) and item.get("label") and item.get("text")
+                    ]
+                    if items:
+                        quick_reply = QuickReply(items=items)
+
                 api.push_message(
-                    PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text)]),
+                    PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text, quick_reply=quick_reply)]),
                     **kwargs,
                 )
                 # A transport that returned success owns the event even if
@@ -801,6 +819,39 @@ def _push_text(
     finally:
         _finish_push(event_id, success=success)
     return False
+
+
+def _schedule_image_ocr_push(
+    orchestrator: Any,
+    line_user_id: str,
+    event_id: str,
+    image_bytes: bytes,
+) -> None:
+    def _execute_ocr_and_push() -> None:
+        try:
+            res = orchestrator.handle_image(
+                event_id=event_id,
+                line_user_id=line_user_id,
+                image_bytes=image_bytes,
+            )
+            reply = res.reply
+            quick_actions = [{"label": "我要準備看診", "text": "我要準備看診"}]
+            _push_text(
+                line_user_id=line_user_id,
+                text=reply,
+                event_id=f"ocr-push-{event_id}",
+                quick_actions=quick_actions,
+            )
+            _mark_event_pushed(orchestrator, event_id)
+        except Exception as exc:
+            logger.exception("Async OCR push failed for event %s: %s", event_id, exc)
+
+    thread = threading.Thread(
+        target=_execute_ocr_and_push,
+        name=f"ocr-push-{event_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _mark_event_pushed(orchestrator: Any | None, event_id: str | None) -> bool:
@@ -2865,18 +2916,17 @@ async def callback(
                 orchestrator = _get_conversation_orchestrator()
                 webhook_event_id = ev.get("webhookEventId") or message_id
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":
-                    product_result = orchestrator.handle_image(
-                        event_id=str(webhook_event_id),
+                    _send(reply_token, "已收到您的藥袋照片，正在為您辨識藥品資訊，請稍候...")
+                    _schedule_image_ocr_push(
+                        orchestrator=orchestrator,
                         line_user_id=str(user_id),
+                        event_id=str(webhook_event_id),
                         image_bytes=image_bytes,
                     )
-                    reply = product_result.reply
-                    quick_actions = [{"label": "我要準備看診", "text": "我要準備看診"}]
                 else:
                     # P0.5 fail-closed: no ProductSession → image/OCR must not start intake
                     reply = "目前無法安全開始整理，請先完成身分與授權設定後再試。"
-                    quick_actions = None
-                _send(reply_token, reply, quick_actions=quick_actions)
+                    _send(reply_token, reply)
 
             else:
                 # Unsupported message type
