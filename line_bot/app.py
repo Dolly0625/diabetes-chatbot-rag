@@ -1964,9 +1964,9 @@ def get_previsit_room(
         agent = LeanIntakeAgent.from_env()
         stage = sess.intake_stage or "stage1"
         dyn_q, dyn_f = agent._generate_next_question(stage, sess.intake_snapshot)
-        if not pending_question:
+        if dyn_q:
             pending_question = dyn_q
-        if not pending_field:
+        if dyn_f:
             pending_field = dyn_f
         quick_replies = agent._generate_quick_replies(stage, sess.intake_snapshot)
     except Exception:
@@ -2015,7 +2015,7 @@ def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any)
     if not text:
         raise HTTPException(status_code=422, detail="message is required")
     # "開始新的整理" is the idempotent reset / bootstrap command: allow it even if initial version is 0
-    if text not in ("開始新的整理", "開始整理"):
+    if text not in ("開始新的整理", "開始整理", "繼續整理") and body.version > 0:
         if body.version != sess.version:
             raise HTTPException(status_code=409, detail="Version conflict")
     # red-flag pre-check before AI, does not pollute intake
