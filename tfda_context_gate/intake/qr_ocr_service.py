@@ -788,15 +788,34 @@ class MedicationBagOCRService:
             if best_qr:
                 qr_type = best_qr["parsed"]["qr_type"]
                 if qr_type == "url":
-                    # URL QR: handle directly, don't hallucinate meds from URL
-                    # Front bag URL is hospital link, not medication data
                     qr_used = True
                     qr_data = best_qr["parsed"]
-                    # URL QR does not contain meds; fallback to OCR for meds
-                    # But mark qr_used=True to indicate QR was found
+                    url = best_qr["parsed"]["parsed"].get("url", "")
                     meds = []
                     confidence = 0.0
-                    # Will fallback to OCR below
+                    # If it's a hospital medication detail URL, fetch official medication details directly
+                    if best_qr["parsed"]["parsed"].get("is_hospital_url") and url:
+                        try:
+                            import httpx
+                            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                            resp = httpx.get(url, headers=headers, follow_redirects=True, timeout=3.0, verify=False)
+                            if resp.status_code == 200:
+                                h_text = re.sub(r"<script.*?</script>", "", resp.text, flags=re.DOTALL)
+                                h_text = re.sub(r"<style.*?</style>", "", h_text, flags=re.DOTALL)
+                                h_text = re.sub(r"<[^>]+>", "\n", h_text)
+                                lines = [re.sub(r"\s+", " ", l).strip() for l in h_text.splitlines() if l.strip()]
+                                h_meds = []
+                                for idx, line in enumerate(lines):
+                                    if any(k in line for k in ["中文藥名", "英文藥名", "藥品名稱", "學名", "商品名"]):
+                                        if idx + 1 < len(lines):
+                                            next_line = lines[idx + 1].strip()
+                                            if next_line and len(next_line) >= 2 and not any(k in next_line for k in ["藥名", "劑量", "用法", "外觀"]):
+                                                h_meds.append(next_line)
+                                if h_meds:
+                                    meds = list(dict.fromkeys(h_meds))
+                                    confidence = 0.95
+                        except Exception:
+                            pass
                 elif qr_type in ("nhi_csd1", "nhi_partial", "encrypted"):
                     # NHI QR: try to extract meds from parsed data
                     qr_used = True

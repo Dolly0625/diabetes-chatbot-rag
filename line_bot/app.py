@@ -1997,11 +1997,7 @@ def start_public_demo_previsit() -> RedirectResponse:
     return RedirectResponse(
         url=f"/patient/previsit-room?token={raw_token}",
         status_code=303,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
+        headers={"Cache-Control": "no-store"},
     )
 
 
