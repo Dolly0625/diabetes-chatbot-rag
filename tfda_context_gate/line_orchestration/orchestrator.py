@@ -652,33 +652,55 @@ from .schemas import OrchestratorResult
 
 
 _REPHRASE_FOLLOWUP_RE = re.compile(
-    r"(?:口語|白話|簡單|容易懂|聽不懂|看不懂|再解釋|再說一次|舉例|換個方式).{0,12}(?:講|說|解釋|一點|嗎|呢|？|\?)?",
+    r"(?:口語|白話|簡單|容易懂|聽不懂|看不懂|再解釋|再說一次|舉例|換個方式|詳細一點|多說一點|太專業|太難|說明一下|可以嗎|行嗎|好嗎|說清楚).{0,20}(?:講|說|解釋|說明|一點|嗎|呢|？|\?)?",
+    re.IGNORECASE,
+)
+
+_ELLIPSIS_FOLLOWUP_RE = re.compile(
+    r"^(?:那|那如果|還有|另外|那可以|那能|為什麼|怎會|怎麼會|真的嗎|為什麼會這樣|這代表什麼|會怎樣|那.+呢|可以嗎|行嗎|好嗎)[？?。！!\s]*$",
     re.IGNORECASE,
 )
 
 
 def _resolve_rephrase_followup(session: ProductSession, text: str) -> str | None:
     """Resolve an elliptical rewrite request to the latest education topic."""
+    clean_text = text.strip()
+    is_rephrase = bool(_REPHRASE_FOLLOWUP_RE.search(clean_text))
+    is_ellipsis = bool(_ELLIPSIS_FOLLOWUP_RE.search(clean_text)) or (len(clean_text) <= 12 and any(w in clean_text for w in ("那", "可以", "為什麼", "口語", "白話", "簡單")))
 
-    if not _REPHRASE_FOLLOWUP_RE.search(text.strip()):
+    if not (is_rephrase or is_ellipsis):
         return None
+
     try:
-        for turn in reversed(session.conversation_context.recent_turns):
-            if turn.role != "user":
+        turns = []
+        if hasattr(session, "conversation_context") and session.conversation_context:
+            turns = getattr(session.conversation_context, "recent_turns", [])
+        
+        last_topic = ""
+        for turn in reversed(turns):
+            role = getattr(turn, "role", "")
+            content = getattr(turn, "content", "").strip()
+            if not content or _REPHRASE_FOLLOWUP_RE.search(content):
                 continue
-            previous = turn.content.strip()
-            if not previous or _REPHRASE_FOLLOWUP_RE.search(previous):
-                continue
-            if _orch_should_use_formal(previous, None):
-                return f"{previous} 請用一般人容易理解的白話簡短解釋，不新增沒有依據的內容。"
+            if _orch_should_use_formal(content, None) or re.search(r"糖尿病|血糖|飲食|吃什麼|副作用|用藥|胰島素|症狀", content):
+                last_topic = content
+                break
+
+        if not last_topic:
+            last_topic = "糖尿病日常飲食原則與衛教重點"
+
+        if is_rephrase:
+            return f"請用非常口語化、白話且容易理解的語氣，重新向我說明：{last_topic} 的重點與原則。"
+        else:
+            return f"關於{last_topic}，請回答我的接續提問：「{clean_text}」"
     except Exception:
         return None
-    return None
 
 
 def _is_rephrase_request(text: str) -> bool:
     try:
-        return bool(_REPHRASE_FOLLOWUP_RE.search(text.strip()))
+        clean = text.strip()
+        return bool(_REPHRASE_FOLLOWUP_RE.search(clean) or _ELLIPSIS_FOLLOWUP_RE.search(clean))
     except Exception:
         return False
 
@@ -1499,10 +1521,16 @@ class ConversationOrchestrator:
         return self._call_workflow(request, **kwargs)
 
     def _run_formal_with_timeout(self, text: str, session: ProductSession, timeout_s: float) -> WorkflowResult:
+        resolved_text = text
+        if _is_rephrase_request(text):
+            rephrased = _resolve_rephrase_followup(session, text)
+            if rephrased:
+                resolved_text = rephrased
+
         request = {
             "request_id": f"{session.session_id}-async-{threading.get_ident() % 10000}",
             "schema_version": "a.v0.1",
-            "user_raw_input": text,
+            "user_raw_input": resolved_text,
             "declared_role": self._declared_role(session.actor_role),
             "language": "zh-TW",
         }
