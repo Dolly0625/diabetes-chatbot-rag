@@ -748,24 +748,13 @@ body{background:#f4f8f6}
     if (!probe) {
       addBubble("ai", "整理室暫時載入失敗，請重新整理這個頁面後再試。資料尚未送出。");
       progressText.textContent = "目前還不能開始，請重新整理頁面。";
-    } else if (state.hasDraft) {
-      // A room link means the user has already chosen this task.  Resume the
-      // focused question directly instead of making them decide through a
-      // blocking system dialog.
-      renderQuick(state.lastDraft.quick_replies || state.lastDraft.quickReplies || []);
-      renderSummary(state.lastDraft);
-      updateProgress(state.lastDraft);
-      const nextQuestion = state.lastDraft.pending_question || state.lastDraft.reply || "請回答目前這一題就好。";
-      if (!shouldShowSummary(state.lastDraft)) addBubble("ai", nextQuestion);
-      announce("已載入目前整理進度");
     } else {
-      // Opening the dedicated room is an explicit request to begin intake.
-      // Do not show the LINE welcome flow or treat a session version as a
-      // draft; start the first focused question instead.
-      addBubble("ai", "好，我們一起整理看診前資料。一次回答一題就好。");
-      const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + "-initial";
-      await doChat("開始新的整理", cid, false, false);
-      announce("已開始新的整理");
+      renderQuick(probe.quick_replies || probe.quickReplies || []);
+      renderSummary(probe);
+      updateProgress(probe);
+      const nextQuestion = probe.pending_question || probe.reply || "請回答目前這一題就好。";
+      if (!shouldShowSummary(probe)) addBubble("ai", nextQuestion);
+      announce("已載入看診前對談室");
     }
   })();
 })();

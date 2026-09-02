@@ -532,13 +532,18 @@ class LeanIntakeAgent:
 
         # ── 2. 重新整理 / 初始化 ──
         if raw_text in ("開始新的整理", "開始整理", "重新整理"):
-            intake = PreVisitIntake()
-            first_q = STAGE_TOPIC_QUESTIONS["stage1"]
+            existing_meds = (
+                list(session.intake_snapshot.known_medications or [])
+                if (raw_text != "清除全部資料" and session.intake_snapshot)
+                else []
+            )
+            intake = PreVisitIntake(known_medications=list(existing_meds))
+            first_q, first_field = self._generate_next_question("stage1", intake)
             updated_session = session.model_copy(
                 update={
                     "status": "ACTIVE",
                     "intake_stage": "stage1",
-                    "pending_field": "known_medications",
+                    "pending_field": first_field or "known_medications",
                     "pending_question": first_q,
                     "intake_snapshot": intake,
                 },
