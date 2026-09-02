@@ -10,8 +10,27 @@
 ### 1. 衛教與藥物諮詢（RAG 檢索模組）
 * 模組化整合：內含 RAG 組別開發的 diabetes-rag 檢索引擎原始碼，clone 一次即可取得完整 Demo。
 * 雲端向量檢索：採用 Google Gemini 雲端向量 API（models/gemini-embedding-2），無需在本地安裝 Ollama 或下載模型權重，具備 API Key 即可使用。
-* 雙軌檢索架構：結合 Google Gemini 向量檢索（254 筆國健署衛教專書語料）與 TFDA 藥品知識圖譜三元組，透過 RRF (Reciprocal Rank Fusion) 排名融合演算法進行召回。
+* 雙軌檢索架構：結合 Google Gemini 向量檢索（172 筆國健署衛教專書語料與 85 筆 TFDA 仿單）與 TFDA 藥品知識圖譜三元組，透過 RRF (Reciprocal Rank Fusion) 排名融合演算法進行召回。
 * 知識邊界約束：透過安全閘門（Context Gate B）進行 15 欄位檢驗，依據官方證據產出衛教回答，並標註引用來源（如〔來源：E1、E2〕）與免責聲明。
+
+### 知識庫處理管線標準規範 (RAG Knowledge Base & Pipeline Compliance)
+專案內所有衛教專書與仿單語料，均嚴格遵守 RAG 組官方制訂之標準處理管線（`diabetes-rag/scripts/build_index.py`）進行建置與索引：
+1. **語料來源**：
+   * 衛生福利部國民健康署官方出版品《糖尿病與我》（涵蓋 21 篇完整衛教章節，包括：認識糖尿病成因、第 1 型／第 2 型分類、飲食原則、運動指引、用藥安全、低血糖緊急處置與共病照護）。
+   * 衛生福利部食品藥物管理署（TFDA）藥品安全資訊與仿單警訊。
+2. **切塊演算法（Chunking Algorithm）**：
+   * 依段落與中文句尾標點符號（`。！？`）進行貪婪合併切分。
+   * 單一 Chunk 長度嚴格限制在 **30 ～ 220 字**（避免過長稀釋語意或過短失去上下文）。
+3. **向量嵌入規範（Embedding Specification）**：
+   * 統一調用 Google Gemini Embedding 2（`models/gemini-embedding-2`，3072 維度）。
+   * 建置語料庫時強制使用任務類型 `task_type="RETRIEVAL_DOCUMENT"`，檢索查詢時使用 `task_type="RETRIEVAL_QUERY"`，以維持向量空間檢索召回率一致性。
+4. **重新建置指令**：
+   ```bash
+   export GEMINI_API_KEY="your_api_key"
+   python3 diabetes-rag/scripts/build_index.py
+   ```
+   * 執行後自動將 21 篇專書切為 172 筆標準 Chunk 向量並寫入 `diabetes-rag/src/rag_retrieval/data/education_chunks_embedded.json`。
+   * 確保所有新增衛教知識 100% 通過 RAG 單元測試與安全閘門（Gate B / Gate D）語意驗證。
 
 ### 2. 急性紅旗安全攔截（Fail-Closed 緊急防禦）
 * 當系統正則與意圖規則偵測到急症關鍵字（如：胸口劇痛、呼吸困難、血糖過低冒冷汗、意識不清）時，立即中斷常規對話與 RAG 檢索，提供 119 與急診就醫引導。
