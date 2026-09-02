@@ -61,14 +61,14 @@ REVIEW_QUICK_REPLIES = [
 
 class LLMIntakeExtraction(BaseModel):
     """LLM 萃取結構定義"""
-    known_medications: list[str] | None = Field(default=None, description="目前用藥清單，無則填 ['無']")
-    allergies: list[str] | None = Field(default=None, description="過敏清單，無則填 ['無']")
-    chronic_conditions: list[str] | None = Field(default=None, description="慢性病清單，無則填 ['無']")
-    family_history: list[str] | None = Field(default=None, description="家族病史清單，無則填 ['無']")
-    symptom_onset: str | None = Field(default=None, description="症狀開始時間，如 '三天前'")
-    symptom_description: str | None = Field(default=None, description="症狀具體描述，如 '口渴、頻尿'")
-    symptom_severity: str | None = Field(default=None, description="症狀嚴重程度，標準化為 '輕度'、'中度'、'重度'")
-    questions_for_doctor: list[str] | None = Field(default=None, description="想問醫師的問題清單，無則填 ['無']")
+    known_medications: list[str] | None = Field(default=None, description="目前用藥清單，未提及請為 None")
+    allergies: list[str] | None = Field(default=None, description="過敏清單，未提及請為 None")
+    chronic_conditions: list[str] | None = Field(default=None, description="慢性病清單，未提及請為 None")
+    family_history: list[str] | None = Field(default=None, description="家族病史清單，未提及請為 None")
+    symptom_onset: str | None = Field(default=None, description="症狀開始時間，未提及請為 None")
+    symptom_description: str | None = Field(default=None, description="症狀具體描述，未提及請為 None")
+    symptom_severity: str | None = Field(default=None, description="症狀嚴重程度，標準化為 '輕度'、'中度'、'重度'，未提及請為 None")
+    questions_for_doctor: list[str] | None = Field(default=None, description="想問醫師的問題清單，未提及請為 None")
 
 
 def _clean_field_value(raw: str) -> str:
@@ -235,19 +235,42 @@ class LeanIntakeAgent:
             return None
         try:
             prompt = (
-                "你是一位專業的醫療問卷助理。請從病患最新的一句話中，萃取出對應的結構化欄位。\n"
+                "你是一位專業的醫療問卷助理。請從病患最新輸入的這句話中，萃取出對應的結構化欄位。\n"
                 f"當前正在詢問的欄位是：{pending_field}\n"
-                f"目前已填寫的資料：{current_intake.model_dump_json()}\n"
-                f"病患最新輸入：{text}\n"
-                "規則：\n"
+                f"病患最新輸入：{text}\n\n"
+                "⚠️ 重要抽取規則：\n"
                 "1. 嚴重程度：1-3分為輕度、4-6分為中度、7-10分為重度。\n"
-                "2. 若病患回答「沒有/無」，請填 ['無']。\n"
+                "2. 若病患對當前問題回答「沒有/無/無過敏/沒吃藥/無家族史/沒有問題」，請填 ['無']。\n"
                 "3. 若病患表示不確定藥名，請填 ['不清楚（待看診確認）']。\n"
-                "4. 僅回傳有提到的欄位更新。"
+                "4. ⚠️ 絕對嚴禁為病患未提及的欄位填寫值！病患這句話沒提到的欄位，必須全部為 null！\n"
+                "5. 僅回傳病患這句話明確回答或提到的欄位。"
             )
             structured_llm = self.llm.with_structured_output(LLMIntakeExtraction)
             res: LLMIntakeExtraction = structured_llm.invoke(prompt)
-            updates = {k: v for k, v in res.model_dump().items() if v is not None}
+            raw_updates = {k: v for k, v in res.model_dump().items() if v is not None and v != [] and v != ""}
+            
+            # 安全防禦：過濾掉 LLM 幻想未提及的欄位
+            updates: dict[str, Any] = {}
+            for k, v in raw_updates.items():
+                if k == pending_field:
+                    updates[k] = v
+                elif k == "symptom_severity" and (self.standardize_severity(text) is not None or any(w in text for w in ("分", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "輕", "中", "重", "嚴重"))):
+                    updates[k] = self.standardize_severity(text) or v
+                elif k == "allergies" and "過敏" in text:
+                    updates[k] = v
+                elif k == "chronic_conditions" and any(w in text for w in ("高血壓", "高血脂", "心臟病", "腎臟病", "糖尿病", "三高", "都有", "病")):
+                    updates[k] = v
+                elif k == "family_history" and any(w in text for w in ("家人", "父母", "爸", "媽", "遺傳", "長輩", "家裡")):
+                    updates[k] = v
+                elif k == "symptom_onset" and any(w in text for w in ("天", "週", "月", "年", "前", "昨天", "最近", "開始")):
+                    updates[k] = v
+                elif k == "symptom_description" and any(w in text for w in ("渴", "尿", "暈", "累", "痛", "抖", "癢", "高", "低", "不舒服", "症狀", "睡")):
+                    updates[k] = v
+                elif k == "questions_for_doctor" and any(w in text for w in ("問", "請教", "可以", "能", "注意", "問題")):
+                    updates[k] = v
+                elif any(str(val).lower() in text.lower() for val in (v if isinstance(v, list) else [v])):
+                    updates[k] = v
+
             return updates if updates else None
         except Exception as exc:
             logger.warning("LLM extraction failed, falling back to deterministic: %s", exc)
@@ -284,10 +307,10 @@ class LeanIntakeAgent:
             if m_med:
                 updates["known_medications"] = [m_med.group(1)]
 
-        if any(w in s for w in ("口渴", "頻尿", "夜尿", "頭暈", "手抖", "血糖高", "吃不飽")) and "symptom_description" not in updates:
+        if any(w in s for w in ("口渴", "頻尿", "夜尿", "頭暈", "手抖", "血糖高", "吃不飽", "想睡覺")) and "symptom_description" not in updates:
             updates["symptom_description"] = s
 
-        if any(w in s for w in ("天前", "週前", "月前", "昨天", "最近一週", "幾天前")) and "symptom_onset" not in updates:
+        if any(w in s for w in ("天前", "週前", "月前", "昨天", "最近一週", "幾天前", "禮拜前")) and "symptom_onset" not in updates:
             updates["symptom_onset"] = s
 
         # 3. 否定回答（沒有、無、沒過敏、沒吃藥...）

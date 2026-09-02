@@ -2070,36 +2070,23 @@ def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any)
                 _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
         return resp
 
-    text_for_processing = text
-    if getattr(sess, "pending_field", None) == "questions_for_doctor":
-        # Keep the patient bubble verbatim, but avoid storing its lead-in as a
-        # second doctor question.
-        text_for_processing = _clean_previsit_doctor_question(text) or text
     try:
-        result = orch._process_text(sess, text_for_processing)
+        from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
+        agent = LeanIntakeAgent.from_env()
+        updated_sess, agent_resp = agent.process_turn(sess, text)
+        saved = orch.repository.save(updated_sess, expected_version=sess.version)
+        agent_resp["version"] = saved.version
+        if body.client_message_id:
+            with _web_chat_lock:
+                _web_chat_dedup[(sess.session_id, body.client_message_id)] = agent_resp
+        return agent_resp
+    except HTTPException:
+        raise
     except Exception as exc:
+        from tfda_context_gate.product_session import ProductSessionConflict as _PSC
+        if isinstance(exc, _PSC) or "conflict" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Version conflict") from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    saved = orch.repository.get(sess.session_id)
-    if saved is None:
-        try:
-            saved = orch.repository.get(result.session_id)  # type: ignore[attr-defined]
-        except Exception:
-            saved = sess
-    if saved is None:
-        saved = sess
-    result_status = getattr(result, "status", saved.status)
-    resp = {"reply": getattr(result, "reply", ""), "status": result_status, "intake_stage": getattr(saved, "intake_stage", sess.intake_stage), "version": getattr(saved, "version", sess.version), "intake_snapshot": saved.intake_snapshot.model_dump(mode="json") if hasattr(saved, "intake_snapshot") else sess.intake_snapshot.model_dump(mode="json")}
-    resp["reply"] = _naturalize_previsit_reply(
-        resp["reply"],
-        text,
-        sess,
-        saved,
-        result_status,
-    )
-    if body.client_message_id:
-        with _web_chat_lock:
-            _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
-    return resp
 
 
 @app.post("/api/patient/previsit-room/chat")
