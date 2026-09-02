@@ -2035,41 +2035,6 @@ def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any)
         except Exception:
             pass
 
-    if text in ("開始新的整理", "開始整理"):
-        first_q = "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。"
-        new_sess = sess.model_copy(update={
-            "authorization_status": AuthorizationStatus.PATIENT_SELF,
-            "subject_id_hash": sess.principal_id_hash,
-            "information_source": InformationSource.SELF_REPORTED,
-            "permission_scopes": [
-                PermissionScope.CREATE_OWN_INTAKE,
-                PermissionScope.VIEW_OWN_SUMMARY,
-                PermissionScope.SHARE_OWN_SUMMARY,
-            ],
-            "status": "ACTIVE",
-            "intake_snapshot": PreVisitIntake(),
-            "intake_stage": "stage1",
-            "pending_field": "known_medications",
-            "pending_question": first_q,
-            "pending_action": None,
-        }, deep=True)
-        try:
-            saved = orch.repository.save(new_sess, expected_version=sess.version)
-        except Exception:
-            saved = new_sess
-        resp = {
-            "reply": first_q,
-            "status": "ACTIVE",
-            "intake_stage": "stage1",
-            "version": getattr(saved, "version", sess.version + 1),
-            "intake_snapshot": saved.intake_snapshot.model_dump(mode="json"),
-            "quick_replies": [{"label": "沒有吃藥", "text": "沒有吃藥"}, {"label": "不確定藥名", "text": "不確定藥名"}],
-        }
-        if body.client_message_id:
-            with _web_chat_lock:
-                _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
-        return resp
-
     try:
         from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
         agent = LeanIntakeAgent.from_env()
@@ -2080,6 +2045,7 @@ def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any)
             with _web_chat_lock:
                 _web_chat_dedup[(sess.session_id, body.client_message_id)] = agent_resp
         return agent_resp
+
     except HTTPException:
         raise
     except Exception as exc:
