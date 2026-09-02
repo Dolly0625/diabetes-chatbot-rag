@@ -3,19 +3,21 @@
 ## 一句話
 `v0.1` 主戰場：`A→B→C→D + E` 安全基線，三情境（衛教/看診前/醫護草稿）正式版 `mimo-v2.5 + bge-m3` 全 `PASS`。`V0.2` 僅藍圖。
 
-## 目前進度（安全基線 + LINE ProductSession）
-- ✅ `b_context_gate` 15欄 + `task_type/tool_context` 預留 + 風險等級
-- ✅ `A` 正式版插頭（`mimo-v2.5` 來自 `.env`），`RAG bge-m3` 快取（24s→0.17s，Ollama `bge-m3:latest`）
-- ✅ `HPA` 飲食庫：`食品營養 2塊 + 指標手冊 3塊 + 糖尿病與我 4塊` 共 9 塊，`TFDA` 129 + `HPA` 並存
-- ✅ `ToolContract`（`Registry/Executor` allowlist）、`看診前 8欄3階段`（`known_medications/allergies/chronic/family/symptom_*`）、`醫護草稿` 詳細4段
-- ✅ `Stream`（先緩存、D 驗過才推）、`藥袋 QR→PaddleOCR`（QR優先）、`對話自動觸發`（`要看醫生` 不用按鈕）
-- ✅ 修2卡關：飲食 `D 絕對缺乏` 誤判、`A 藥品一般題 M 誤擋`
-- ✅ 藥袋提醒「看藥袋」2次追問 + FHIR `unknown`、重構 Step1-2（`.gitignore`、歸檔 `report_handoff`、`藥袋圖 → fixtures`）
-- ✅ LINE 多輪 `ProductSession`、病患／家屬同介面、三階段 intake、Review & Confirm、一次性 10 分鐘分享 grant
-- ✅ LINE webhook 預設 fail-closed；event id 綁定 hashed principal，具 lease recovery 與舊 worker fencing，跨使用者重播拒絕
-- ✅ 紅旗風險對同一 subject 單調累積；摘要與分享 snapshot 都必須通過固定 D Gate，紅旗回覆明確要求停止一般操作並聯絡 119／急診
-- ✅ SQLite TTL／retention 清理：session 7 天、share grant 到期、webhook replay payload 1 天、clinician audit 90 天；raw 藥袋圖片不落盤
-- ✅ Demo 醫護入口需同時開啟 `LINE_DEMO_MODE=true` 且命中 allowlist；正式環境仍須院方 SSO/OIDC
+## 目前進度（安全基線 + LINE ProductSession + 2026-09-02 最新實裝）
+- `b_context_gate` 15欄 + `task_type/tool_context` 預留 + 風險等級
+- `A` 正式版插頭（`mimo-v2.5` 來自 `.env`），`RAG bge-m3` 快取（24s→0.17s，Ollama `bge-m3:latest`）
+- `HPA` 飲食庫：`食品營養 2塊 + 指標手冊 3塊 + 糖尿病與我 4塊` 共 9 塊，`TFDA` 129 + `HPA` 並存；對齊 RAG 組國健署手冊飲食題向量相似度門檻
+- `ToolContract`（`Registry/Executor` allowlist）、`看診前 8欄3階段`（`known_medications/allergies/chronic/family/symptom_*`）、`醫護草稿` 詳細4段
+- `Stream`（先緩存、D 驗過才推）、`藥袋多模態 Vision LLM + 醫院 QR 直連解析`、`雙輪次看診前互動問答`（Turn 1 健康史 ➔ Turn 2 承接並帶入藥袋確認）
+- `藥名智慧去重與正規化`（同成分中文品名、英文學名、劑量規格聚合為單一標準品名）
+- `手機端防快取與狀態同步`（動態時間戳 URL + Anti-Cache Fetch + 競爭條件樂觀鎖刷新）
+- 修2卡關：飲食 `D 絕對缺乏` 誤判、`A 藥品一般題 M 誤擋`
+- 藥袋提醒「看藥袋」2次追問 + FHIR `unknown`、重構 Step1-2（`.gitignore`、歸檔 `report_handoff`、`藥袋圖 → fixtures`）
+- LINE 多輪 `ProductSession`、病患／家屬同介面、三階段 intake、Review & Confirm、一次性 10 分鐘分享 grant
+- LINE webhook 預設 fail-closed；event id 綁定 hashed principal，具 lease recovery 與舊 worker fencing，跨使用者重播拒絕
+- 紅旗風險對同一 subject 單調累積；摘要與分享 snapshot 都必須通過固定 D Gate，紅旗回覆明確要求停止一般操作並聯絡 119／急診
+- SQLite TTL／retention 清理：session 7 天、share grant 到期、webhook replay payload 1 天、clinician audit 90 天；raw 藥袋圖片不落盤
+- Demo 醫護入口需同時開啟 `LINE_DEMO_MODE=true` 且命中 allowlist；正式環境仍須院方 SSO/OIDC
 
 ## 目錄現況（剛重構）
 ```
