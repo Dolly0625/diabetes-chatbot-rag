@@ -37,7 +37,7 @@ def is_welcome_trigger(text: str) -> bool:
         normalized = unicodedata.normalize("NFKC", text).strip()
         if not normalized:
             return True
-        if len(normalized) < 4 and normalized in ("你好", "您好", "hi", "hello", "嗨", "哈囉", "開始", "help", "？", "?", "…"):
+        if len(normalized) < 6 and normalized in ("你好", "您好", "hi", "hello", "嗨", "哈囉", "早安", "午安", "晚安", "開始", "help", "？", "?", "…"):
             return True
         return False
     except Exception:

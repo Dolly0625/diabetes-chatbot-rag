@@ -80,7 +80,7 @@ class RuleBasedSignalExtractor:
     # G2 chit-chat whitelist: benign short sentences → O_OUT_OF_SCOPE (not RISK_FLAG)
     # 僅含無害閒聊，優先於 _out_of_scope 判斷；Keep Traditional Chinese
     _chit_chat = re.compile(
-        r"想睡覺|想睡了|無聊|你好|哈囉|晚安|你好嗎|嗨|"
+        r"想睡覺|想睡了|無聊|你好|您好|哈囉|早安|午安|晚安|你好嗎|嗨|"
         r"你可以跟我說什麼|你可以說什麼|你能做什麼|你能幫什麼|"
         r"可以跟我說什麼|能做什麼|能幫我做什麼|功能介紹|我能問什麼|你會做什麼|系統能做什麼|"
         r"你是誰|你是AI|你是機器人|叫什麼|什麼名字|怎麼稱呼",

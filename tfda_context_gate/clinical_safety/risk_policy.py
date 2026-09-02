@@ -18,7 +18,7 @@ class RiskSignalPolicy:
         ("CHEST_PAIN", re.compile(r"胸痛|胸悶|胸口.{0,3}?痛|胸口.{0,3}?悶|悶悶|chest pain", re.IGNORECASE)),
         # BREATHING_DIFFICULTY: 保留既有並補口語「走.*喘」「走幾步.*喘」; 限定以「走」為前綴避免單字「喘/喘氣」誤報
         ("BREATHING_DIFFICULTY", re.compile(r"喘不過氣|呼吸困難|呼吸急促|走.*喘|走幾步.*喘|shortness of breath", re.IGNORECASE)),
-        ("ALTERED_CONSCIOUSNESS", re.compile(r"意識不清|昏迷|昏厥|叫不醒|unconscious", re.IGNORECASE)),
+        ("ALTERED_CONSCIOUSNESS", re.compile(r"意識不清|意識模糊|意識混亂|昏迷|昏厥|叫不醒|快暈倒|暈倒|unconscious", re.IGNORECASE)),
         ("PERSISTENT_VOMITING", re.compile(r"持續嘔吐|一直吐|反覆嘔吐", re.IGNORECASE)),
         ("MAJOR_BLEEDING", re.compile(r"大量出血", re.IGNORECASE)),
         ("PERSISTENT_HIGH_FEVER", re.compile(r"高燒不退", re.IGNORECASE)),
@@ -66,12 +66,14 @@ class RiskSignalPolicy:
 
     @staticmethod
     def _is_general_education_inquiry(text: str) -> bool:
-        if re.search(r"我現在|我目前|我剛剛?|快暈倒|叫不醒|抽搐|昏迷|痛到|快受不了", text):
+        if re.search(r"我現在|我目前|我剛剛?|叫不醒|抽搐|昏迷|痛到|快受不了", text):
             return False
         if re.search(r"^(?:請問|想了解|想問|請教|請說明|為什麼|如何|怎樣)", text):
-            if re.search(r"怎麼辦|如何處理|怎麼處理|的原因|有什麼症狀|是什麼|要吃什麼|要怎麼做|嗎[？\?]?$|[？\?]$", text):
+            if re.search(r"怎麼辦|如何處理|怎麼處理|該怎麼處理|的原因|有什麼症狀|是什麼|要吃什麼|要怎麼做|嗎[？\?]?$|[？\?]$", text):
                 return True
-        if re.search(r"(?:如果|若|要是).*(?:該怎麼辦|要怎麼處理|如何處理|可以吃什麼|要吃什麼)", text):
+        if re.search(r"(?:如果|若|要是).*(?:該怎麼辦|怎麼辦|該怎麼處理|要怎麼處理|怎麼處理|如何處理|可以吃什麼|要吃什麼|該如何|怎麼做)", text):
+            return True
+        if re.search(r"(?:該怎麼辦|怎麼辦|該怎麼處理|要怎麼處理|怎麼處理|如何處理|該如何做|該怎麼做)", text) and re.search(r"(?:如果|若|要是|請問|想問|想了解|請教|請說明|時|時該)", text):
             return True
         return False
 
