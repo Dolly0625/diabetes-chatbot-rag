@@ -69,6 +69,7 @@ class ProductSession(BaseModel):
     pending_severity_raw: str | None = None  # hedge 原句 provenance
     pending_question_proposal: str | None = None  # HONEST_FALLBACK 待同意提案，去重用
     system_risk_classification: dict[str, Any] | None = None
+    intake_field_provenance: dict[str, str] = Field(default_factory=dict)
     status: SessionStatus = "ACTIVE"
     version: int = Field(default=0, ge=0)
     created_at: datetime
@@ -129,6 +130,7 @@ class ShareGrant(BaseModel):
     output_gate_result: dict[str, Any] = Field(default_factory=dict)
     system_risk_classification: dict[str, Any] | None = None
     information_source: InformationSource | None = None
+    intake_field_provenance: dict[str, str] = Field(default_factory=dict)
     status: Literal["ACTIVE", "USED", "REVOKED"] = "ACTIVE"
     single_use: bool = True
     created_at: datetime

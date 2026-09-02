@@ -564,11 +564,45 @@ class MedicationBagOCRService:
             except Exception:
                 pass
 
-        # Fallback to easyocr or just return empty
+        # Fallback to Vision LLM (mimo-v2.5) if available and traditional OCR text is still empty
+        if not ocr_text:
+            try:
+                import base64
+                from tfda_context_gate.run_config import env_value
+                from langchain_openai import ChatOpenAI
+                from langchain_core.messages import HumanMessage
+
+                model = env_value("ROUTER_LLM_MODEL", "") or ""
+                base_url = env_value("OPENCODE_BASE_URL") or env_value("OPENAI_BASE_URL")
+                api_key = env_value("OPENCODE_API_KEY") or env_value("OPENAI_API_KEY")
+                if model and (base_url or api_key):
+                    bare = model.split("/", 1)[-1] if "/" in model else model
+                    llm = ChatOpenAI(
+                        model=bare,
+                        api_key=api_key,
+                        base_url=base_url,
+                        temperature=0,
+                        timeout=25.0,
+                        extra_body={"reasoning": {"effort": "none"}} if "mimo" in model.lower() else {},
+                    )
+                    b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    msg = HumanMessage(content=[
+                        {"type": "text", "text": "請辨識這張藥袋照片上的所有文字與藥品資訊（包含中文藥名、英文學名/商品名、劑量規格、用法用量）。請以條列方式輸出辨識出的文字。"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ])
+                    resp = llm.invoke([msg])
+                    if resp and resp.content:
+                        ocr_text = str(resp.content).strip()
+                        ocr_used = True
+                        ocr_confidence = 0.85
+            except Exception:
+                pass
+
         if not ocr_text:
             # Try to at least detect if image is valid
             try:
                 from PIL import Image
+
                 img = Image.open(io.BytesIO(image_bytes))
                 # If image is valid but OCR failed, mark low-res
                 if img.size[0] < 500 or img.size[1] < 500:
@@ -588,6 +622,17 @@ class MedicationBagOCRService:
         masked = _hospital_mask_text(ocr_text)
         meds, tfda_conf = _tfda_44k_correction(ocr_text, self._drug_list)
 
+        # Fallback: Structured key-value regex extraction for Vision LLM / OCR outputs
+        if not meds and ocr_text:
+            for line in ocr_text.split("\n"):
+                line = line.strip()
+                m_drug = re.search(r"[\*]*(?:藥名|中文名|英文名|學名|商品名|藥品)[^*：:\n]*[：:]\s*(.+)", line)
+                if m_drug:
+                    val = m_drug.group(1).strip().strip("*").strip()
+                    if val and len(val) >= 2 and val not in meds:
+                        meds.append(val)
+                        tfda_conf = 0.85
+
         # Fallback: Drug Name regex for medication bags (e.g., TEGRETOL/Carbamazepine)
         # TFDA list may not contain all drugs (e.g., TEGRETOL), so try direct extraction
         if not meds:
@@ -602,36 +647,66 @@ class MedicationBagOCRService:
                         meds = [drug_line]
                         tfda_conf = 0.85
                         # Also try to extract parenthetical as separate but dedup later
-            # Additional fallback: known drug keywords even if not in TFDA list
-            if not meds:
-                fallback_drugs = ["TEGRETOL", "Carbamazepine", "癲通", "卡巴氮平", "Carbamazepine"]
-                for fd in fallback_drugs:
-                    if fd.lower() in ocr_text.lower():
-                        if fd not in meds:
-                            meds.append(fd)
-                        tfda_conf = 0.8
-                        break
-            # MG pattern fallback - strict: must have drug-like name, not generic instructions
-            if not meds:
-                mg_pat = re.compile(r"([A-Za-z0-9\-]+)\s*\d+\s*mg", re.IGNORECASE)
-                for m2 in mg_pat.finditer(ocr_text):
-                    cand = m2.group(0).strip()
-                    if cand and len(cand) > 3 and len(cand) < 50:
-                        # Filter generic instruction text
-                        if any(x in cand.lower() for x in ["at bedtime", "milligram", "directions", "empty stomach", "with food"]):
-                            continue
-                        if cand.lower().startswith("mg") or cand.lower() == "mg = milligram":
-                            continue
-                        meds.append(cand)
-                        tfda_conf = 0.6
-                        if len(meds) >= 2:
-                            break
-                # If still no meds and text is generic instructions, return empty
-                if not meds and any(x in ocr_text.lower() for x in ["directions for use", "at bedtime", "empty stomach"]):
-                    # Check if Drug Name not found, then it's likely back side with no meds
-                    if "Drug Name:" not in ocr_text:
-                        meds = []
-                        tfda_conf = 0.0
+        # Fallback: known drug keywords even if not in TFDA list
+        if not meds and ocr_text:
+            fallback_drugs = ["TEGRETOL", "Carbamazepine", "癲通", "卡巴氮平", "metformin", "glipizide"]
+            for fd in fallback_drugs:
+                if fd.lower() in ocr_text.lower():
+                    if fd not in meds:
+                        meds.append(fd)
+                    tfda_conf = 0.8
+                    break
+
+        # If traditional OCR did not yield any meds, invoke Vision LLM (mimo-v2.5) with the raw image
+        if not meds:
+            try:
+                import base64
+                from tfda_context_gate.run_config import env_value
+                from langchain_openai import ChatOpenAI
+                from langchain_core.messages import HumanMessage
+
+                model = env_value("ROUTER_LLM_MODEL", "") or ""
+                base_url = env_value("OPENCODE_BASE_URL") or env_value("OPENAI_BASE_URL")
+                api_key = env_value("OPENCODE_API_KEY") or env_value("OPENAI_API_KEY")
+                if model and (base_url or api_key):
+                    bare = model.split("/", 1)[-1] if "/" in model else model
+                    llm = ChatOpenAI(
+                        model=bare,
+                        api_key=api_key,
+                        base_url=base_url,
+                        temperature=0,
+                        timeout=25.0,
+                        extra_body={"reasoning": {"effort": "none"}} if "mimo" in model.lower() else {},
+                    )
+                    b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    msg = HumanMessage(content=[
+                        {"type": "text", "text": "請辨識這張藥袋照片，直接列出藥袋上的藥品名稱（包含中文藥名、英文商品名/學名、規格劑量）。請逐行列出藥品名稱即可，不要有多餘說明。"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ])
+                    resp = llm.invoke([msg])
+                    if resp and resp.content:
+                        v_text = str(resp.content).strip()
+                        ocr_text = (ocr_text + "\n" + v_text).strip() if ocr_text else v_text
+                        ocr_used = True
+                        v_meds, v_conf = _tfda_44k_correction(v_text, self._drug_list)
+                        if v_meds:
+                            meds = v_meds
+                            tfda_conf = max(0.85, v_conf)
+                        else:
+                            for line in v_text.split("\n"):
+                                line = line.strip().lstrip("-*•0123456789. ")
+                                m_drug = re.search(r"[\*]*(?:藥名|中文名|英文名|學名|商品名|藥品)[^*：:\n]*[：:]\s*(.+)", line)
+                                if m_drug:
+                                    val = m_drug.group(1).strip().strip("*").strip()
+                                    if val and len(val) >= 2 and val not in meds:
+                                        meds.append(val)
+                                        tfda_conf = 0.85
+                                elif len(line) >= 2 and not any(w in line for w in ("醫院", "診所", "用法", "用量", "副作用", "病歷", "姓名", "醫師", "藥師", "日期", "注意事項", "口服", "每日", "錠", "粒", "天")):
+                                    if not re.search(r"忽略|解除|提示|prompt", line, re.I):
+                                        meds.append(line)
+                                        tfda_conf = 0.85
+            except Exception as e:
+                pass
 
         # Final filter: remove generic instruction meds (back side)
         filtered_meds: list[str] = []
@@ -713,15 +788,34 @@ class MedicationBagOCRService:
             if best_qr:
                 qr_type = best_qr["parsed"]["qr_type"]
                 if qr_type == "url":
-                    # URL QR: handle directly, don't hallucinate meds from URL
-                    # Front bag URL is hospital link, not medication data
                     qr_used = True
                     qr_data = best_qr["parsed"]
-                    # URL QR does not contain meds; fallback to OCR for meds
-                    # But mark qr_used=True to indicate QR was found
+                    url = best_qr["parsed"]["parsed"].get("url", "")
                     meds = []
                     confidence = 0.0
-                    # Will fallback to OCR below
+                    # If it's a hospital medication detail URL, fetch official medication details directly
+                    if best_qr["parsed"]["parsed"].get("is_hospital_url") and url:
+                        try:
+                            import httpx
+                            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                            resp = httpx.get(url, headers=headers, follow_redirects=True, timeout=3.0, verify=False)
+                            if resp.status_code == 200:
+                                h_text = re.sub(r"<script.*?</script>", "", resp.text, flags=re.DOTALL)
+                                h_text = re.sub(r"<style.*?</style>", "", h_text, flags=re.DOTALL)
+                                h_text = re.sub(r"<[^>]+>", "\n", h_text)
+                                lines = [re.sub(r"\s+", " ", l).strip() for l in h_text.splitlines() if l.strip()]
+                                h_meds = []
+                                for idx, line in enumerate(lines):
+                                    if any(k in line for k in ["中文藥名", "英文藥名", "藥品名稱", "學名", "商品名"]):
+                                        if idx + 1 < len(lines):
+                                            next_line = lines[idx + 1].strip()
+                                            if next_line and len(next_line) >= 2 and not any(k in next_line for k in ["藥名", "劑量", "用法", "外觀"]):
+                                                h_meds.append(next_line)
+                                if h_meds:
+                                    meds = list(dict.fromkeys(h_meds))
+                                    confidence = 0.95
+                        except Exception:
+                            pass
                 elif qr_type in ("nhi_csd1", "nhi_partial", "encrypted"):
                     # NHI QR: try to extract meds from parsed data
                     qr_used = True

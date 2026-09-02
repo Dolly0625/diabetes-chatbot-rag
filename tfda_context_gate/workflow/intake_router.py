@@ -60,19 +60,11 @@ def is_red_flag(text: str) -> bool:
 
 
 def should_append_post_answer_invitation(a_result: Any, has_intake: bool) -> bool:
-    # LINE is the daily-chat / education surface.  Pre-visit collection has a
-    # dedicated web room reached from the Rich Menu, so silently appending the
-    # retired "start intake" CTA to every education answer is both confusing
-    # and a route back toward the legacy questionnaire.
     return False
 
 
 def append_post_answer_invitation(response: str, has_intake: bool = False) -> str:
-    if has_intake:
-        return response
-    if POST_ANSWER_INVITATION in response:
-        return response
-    return f"{response}\n\n{POST_ANSWER_INVITATION}（可點「我要準備看診」快速開始）"
+    return response
 
 
 def is_intake_query(

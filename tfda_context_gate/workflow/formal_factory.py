@@ -83,12 +83,12 @@ def _build_formal_generator():
         env_value("C_GENERATOR_LLM_TIMEOUT_S", "")
         or env_value("FORMAL_C_LLM_TIMEOUT_S", "")
         or env_value("CONVERSATION_LLM_TIMEOUT_S", "")
-        or "8"
+        or "25"
     )
     try:
         c_timeout = max(0.1, float(timeout_raw))
     except (TypeError, ValueError):
-        c_timeout = 8.0
+        c_timeout = 25.0
     kwargs["timeout"] = c_timeout
     # request_timeout is accepted by older langchain-openai versions and is
     # harmlessly ignored by newer versions that alias it to timeout.

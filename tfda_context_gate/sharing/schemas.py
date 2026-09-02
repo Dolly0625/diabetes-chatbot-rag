@@ -18,8 +18,6 @@ class ShareGrantIssue(BaseModel):
 
 
 class ClinicianSharedSummary(BaseModel):
-    """醫護端唯讀 DTO，不暴露 LINE ID、grantor hash 或 token hash。"""
-
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     grant_id: str
@@ -28,5 +26,6 @@ class ClinicianSharedSummary(BaseModel):
     output_gate_result: dict[str, Any]
     system_risk_classification: dict[str, Any] | None = None
     information_source: InformationSource | None = None
+    intake_field_provenance: dict[str, str] = Field(default_factory=dict)
     expires_at: datetime
     accessed_at: datetime

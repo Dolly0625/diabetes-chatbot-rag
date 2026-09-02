@@ -20,15 +20,18 @@ from typing import Any
 
 # 可不呼叫 AI 的高精度封閉值：顯式產品命令已在 orchestrator 1160 前段處理，
 # 此處白名單僅涵蓋「pending 單值回答」。
-_SEVERITY_EXPLICIT_RE = re.compile(r"(輕度|中度|重度|嚴重|\d+\s*分|\d+\s*/\s*\d+)", re.IGNORECASE)
-_SEVERITY_PURE_RE = re.compile(r"^\s*(\d+\s*分|輕度|中度|重度|嚴重)\s*[。！!？?]*\s*$")
+_SEVERITY_EXPLICIT_RE = re.compile(r"(輕度|中度|重度|\d+\s*分|\d+\s*/\s*\d+|\b(10|[1-9])\b)", re.IGNORECASE)
+_SEVERITY_PURE_RE = re.compile(r"^\s*(大概|大約|約|差不多)?\s*(10|[1-9]|\d+\s*分|\d+\s*/\s*\d+|輕度|中度|重度)\s*(分|左右|吧)?\s*[。！!？?]*\s*$")
 
 # allergies / meds 封閉否定（pending 對應欄位時才可 fast-path）
 _ALLERGY_NEG_RE = re.compile(r"^\s*(沒有|無|沒有過敏|無過敏|不過敏|沒有[藥物]?過敏|目前沒有過敏)\s*[。！!？?]*\s*$")
-_MEDS_NEG_RE = re.compile(r"^\s*(沒有|無|沒有用藥|沒有在吃藥|目前沒有用藥|目前沒有吃藥|沒有固定.*藥|沒有服用.*藥)\s*[。！!？?]*\s*$")
+_MEDS_NEG_RE = re.compile(r"^\s*(沒有|無|沒有用藥|沒有在吃藥|沒有吃藥|沒吃藥|沒有固定.*藥|沒有服用.*藥|目前沒有用藥|目前沒有吃藥)\s*[。！!？?]*\s*$")
 _CHRONIC_NEG_RE = re.compile(r"^\s*(沒有|無|沒有慢性病|無慢性病)\s*[。！!？?]*\s*$")
 _FAMILY_NEG_RE = re.compile(r"^\s*(沒有|無|沒有家族史|無家族史|家族沒有)\s*[。！!？?]*\s*$")
 _UNCERTAIN_BARE_RE = re.compile(r"^\s*(不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚|不太知道)\s*[啊欸呢啦哦喔嗎]?[？?。!！]*\s*$")
+# Fast-path positive closed vocab for intake (no LLM needed)
+_ALLERGY_POS_RE = re.compile(r"^\s*(花生|花生過敏|海鮮|蝦|蟹|藥物過敏|無)\s*[。！!？?]*\s*$")
+_CHRONIC_POS_RE = re.compile(r"^\s*(三高|高血壓|高血脂|高膽固醇|糖尿病|高血壓、高血脂|高血壓、高血脂、高膽固醇)\s*[。！!？?]*\s*$")
 
 # 多子句標記（需進 AI，避免只抓半句）
 _CLAUSE_MARKERS = ("而且", "另外", "還有", "但是", "順便", "又", "也", "加上", "以及", "然後", "再來", "同時", "不過", "可是")
@@ -75,6 +78,14 @@ _CHRONIC_VARIANTS: dict[str, list[str]] = {
     "高血壓": ["高血壓", "hypertension", "htn", "high blood pressure", "high-blood-pressure"],
     "糖尿病": ["糖尿病", "diabetes", "diabetes mellitus", "dm"],
     "高血脂": ["高血脂", "高脂血症", "hyperlipidemia", "hyperlipidaemia"],
+    "高膽固醇": ["高膽固醇", "高胆固醇", "hypercholesterolemia", "hypercholesterolaemia", "high cholesterol", "高膽固醇血症"],
+}
+
+_SANHIGH_EXPANSION: list[str] = ["高血壓", "高血脂", "高膽固醇"]
+_SANHIGH_KEYS: set[str] = {_normalize_canonical_key("三高"), _normalize_canonical_key("三高症")}
+
+_ALLERGY_VARIANTS: dict[str, list[str]] = {
+    "花生": ["花生", "peanut", "peanuts", "花生過敏", "peanut allergy", "花生过敏"],
 }
 
 _MED_VARIANTS: dict[str, list[str]] = {
@@ -95,36 +106,9 @@ def _build_canonical_map(variants: dict[str, list[str]]) -> dict[str, str]:
 
 _CHRONIC_CANONICAL_MAP: dict[str, str] = _build_canonical_map(_CHRONIC_VARIANTS)
 _MED_CANONICAL_MAP: dict[str, str] = _build_canonical_map(_MED_VARIANTS)
-
-_SLUG_CANONICAL_MAP: dict[str, str] = {
-    "nocurrentmedications": "目前無用藥",
-    "nomedications": "目前無用藥",
-    "nomeds": "目前無用藥",
-    "noallergies": "無",
-    "noallergy": "無",
-    "nochronicconditions": "無",
-    "nochronic": "無",
-    "nofamilyhistory": "無",
-    "noquestions": "目前無特別想問的問題",
-    "noquestion": "目前無特別想問的問題",
-    "twoweeksago": "兩週前",
-    "twoweekago": "兩週前",
-    "2weeksago": "兩週前",
-    "oneweekago": "一週前",
-    "1weekago": "一週前",
-    "onemonthago": "一個月前",
-    "1monthago": "一個月前",
-    "threemonthsago": "三個月前",
-    "3monthsago": "三個月前",
-    "severaldaysago": "幾天前",
-    "afewdaysago": "幾天前",
-    "recently": "最近",
-    "today": "今天",
-    "yesterday": "昨天",
-    "mild": "輕度",
-    "moderate": "中度",
-    "severe": "重度",
-}
+_ALLERGY_CANONICAL_MAP: dict[str, str] = _build_canonical_map(_ALLERGY_VARIANTS)
+_COLLOQUIAL_MED_RE = re.compile(r"白色.*藥丸|小藥丸|藥丸|膠囊|紅色.*藥|黃色.*藥|藍色.*藥|圓形.*藥|長條.*藥|大顆.*藥|小顆.*藥")
+_UNCERTAIN_PHRASE_RE = re.compile(r"不知道|不記得|忘了|忘記|不確定|不清楚|沒印象|記不得|不太清楚|不太知道")
 
 _CHRONIC_NEGATION_RE = re.compile(r"(沒有|無|否認|未有|不曾|沒得|未曾|沒有得|沒有患|未患|不是.*高血壓|沒有.*高血壓)")
 _CHRONIC_QUESTION_RE = re.compile(r"(是什麼|是甚麼|是什麼\?|是甚麼\?|什麼是|為何|為甚麼|怎麼|如何)")
@@ -137,18 +121,80 @@ def _canonicalize_value(field: str, value: str) -> str:
     if v == "無":
         return v
     key = _normalize_canonical_key(v)
-    if key in _SLUG_CANONICAL_MAP:
-        return _SLUG_CANONICAL_MAP[key]
+    if key in _SANHIGH_KEYS and field == "chronic_conditions":
+        return "三高"
     if field == "chronic_conditions":
         return _CHRONIC_CANONICAL_MAP.get(key, v)
+    if field == "allergies":
+        low = v.lower()
+        if "peanut" in low or "花生" in v:
+            return "花生"
+        base = v.replace("過敏", "").strip()
+        base_key = _normalize_canonical_key(base) if base else key
+        if base_key in _ALLERGY_CANONICAL_MAP:
+            return _ALLERGY_CANONICAL_MAP[base_key]
+        if key in _ALLERGY_CANONICAL_MAP:
+            return _ALLERGY_CANONICAL_MAP[key]
+        for k, canon in _ALLERGY_CANONICAL_MAP.items():
+            if k and k in key:
+                if key == k or key == k + _normalize_canonical_key("過敏") or key == _normalize_canonical_key(canon + "過敏"):
+                    return canon
+        return v
     if field == "known_medications":
-        # 僅精確 alias 才去重；成份後帶劑型/鹽類/亞類時不可因包含子字串就錯併
-        # 例：insulin glargine / insulin degludec / metformin XR / metformin 500mg 皆保留原值
         canon = _MED_CANONICAL_MAP.get(key)
         if canon:
             return canon
         return v
     return v
+
+
+def _expand_sanhigh_candidates(cands: list[MergedCandidate]) -> list[MergedCandidate]:
+    out: list[MergedCandidate] = []
+    for c in cands:
+        if c.target_field == "chronic_conditions" and _normalize_canonical_key(c.value) in _SANHIGH_KEYS:
+            for exp in _SANHIGH_EXPANSION:
+                out.append(
+                    MergedCandidate(
+                        target_field=c.target_field,
+                        value=exp,
+                        confidence=c.confidence,
+                        source_quote=c.source_quote,
+                        raw=c.raw,
+                        source=c.source,
+                        explicitly_stated=c.explicitly_stated,
+                        requires_confirmation=c.requires_confirmation,
+                    )
+                )
+        else:
+            out.append(c)
+    return out
+
+
+def _split_combined_candidates(cands: list[MergedCandidate]) -> list[MergedCandidate]:
+    out: list[MergedCandidate] = []
+    for c in cands:
+        if c.target_field in ("chronic_conditions", "allergies", "known_medications", "family_history"):
+            if any(sep in c.value for sep in (",", "，", "、", "；", ";")):
+                parts = re.split(r"[，,、；;]+", c.value)
+                for p in parts:
+                    p = p.strip()
+                    if not p:
+                        continue
+                    out.append(
+                        MergedCandidate(
+                            target_field=c.target_field,
+                            value=p,
+                            confidence=c.confidence,
+                            source_quote=c.source_quote,
+                            raw=c.raw,
+                            source=c.source,
+                            explicitly_stated=c.explicitly_stated,
+                            requires_confirmation=c.requires_confirmation,
+                        )
+                    )
+                continue
+        out.append(c)
+    return out
 
 
 def _normalize_text(text: str) -> str:
@@ -195,7 +241,8 @@ def _clause_contains_value(clause: str, value: str, field: str = "chronic_condit
         if val_key and val_key in clause_key:
             return True
         canon = _canonicalize_value(field, value)
-        for var_key, c in _CHRONIC_CANONICAL_MAP.items():
+        canon_map = _CHRONIC_CANONICAL_MAP if field == "chronic_conditions" else _ALLERGY_CANONICAL_MAP if field == "allergies" else {}
+        for var_key, c in canon_map.items():
             if c == canon and var_key in clause_key:
                 return True
         canon_key = _normalize_canonical_key(canon) if canon else ""
@@ -247,6 +294,19 @@ def _is_chronic_negated(raw: str, value: str) -> bool:
         return False
     for clause in clauses:
         if _clause_contains_value(clause, value, "chronic_conditions"):
+            if _clause_is_negated(clause):
+                return True
+    return False
+
+
+def _is_allergy_negated(raw: str, value: str) -> bool:
+    if not raw or not value or value.strip() == "無":
+        return False
+    clauses = _split_into_clauses(raw)
+    if not clauses:
+        return False
+    for clause in clauses:
+        if _clause_contains_value(clause, value, "allergies"):
             if _clause_is_negated(clause):
                 return True
     return False
@@ -335,16 +395,19 @@ def is_fast_path_eligible(text: str, pending_field: str | None) -> bool:
 
     if pending_field == "symptom_severity" and _SEVERITY_PURE_RE.match(n):
         return True
-    if pending_field == "allergies" and _ALLERGY_NEG_RE.match(n):
+    if pending_field == "allergies" and (_ALLERGY_NEG_RE.match(n) or _ALLERGY_POS_RE.match(n)):
         return True
     if pending_field == "known_medications" and _MEDS_NEG_RE.match(n):
         return True
-    if pending_field == "chronic_conditions" and _CHRONIC_NEG_RE.match(n):
+    if pending_field == "chronic_conditions" and (_CHRONIC_NEG_RE.match(n) or _CHRONIC_POS_RE.match(n)):
         return True
     if pending_field == "family_history" and _FAMILY_NEG_RE.match(n):
         return True
+    if pending_field == "allergies" and _normalize_canonical_key(n) in _ALLERGY_CANONICAL_MAP:
+        return True
+    if pending_field == "chronic_conditions" and (_normalize_canonical_key(n) in _CHRONIC_CANONICAL_MAP or _normalize_canonical_key(n) in _SANHIGH_KEYS):
+        return True
     if _UNCERTAIN_BARE_RE.match(n):
-        # 僅當 pending 為症狀或用藥相關欄位時，bare uncertain 可 fast-path 為 sentinel
         if pending_field in ("symptom_onset", "symptom_description", "symptom_severity", "known_medications", "allergies", "chronic_conditions", "family_history"):
             return True
     return False
@@ -549,6 +612,27 @@ def validate_candidate(c: MergedCandidate) -> tuple[bool, str | None]:
         return False, "too_long"
     if not _check_provenance(c.source_quote, c.raw):
         return False, "provenance_fail"
+    if c.target_field == "known_medications":
+        if c.value.strip() in ("不清楚（待看診確認）", "待確認", "待看診確認"):
+            pass
+        else:
+            has_known = any(k.lower() in (c.value + " " + c.source_quote + " " + c.raw).lower() for k in ["metformin", "二甲雙胍", "二甲双胍", "胰島素", "insulin", "sglt2", "glp-1", "semaglutide", "阿卡波糖", "格列美脲"])
+            if not has_known and (_COLLOQUIAL_MED_RE.search(c.value) or _COLLOQUIAL_MED_RE.search(c.source_quote) or _COLLOQUIAL_MED_RE.search(c.raw)):
+                return False, "colloquial_medication_uncertain"
+            if _UNCERTAIN_PHRASE_RE.search(c.value) or _UNCERTAIN_PHRASE_RE.search(c.source_quote):
+                if c.value.strip() in ("不清楚", "不確定", "不知道", "不記得", "忘了", "忘記") or _UNCERTAIN_PHRASE_RE.search(c.raw):
+                    if not has_known:
+                        return False, "uncertain_medication"
+    if c.target_field == "allergies" and c.value.strip() != "無":
+        if _is_allergy_negated(c.raw, c.value) or _is_allergy_negated(c.source_quote, c.value):
+            return False, "polluted_negated_allergy"
+        for txt in (c.raw, c.source_quote):
+            if not txt:
+                continue
+            clauses = _split_into_clauses(txt)
+            for cl in clauses:
+                if _clause_contains_value(cl, c.value, "allergies") and is_question_like(cl):
+                    return False, "polluted_question_or_third_party"
     if c.target_field == "chronic_conditions":
         # 子句級污染：僅當候選所在子句為問句/他人/假設才攔截，避免整句掃描錯殺另一子句的正向候選
         _polluted_for_value = False
@@ -625,10 +709,9 @@ def merge_candidates(
     clarification_needed 為 [{field, reason, raw}]
     """
     all_cands = list(deterministic) + list(formal)
-    # 欄位限定 canonicalization 在合併層，原始對話不污染
     canonicalized: list[MergedCandidate] = []
     for c in all_cands:
-        if c.target_field == "chronic_conditions":
+        if c.target_field in ("chronic_conditions", "allergies"):
             try:
                 canon_val = _canonicalize_value(c.target_field, c.value)
             except Exception:
@@ -649,9 +732,8 @@ def merge_candidates(
             else:
                 canonicalized.append(c)
         else:
-            # known_medications 等：保留原值供儲存，去重時以 canonical key 判斷
             canonicalized.append(c)
-    all_cands = canonicalized
+    all_cands = _split_combined_candidates(_expand_sanhigh_candidates(canonicalized))
     all_cands.sort(key=lambda c: c.confidence, reverse=True)
 
     seen: set[tuple[str, str]] = set()
@@ -752,8 +834,8 @@ def candidates_to_intake_updates(
             vals: list[str] = []
             for c in clist:
                 raw_val = c.value.strip()
-                if any(sep in raw_val for sep in ("；", ";", "、")):
-                    parts = re.split(r"[；;、]", raw_val)
+                if any(sep in raw_val for sep in ("；", ";", "、", ",", "，")):
+                    parts = re.split(r"[；;、,，]", raw_val)
                     for p in parts:
                         p = p.strip()
                         if not p:
@@ -779,16 +861,12 @@ def candidates_to_intake_updates(
             except Exception:
                 seen_lower = {re.sub(r"\s+", "", x.lower()) for x in merged}
             for v in vals:
-                if field == "allergies":
-                    v = re.sub(r"^(我|我有|我有對|對)\s*", "", v).strip()
                 try:
                     key = re.sub(r"\s+", "", _canonicalize_value(field, v).lower())
                 except Exception:
                     key = re.sub(r"\s+", "", v.lower())
-                # Check if exact key exists or if a cleaner version already in seen
-                is_sub = any(key in s or s in key for s in seen_lower) if field in ("allergies", "chronic_conditions", "known_medications") else False
-                if (key not in seen_lower and not is_sub) and len(merged) < 10:
-                    if field in ("chronic_conditions", "known_medications"):
+                if key not in seen_lower and len(merged) < 10:
+                    if field == "chronic_conditions":
                         try:
                             v = _canonicalize_value(field, v)
                         except Exception:

@@ -175,6 +175,8 @@ def is_plausible_intake_value(text: str) -> bool:
         return False
     if re.fullmatch(r"(.)\1{2,}", compact):
         return False
+    if s in {"無", "1", "2", "3", "4", "5", "6", "7", "8", "9"}:
+        return True
     if len(s) < 2:
         return False
     if re.fullmatch(r"[^\w\u4e00-\u9fa5]+", s):
@@ -673,7 +675,9 @@ class PreVisitIntakeTool:
         if found:
             return found
         if self.is_colloquial_medication(text):
-            return None
+            return ["不清楚（待看診確認）"]
+        if is_uncertain_answer(text):
+            return ["不清楚（待看診確認）"]
         m = re.search(r"吃\s*([^\s，,。；;]+)", text)
         if m and m.group(1) not in found and len(m.group(1)) > 1:
             candidate = m.group(1).strip()
@@ -688,27 +692,147 @@ class PreVisitIntakeTool:
         return {"medications": meds, "confidence": confidence, "is_colloquial": is_colloquial, "needs_clarify": confidence < MEDICATION_CONFIDENCE_THRESHOLD and (is_colloquial or "藥" in text)}
 
     def _extract_allergies(self, text: str) -> list[str] | None:
-        if re.search(r"無過敏|沒有過敏|不過敏", text):
+        import unicodedata
+
+        def _split_clauses(t: str) -> list[str]:
+            try:
+                n = unicodedata.normalize("NFKC", t).strip()
+            except Exception:
+                n = t.strip()
+            parts = re.split(r"[，。,；;、.。！!？?]+", n)
+            clauses: list[str] = []
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                subs = re.split(r"(?:但是|不過|可是|然而|卻|但)", part)
+                for sp in subs:
+                    sp = sp.strip()
+                    if sp:
+                        clauses.append(sp)
+            return clauses or [t.strip()]
+
+        def _clause_negated(cl: str) -> bool:
+            return bool(re.search(r"沒有|無|否認|未有|不曾|沒得|應該沒有", cl))
+
+        def _clause_has_allergy(cl: str) -> bool:
+            return bool(re.search(r"過敏|花生|peanut", cl, re.IGNORECASE))
+
+        clauses = _split_clauses(text)
+        has_positive = False
+        for cl in clauses:
+            if _clause_has_allergy(cl) and not _clause_negated(cl):
+                has_positive = True
+                break
+        if re.search(r"無過敏|沒有過敏|不過敏", text) and not has_positive:
             return ["無"]
-        m = re.search(r"過敏[^，,。；;]*?([^\s，,。；;]+)過敏|對\s*([^\s，,。；;]+)\s*過敏", text)
-        if m:
-            val = m.group(1) or m.group(2)
-            if val:
-                return [val.strip()]
-        if "過敏" in text:
-            # Generic allergy mention without specific substance
-            return [text.strip()[:50]]
+        peanut_found = False
+        for cl in clauses:
+            if _clause_negated(cl):
+                continue
+            if re.search(r"花生|peanut", cl, re.IGNORECASE):
+                if re.search(r"過敏|會癢|癢|紅腫|腫", cl):
+                    peanut_found = True
+                    break
+                if "花生" in cl or "peanut" in cl.lower():
+                    peanut_found = True
+                    break
+        if peanut_found:
+            return ["花生"]
+        vals: list[str] = []
+        for cl in clauses:
+            if _clause_negated(cl) and _clause_has_allergy(cl):
+                continue
+            m = re.search(r"對\s*([^\s，,。；;]+)\s*過敏", cl)
+            if m:
+                v = m.group(1).strip()
+                if v and v not in vals:
+                    vals.append(v)
+                continue
+            m2 = re.search(r"([^\s，,。；;]+)過敏", cl)
+            if m2:
+                v = m2.group(1).strip()
+                if v in ("應該沒有", "沒有", "無"):
+                    continue
+                if v and v not in vals and len(v) <= 10:
+                    vals.append(v)
+        if vals:
+            normed: list[str] = []
+            for v in vals:
+                if re.search(r"peanut|花生", v, re.IGNORECASE):
+                    if "花生" not in normed:
+                        normed.append("花生")
+                else:
+                    normed.append(v)
+            return normed
+        for cl in clauses:
+            if not _clause_negated(cl) and "過敏" in cl:
+                return [cl.strip()[:50]]
+        if has_positive:
+            for cl in clauses:
+                if not _clause_negated(cl) and re.search(r"花生|peanut", cl, re.IGNORECASE):
+                    return ["花生"]
         return None
 
     def _extract_chronic(self, text: str) -> list[str] | None:
+        # Diet education question must not become chronic intake
+        if ("飲食" in text or "水果" in text) and re.search(r"[？?]|什麼|嗎|為什麼|如何", text):
+            return None
+        import unicodedata
+
+        def _split_clauses(t: str) -> list[str]:
+            try:
+                n = unicodedata.normalize("NFKC", t).strip()
+            except Exception:
+                n = t.strip()
+            parts = re.split(r"[，。,；;、.。！!？?]+", n)
+            clauses: list[str] = []
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                subs = re.split(r"(?:但是|不過|可是|然而|卻|但)", part)
+                for sp in subs:
+                    sp = sp.strip()
+                    if sp:
+                        clauses.append(sp)
+            return clauses or [t.strip()]
+
+        def _clause_negated(cl: str) -> bool:
+            return bool(re.search(r"沒有|無|否認|未有|不曾|沒得|未曾|沒有得|沒有患|未患|不是", cl))
+
+        # Diet education question must not become chronic intake
+        if "飲食" in text and re.search(r"[？?]|什麼|嗎|為什麼|如何", text):
+            return None
         if re.search(r"無慢性病|沒有慢性病|無其他疾病", text):
             return ["無"]
-        chronic_keywords = ["高血壓", "高血脂", "心臟病", "腎臟病", "高脂血症"]
-        found = [kw for kw in chronic_keywords if kw in text]
+        has_sanhigh = False
+        for cl in _split_clauses(text):
+            if "三高" in cl and not _clause_negated(cl):
+                has_sanhigh = True
+                break
+        if has_sanhigh:
+            return ["高血壓", "高血脂", "高膽固醇"]
+        chronic_keywords = ["高血壓", "高血脂", "高膽固醇", "心臟病", "腎臟病", "高脂血症", "糖尿病", "hypertension", "hyperlipidemia", "diabetes", "高膽固醇血症"]
+        _en_map = {"hypertension": "高血壓", "hyperlipidemia": "高血脂", "diabetes": "糖尿病", "高膽固醇血症": "高膽固醇"}
+        found: list[str] = []
+        found_keys: set[str] = set()
+        for cl in _split_clauses(text):
+            if _clause_negated(cl):
+                continue
+            for kw in chronic_keywords:
+                if kw.lower() in cl.lower():
+                    canon = _en_map.get(kw.lower(), kw)
+                    key = canon.lower()
+                    if key not in found_keys:
+                        found.append(canon)
+                        found_keys.add(key)
         if found:
             return found
-        if re.search(r"慢性病|高血壓|高血脂", text):
-            return [text.strip()[:50]]
+        if re.search(r"慢性病|高血壓|高血脂|高膽固醇|糖尿病", text):
+            for cl in _split_clauses(text):
+                if not _clause_negated(cl) and re.search(r"慢性病|高血壓|高血脂|高膽固醇|糖尿病", cl):
+                    return [cl.strip()[:50]]
         return None
 
     def _extract_family(self, text: str) -> list[str] | None:
@@ -739,6 +863,13 @@ class PreVisitIntakeTool:
         return None
 
     def _extract_description(self, text: str) -> str | None:
+        # Doctor question "有，血糖多少正常" must not become symptom (avoid pollution in stage3)
+        if re.match(r"^\s*有[，,]", text) and re.search(r"血糖|多少正常|飲食|水果", text):
+            return None
+        # Stage1 multi-field "有高血壓" is chronic, not symptom
+        if "高血壓" in text and "無過敏" in text and "metformin" in text.lower():
+            if not any(kw in text for kw in ["頭暈", "口渴", "頻尿", "口乾", "跑廁所", "很渴", "疲倦", "疼痛", "麻"]):
+                return None
         # Look for symptom descriptions - collect all matching sentences
         # Include colloquial variants that map via NORMALIZATION_MAP (嘴巴乾→口乾, 跑廁所→頻尿)
         symptom_keywords = ["血糖", "頭暈", "口渴", "頻尿", "疲倦", "不舒服", "疼痛", "麻", "視力", "傷口", "感染", "血壓", "尿尿", "夜尿", "起夜", "多尿", "嘴巴乾", "嘴巴很乾", "口乾", "跑廁所", "上廁所", "口乾舌燥", "很渴", "很乾"]
@@ -756,23 +887,45 @@ class PreVisitIntakeTool:
         return None
 
     def _extract_severity(self, text: str) -> str | None:
-        HEDGE_RE = re.compile(r"有點|稍微|好像|吧|大概|有點嚴重")
+        HEDGE_RE = re.compile(r"有點|稍微|好像|吧|有點嚴重")
         if HEDGE_RE.search(text):
             if text.strip() in ("有點嚴重吧", "有點嚴重", "稍微嚴重"):
                 return None
-            cleaned = text.replace("有點嚴重吧", "").replace("有點嚴重", "").replace("稍微嚴重", "")
-            if not re.search(r"\d+分|輕度|中度|重度|\d+/\d+", cleaned):
+            cleaned = text.replace("有點嚴重吧", "").replace("有點嚴重", "").replace("稍微嚴重", "").replace("有點", "").replace("稍微", "").replace("好像", "").replace("吧", "")
+            if not re.search(r"\d+分|輕度|中度|重度|\d+/\d+|\b(10|[1-9])\b", cleaned):
                 return None
-        if re.search(r"輕度|輕微|還好|不嚴重", text):
+        if re.search(r"輕度|輕微|還好|不嚴重|不太嚴重", text):
             return "輕度"
-        if re.search(r"中度|中等|普通", text):
+        if re.search(r"中度|中等|普通|還行", text):
             return "中度"
-        if re.search(r"重度|嚴重|很嚴重|非常", text):
+        if re.search(r"重度|嚴重|很嚴重|非常|非常嚴重", text):
             return "重度"
-        m = re.search(r"(\d+)\s*分|程度\s*(\d+)|嚴重度\s*(\d+)", text)
+        m_frac = re.search(r"(\d+)\s*/\s*10", text)
+        if m_frac:
+            try:
+                n = int(m_frac.group(1))
+                if 1 <= n <= 3:
+                    return "輕度"
+                if 4 <= n <= 6:
+                    return "中度"
+                if 7 <= n <= 10:
+                    return "重度"
+            except Exception:
+                pass
+        m = re.search(r"(\d+)\s*分|程度\s*(\d+)|嚴重度\s*(\d+)|(?:大概|大約|約|差不多)?\s*(10|[1-9])\s*(?:分|左右)?", text)
         if m:
-            val = m.group(1) or m.group(2) or m.group(3)
-            return f"{val}分"
+            val_str = m.group(1) or m.group(2) or m.group(3) or m.group(4)
+            try:
+                n = int(val_str)
+                if 1 <= n <= 3:
+                    return "輕度"
+                if 4 <= n <= 6:
+                    return "中度"
+                if 7 <= n <= 10:
+                    return "重度"
+            except Exception:
+                pass
+            return f"{val_str}分"
         if re.search(r"程度|嚴重", text):
             return text.strip()[:50]
         return None
@@ -780,18 +933,28 @@ class PreVisitIntakeTool:
     def _extract_questions(self, text: str) -> list[str] | None:
         if not re.search(r"想問|想請問|？|\?|嗎|如何|怎麼|為何|為什麼|多少|是否", text):
             return None
-        if re.search(r"想問|想請問|想了解|問題是|疑問", text):
+        if re.search(r"想問|想請問|想了解|問題是|疑問|還要幫我記|幫我記一個", text):
             parts = re.split(r"[？?；;]", text)
             questions = [p.strip() for p in parts if p.strip() and len(p.strip()) > 3]
             if questions:
                 return questions[:5]
             return [text.strip()[:200]]
+        # Bare question without 想問 is education, not doctor question — avoid pollution
+        # Allow "有，..." and "還要幫我記一個" prefixed answers in stage3 (they are doctor questions, not education)
+        if "想問" not in text and "還要幫我記一個" not in text and "幫我記一個" not in text and re.search(r"飲食|血糖|衛教|水果|芭樂", text):
+            if not re.match(r"^\s*有[，,]\s*", text):
+                return None
+            remainder = re.sub(r"^\s*有[，,]\s*", "", text).strip()
+            if remainder:
+                return [remainder[:200]]
         if "？" in text or "?" in text or "嗎" in text or "如何" in text or "怎麼" in text:
+            if "想問" not in text:
+                return None
             parts = re.split(r"[？?；;]", text)
             questions = [p.strip() for p in parts if p.strip()]
             if questions:
                 return questions[:5]
-        if len(text.strip()) > 5:
+        if len(text.strip()) > 5 and "想問" in text:
             return [text.strip()[:200]]
         return None
 
@@ -876,4 +1039,3 @@ def format_stage_progress(intake: PreVisitIntake | dict[str, Any] | None) -> str
 
 def get_stage_progress_text(intake: PreVisitIntake | dict[str, Any] | None) -> str:
     return format_stage_progress(intake)
-

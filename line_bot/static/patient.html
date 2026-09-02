@@ -70,6 +70,7 @@
     <div id="grant-box" class="success hidden" aria-live="polite">
       <strong>分享碼已建立</strong>
       <p id="grant-token" class="share-token"></p>
+      <img id="grant-qr" class="hidden" alt="分享碼 QR Code" style="display:block;max-width:200px;margin:12px auto;border-radius:8px">
       <p id="grant-expiry" class="muted"></p>
       <div class="button-row"><button id="copy" class="secondary" type="button">複製分享碼</button><button id="revoke" class="danger" type="button">立即撤銷</button></div>
       <p id="grant-status" class="muted"></p>
@@ -153,6 +154,12 @@
       const data = await api(`/api/patient/sessions/${encodeURIComponent(state.sessionId)}/share`, {method:'POST', headers:{...authHeaders(),'content-type':'application/json'}, body:JSON.stringify({allowed_clinician_id:$('#clinician').value.trim() || null})});
       state.grantId = data.grant_id || ''; state.grantToken = data.token || '';
       $('#grant-token').textContent = state.grantToken || '伺服器未回傳分享碼'; $('#grant-expiry').textContent = data.expires_at ? '有效期限：' + new Date(data.expires_at).toLocaleString() : '';
+      if (data.qr_code_data_uri) {
+        $('#grant-qr').src = data.qr_code_data_uri;
+        $('#grant-qr').classList.remove('hidden');
+      } else {
+        $('#grant-qr').classList.add('hidden');
+      }
       $('#grant-status').textContent = '狀態：ACTIVE｜單次使用。若不再分享，請立即撤銷。'; $('#grant-box').classList.remove('hidden');
     } catch (error) { showError(error.message); }
     finally { setBusy(button, false, '建立短效分享碼', Boolean(state.session && state.session.review && state.session.review.can_share)); }

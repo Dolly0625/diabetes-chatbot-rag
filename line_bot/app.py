@@ -41,7 +41,7 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 HONEST_FALLBACK_PUSH_TEXT = "這題我還沒整理出可靠的回答，建議看診時直接問醫師。要我幫你把這題記到『想問醫師的問題』嗎？"
 QUEUED_FALLBACK_TEXT = "查詢排隊中，稍後推送"
-ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你 📋"
+ASYNC_PLACEHOLDER_REPLY = "幫你查衛教資料中，查到後立刻傳給你。"
 # Canonical async boundary classification; legacy reason codes remain
 # readable for stored workflow records and compatibility tests.
 DEPENDENCY_OR_TIMEOUT_REASON = "DEPENDENCY_OR_TIMEOUT"
@@ -734,6 +734,7 @@ def _push_text(
     event_id: str | None = None,
     *,
     deadline_guard: Any | None = None,
+    quick_actions: list[dict[str, str]] | None = None,
 ) -> bool:
     if deadline_guard is None:
         try:
@@ -759,7 +760,13 @@ def _push_text(
                 api = _get_messaging_api()
                 if api is None:
                     return False
-                from linebot.v3.messaging import PushMessageRequest, TextMessage
+                from linebot.v3.messaging import (
+                    MessageAction,
+                    PushMessageRequest,
+                    QuickReply,
+                    QuickReplyItem,
+                    TextMessage,
+                )
 
                 kwargs: dict[str, Any] = {}
                 # LINE's generated SDK exposes both a retry key and a native
@@ -784,8 +791,19 @@ def _push_text(
                             kwargs["_request_timeout"] = max(0.001, remaining)
                 except Exception:
                     pass
+
+                quick_reply = None
+                if quick_actions:
+                    items = [
+                        QuickReplyItem(action=MessageAction(label=item["label"], text=item["text"]))
+                        for item in quick_actions
+                        if isinstance(item, dict) and item.get("label") and item.get("text")
+                    ]
+                    if items:
+                        quick_reply = QuickReply(items=items)
+
                 api.push_message(
-                    PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text)]),
+                    PushMessageRequest(to=line_user_id, messages=[TextMessage(text=text, quick_reply=quick_reply)]),
                     **kwargs,
                 )
                 # A transport that returned success owns the event even if
@@ -801,6 +819,39 @@ def _push_text(
     finally:
         _finish_push(event_id, success=success)
     return False
+
+
+def _schedule_image_ocr_push(
+    orchestrator: Any,
+    line_user_id: str,
+    event_id: str,
+    image_bytes: bytes,
+) -> None:
+    def _execute_ocr_and_push() -> None:
+        try:
+            res = orchestrator.handle_image(
+                event_id=event_id,
+                line_user_id=line_user_id,
+                image_bytes=image_bytes,
+            )
+            reply = res.reply
+            quick_actions = [{"label": "我要準備看診", "text": "我要準備看診"}]
+            _push_text(
+                line_user_id=line_user_id,
+                text=reply,
+                event_id=f"ocr-push-{event_id}",
+                quick_actions=quick_actions,
+            )
+            _mark_event_pushed(orchestrator, event_id)
+        except Exception as exc:
+            logger.exception("Async OCR push failed for event %s: %s", event_id, exc)
+
+    thread = threading.Thread(
+        target=_execute_ocr_and_push,
+        name=f"ocr-push-{event_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _mark_event_pushed(orchestrator: Any | None, event_id: str | None) -> bool:
@@ -1320,7 +1371,7 @@ def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, st
         if base is not None:
             return [{"label": "正確", "text": "正確"}, {"label": "更正", "text": "更正"}] + base[:2]
         return [{"label": "正確", "text": "正確"}, {"label": "更正", "text": "更正"}]
-    if status == "NEEDS_CONFIRMATION":
+    if status in ("NEEDS_CONFIRMATION", "AWAITING_CONFIRMATION") or "請確認是否完成" in reply or "確認完成" in reply or "看診前資料已整理完成" in reply or "修改看診資料" in reply:
         return REVIEW_ACTIONS
     if status == "NEEDS_CLARIFICATION" and "家人本人描述" in reply:
         return PROXY_SOURCE_ACTIONS
@@ -1366,25 +1417,45 @@ def _quick_actions_for_status(status: str, reply: str = "") -> list[dict[str, st
 
 
 def _download_image_content(message_id: str) -> bytes | None:
-    """Download image via MessagingApiBlob.get_message_content."""
+    """Download image via httpx direct endpoint with MessagingApiBlob fallback."""
     if not message_id:
         return None
-    blob_api = _get_blob_api()
-    if blob_api is None:
+    token = _get_access_token()
+    if not token:
+        logger.warning("No LINE access token available to download image")
         return None
+
+    # Method 1: Direct HTTPX download from LINE Data API (fastest, immune to SDK wrapper variations)
     try:
-        # get_message_content returns bytes or file-like
-        content = blob_api.get_message_content(message_id=message_id)
-        if isinstance(content, (bytes, bytearray)):
+        import httpx
+
+        url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = httpx.get(url, headers=headers, timeout=20.0)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+        logger.warning("HTTPX image download returned status %d: %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.warning("HTTPX image download exception for message %s: %s", message_id, exc)
+
+    # Method 2: SDK MessagingApiBlob fallback
+    blob_api = _get_blob_api()
+    if blob_api is not None:
+        try:
+            content = blob_api.get_message_content(message_id=message_id)
+            if isinstance(content, (bytes, bytearray)):
+                return bytes(content)
+            if hasattr(content, "read"):
+                return content.read()
+            if hasattr(content, "data"):
+                return bytes(getattr(content, "data"))
+            if hasattr(content, "raw_data"):
+                return bytes(getattr(content, "raw_data"))
             return bytes(content)
-        # Some SDK versions return response with .data or file object
-        if hasattr(content, "read"):
-            return content.read()  # type: ignore[union-attr]
-        if hasattr(content, "data"):
-            return bytes(getattr(content, "data"))
-        return bytes(content)  # type: ignore[arg-type]
-    except Exception:
-        return None
+        except Exception as exc:
+            logger.warning("Blob API download error for message %s: %s", message_id, exc)
+
+    return None
 
 
 # ── FastAPI routes ──────────────────────────────────────────────────────────
@@ -1501,19 +1572,15 @@ def _get_previsit_base_url(request: Any | None = None) -> str:
     return "https://example.com"
 
 
-def _previsit_launch_url(request: Any | None = None) -> tuple[str, str | None]:
-    """Return the one supported pre-visit entry URL for this deployment.
-
-    In the public demo, every LINE entry deliberately starts at ``/demo/previsit``.
-    That endpoint creates a fresh browser-only session and then redirects to the
-    dedicated room.  In particular, do not reuse the old LINE ProductSession via
-    a token here: doing so makes an old, half-finished LINE questionnaire appear
-    inside the new room.
-
-    A production LIFF deployment keeps its identity flow and opens the same
-    dedicated room without putting a credential in the URL.
-    """
+def _previsit_launch_url(request: Any | None = None, line_user_id: str | None = None) -> tuple[str, str | None]:
+    """Return the pre-visit entry URL for this session/user."""
     base = _get_previsit_base_url(request)
+    if line_user_id and line_user_id != "unknown":
+        try:
+            raw_token, sess_id = _create_previsit_token_for_user(line_user_id)
+            return f"{base}/patient/previsit-room?token={raw_token}&v={int(time.time())}", sess_id
+        except Exception as exc:
+            logger.warning("Failed to create previsit token for user %s: %s", line_user_id, exc)
     if _is_public_demo_web_enabled():
         return f"{base}/demo/previsit", None
     # LIFF mode: no token in URL; the browser verifies the LIFF ID token.
@@ -1643,8 +1710,9 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
     if not candidate_token and bearer_token and "." not in bearer_token:
         candidate_token = bearer_token
 
-    if candidate_token and _is_demo_intake_token_enabled():
+    if candidate_token:
         import re as _re
+
         if not _re.match(r"^[A-Za-z0-9_-]{16,64}$", candidate_token):
             raise HTTPException(status_code=401, detail="Invalid intake token")
         h = _hash_intake_token(candidate_token)
@@ -1652,6 +1720,7 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
         if rec is None:
             raise HTTPException(status_code=403, detail="Invalid intake token")
         from datetime import datetime as _dt, timezone as _tz
+
         try:
             exp_raw = rec.get("expires_at") or rec.get("expiresAt") or ""
             exp_dt = _dt.fromisoformat(str(exp_raw))
@@ -1662,8 +1731,6 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
         except HTTPException:
             raise
         except Exception:
-            pass
-        if rec.get("consumed_at"):
             pass
         sess_id = str(rec.get("product_session_id") or "")
         sess = orch.repository.get(sess_id)
@@ -1730,7 +1797,20 @@ def _is_previsit_room_meta_text(text: str) -> bool:
 
 
 def _previsit_room_current_question(session: Any) -> str:
-    return str(getattr(session, "pending_question", "") or "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。")
+    if hasattr(session, "intake_snapshot") and session.intake_snapshot:
+        try:
+            from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
+
+            agent = LeanIntakeAgent.from_env()
+            stage = getattr(session, "intake_stage", "stage1") or "stage1"
+            q, _ = agent._generate_next_question(stage, session.intake_snapshot)
+            if q:
+                return q
+        except Exception:
+            pass
+    if hasattr(session, "pending_question") and session.pending_question:
+        return str(session.pending_question)
+    return "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。"
 
 
 _PREVISIT_CONFIRMATION_RE = re.compile(
@@ -1893,7 +1973,14 @@ def previsit_room_portal() -> FileResponse:
     p = Path(__file__).parent / "static" / "previsit-room.html"
     if not p.is_file():
         raise HTTPException(status_code=404, detail="Previsit room portal not found")
-    return FileResponse(p, headers={"Cache-Control": "no-store"})
+    return FileResponse(
+        p,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/demo/previsit")
@@ -1924,18 +2011,41 @@ def get_previsit_room(
 ) -> JSONResponse:
     token = _previsit_room_token(request, x_intake_token, intake_token)
     sess = _get_previsit_session(authorization, x_line_user_id, token)
+
+    pending_question = sess.pending_question
+    pending_field = sess.pending_field
+    quick_replies: list[dict[str, str]] = []
+    try:
+        from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
+
+        agent = LeanIntakeAgent.from_env()
+        stage = sess.intake_stage or "stage1"
+        dyn_q, dyn_f = agent._generate_next_question(stage, sess.intake_snapshot)
+        if dyn_q:
+            pending_question = dyn_q
+        if dyn_f:
+            pending_field = dyn_f
+        quick_replies = agent._generate_quick_replies(stage, sess.intake_snapshot)
+    except Exception:
+        pass
+
     return JSONResponse(
         content={
             "session_id": sess.session_id,
             "version": sess.version,
             "status": sess.status,
-            "intake_stage": sess.intake_stage,
+            "intake_stage": sess.intake_stage or "stage1",
             "intake_snapshot": sess.intake_snapshot.model_dump(mode="json"),
-            "pending_question": sess.pending_question,
-            "pending_field": sess.pending_field,
+            "pending_question": pending_question,
+            "pending_field": pending_field,
+            "quick_replies": quick_replies,
             "system_risk_classification": sess.system_risk_classification,
         },
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -1966,7 +2076,7 @@ def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any)
     if not text:
         raise HTTPException(status_code=422, detail="message is required")
     # "開始新的整理" is the idempotent reset / bootstrap command: allow it even if initial version is 0
-    if text not in ("開始新的整理", "開始整理"):
+    if text not in ("開始新的整理", "開始整理", "繼續整理") and body.version > 0:
         if body.version != sess.version:
             raise HTTPException(status_code=409, detail="Version conflict")
     # red-flag pre-check before AI, does not pollute intake
@@ -2035,71 +2145,24 @@ def _execute_previsit_chat_core(sess: Any, body: PrevisitChatRequest, orch: Any)
         except Exception:
             pass
 
-    if text in ("開始新的整理", "開始整理"):
-        first_q = "目前有固定吃藥或打胰島素嗎？知道藥名就直接說；不確定也沒關係。"
-        new_sess = sess.model_copy(update={
-            "authorization_status": AuthorizationStatus.PATIENT_SELF,
-            "subject_id_hash": sess.principal_id_hash,
-            "information_source": InformationSource.SELF_REPORTED,
-            "permission_scopes": [
-                PermissionScope.CREATE_OWN_INTAKE,
-                PermissionScope.VIEW_OWN_SUMMARY,
-                PermissionScope.SHARE_OWN_SUMMARY,
-            ],
-            "status": "ACTIVE",
-            "intake_snapshot": PreVisitIntake(),
-            "intake_stage": "stage1",
-            "pending_field": "known_medications",
-            "pending_question": first_q,
-            "pending_action": None,
-        }, deep=True)
-        try:
-            saved = orch.repository.save(new_sess, expected_version=sess.version)
-        except Exception:
-            saved = new_sess
-        resp = {
-            "reply": first_q,
-            "status": "ACTIVE",
-            "intake_stage": "stage1",
-            "version": getattr(saved, "version", sess.version + 1),
-            "intake_snapshot": saved.intake_snapshot.model_dump(mode="json"),
-            "quick_replies": [{"label": "沒有吃藥", "text": "沒有吃藥"}, {"label": "不確定藥名", "text": "不確定藥名"}],
-        }
+    try:
+        from tfda_context_gate.intake.lean_agent import LeanIntakeAgent
+        agent = LeanIntakeAgent.from_env()
+        updated_sess, agent_resp = agent.process_turn(sess, text)
+        saved = orch.repository.save(updated_sess, expected_version=sess.version)
+        agent_resp["version"] = saved.version
         if body.client_message_id:
             with _web_chat_lock:
-                _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
-        return resp
+                _web_chat_dedup[(sess.session_id, body.client_message_id)] = agent_resp
+        return agent_resp
 
-    text_for_processing = text
-    if getattr(sess, "pending_field", None) == "questions_for_doctor":
-        # Keep the patient bubble verbatim, but avoid storing its lead-in as a
-        # second doctor question.
-        text_for_processing = _clean_previsit_doctor_question(text) or text
-    try:
-        result = orch._process_text(sess, text_for_processing)
+    except HTTPException:
+        raise
     except Exception as exc:
+        from tfda_context_gate.product_session import ProductSessionConflict as _PSC
+        if isinstance(exc, _PSC) or "conflict" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Version conflict") from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    saved = orch.repository.get(sess.session_id)
-    if saved is None:
-        try:
-            saved = orch.repository.get(result.session_id)  # type: ignore[attr-defined]
-        except Exception:
-            saved = sess
-    if saved is None:
-        saved = sess
-    result_status = getattr(result, "status", saved.status)
-    resp = {"reply": getattr(result, "reply", ""), "status": result_status, "intake_stage": getattr(saved, "intake_stage", sess.intake_stage), "version": getattr(saved, "version", sess.version), "intake_snapshot": saved.intake_snapshot.model_dump(mode="json") if hasattr(saved, "intake_snapshot") else sess.intake_snapshot.model_dump(mode="json")}
-    resp["reply"] = _naturalize_previsit_reply(
-        resp["reply"],
-        text,
-        sess,
-        saved,
-        result_status,
-    )
-    if body.client_message_id:
-        with _web_chat_lock:
-            _web_chat_dedup[(sess.session_id, body.client_message_id)] = resp
-    return resp
 
 
 @app.post("/api/patient/previsit-room/chat")
@@ -2387,7 +2450,22 @@ def create_patient_share(
         )
     except ShareGrantDenied as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return JSONResponse(content=issue.model_dump(mode="json"))
+
+    qr_code_data_uri = ""
+    try:
+        from io import BytesIO
+        import qrcode
+
+        image = qrcode.make(issue.token)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        qr_code_data_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception as exc:
+        logger.warning("QR code generation failed: %s", exc)
+
+    payload = issue.model_dump(mode="json")
+    payload["qr_code_data_uri"] = qr_code_data_uri
+    return JSONResponse(content=payload)
 
 
 @app.post("/api/patient/share/{grant_id}/revoke")
@@ -2573,7 +2651,7 @@ async def callback(
                         # card always opens the dedicated patient room; demo
                         # uses /demo/previsit so it cannot resurrect a stale
                         # LINE intake session.
-                        previsit_url, sess_id = _previsit_launch_url(request)
+                        previsit_url, sess_id = _previsit_launch_url(request, line_user_id=str(user_id))
                         flex = _build_previsit_flex_message(previsit_url)
                         sent = False
                         try:
@@ -2849,29 +2927,17 @@ async def callback(
                 orchestrator = _get_conversation_orchestrator()
                 webhook_event_id = ev.get("webhookEventId") or message_id
                 if orchestrator is not None and webhook_event_id and user_id != "unknown":
-                    product_result = orchestrator.handle_image(
-                        event_id=str(webhook_event_id),
+                    _send(reply_token, "已收到您的藥袋照片，正在為您辨識藥品資訊，請稍候...")
+                    _schedule_image_ocr_push(
+                        orchestrator=orchestrator,
                         line_user_id=str(user_id),
+                        event_id=str(webhook_event_id),
                         image_bytes=image_bytes,
                     )
-                    reply = product_result.reply
-                    try:
-                        session = orchestrator.session_for_user(str(user_id))
-                        intake = getattr(session, "intake_snapshot", None) if session else None
-                        reply = _enrich_reply_with_stage_progress(reply, product_result.status, intake)
-                    except Exception:
-                        pass
-                    resume_actions = _resolve_resume_quick_actions(product_result)
-                    if resume_actions is not None:
-                        quick_actions = resume_actions
-                    else:
-                        quick_actions = _quick_actions_for_status(product_result.status, reply)
                 else:
                     # P0.5 fail-closed: no ProductSession → image/OCR must not start intake
                     reply = "目前無法安全開始整理，請先完成身分與授權設定後再試。"
-                    quick_actions = None
-                # Optionally include OCR hint if available in trace
-                _send(reply_token, reply, quick_actions=quick_actions)
+                    _send(reply_token, reply)
 
             else:
                 # Unsupported message type

@@ -103,10 +103,12 @@ _METFORMIN_SELF_RE = re.compile(r"我(有|正在)?吃\s*(metformin|二甲雙胍)
 _METFORMIN_QUESTION_ONLY_RE = re.compile(r"(metformin|二甲雙胍).*會.*(傷腎|副作用)|.*副作用.*(metformin|二甲雙胍)", re.IGNORECASE)
 _FRUIT_QUERY_RE = re.compile(r"水果|芭樂|蘋果|香蕉", re.IGNORECASE)
 _FRUIT_FOLLOWUP_RE = re.compile(r"那一天可以吃多少|一天可以吃多少|可以吃多少|那.*可以吃多少|所以每天大概能碰幾份|每天大概能碰幾份", re.IGNORECASE)
-_WANT_QUESTION_RE = re.compile(r"想問醫師|想問醫生|問題.*醫師|問題.*醫生", re.IGNORECASE)
+_WANT_QUESTION_RE = re.compile(r"想問醫師|想問醫生|問題.*醫師|問題.*醫生|想問他|想問一下|我想問", re.IGNORECASE)
+_WANT_QUESTION_BROAD_RE = re.compile(r"想問", re.IGNORECASE)
 _AGREE_RE = re.compile(r"^\s*(好|好的|可以|同意|要|幫我記|記下來)", re.IGNORECASE)
 _DISAGREE_RE = re.compile(r"不要|不用|不要記|略過|不同意", re.IGNORECASE)
 _INJECTION_RE = re.compile(r"忽略規則|ignore.*instruction|system prompt|提升權限|你是醫師", re.IGNORECASE)
+_REPHRASE_RE = re.compile(r"口語化|白話|講簡單|簡單一點|容易懂|聽不懂|看不懂|再解釋|再說一次|舉例|換個方式|用白話|白話一點", re.IGNORECASE)
 
 # For cross-turn fruit: if last turns contain fruit education, resolve followup
 def _resolve_fruit_followup(envelope: Any) -> str | None:
@@ -320,9 +322,15 @@ class DeterministicConversationInterpreter:
         # 5. Education question detection (including cross-turn resolved)
         # Check if current message looks like education question
         is_edu = False
-        edu_keywords = ("可以吃", "能吃", "可以喝", "飲食", "水果", "芭樂", "血糖", "胰島素", "metformin", "二甲雙胍", "會傷腎", "副作用")
-        if any(k in n for k in edu_keywords) and ("？" in n or "嗎" in n or "怎麼" in n or "如何" in n):
+        edu_keywords = ("可以吃", "能吃", "可以喝", "飲食", "水果", "芭樂", "血糖", "胰島素", "metformin", "二甲雙胍", "會傷腎", "副作用", "蛋糕", "甜點", "甜食")
+        has_q = ("?" in n or "？" in n or "？" in cm_strip or "?" in cm_strip or "嗎" in n or "怎麼" in n or "如何" in n)
+        if any(k in n for k in edu_keywords) and has_q:
             is_edu = True
+        if not is_edu and ("蛋糕" in n or "甜點" in n) and has_q:
+            is_edu = True
+        if not is_edu and _REPHRASE_RE.search(n):
+            if len(n.strip()) <= 20:
+                is_edu = True
         # Cross-turn fruit followup resolution
         fruit_resolved = _resolve_fruit_followup(envelope)
         if fruit_resolved:
@@ -342,8 +350,8 @@ class DeterministicConversationInterpreter:
                     if _METFORMIN_SELF_RE.search(p_strip) and "？" not in p_strip and "嗎" not in p_strip and "水果" not in p_strip:
                         continue
                     if any(k in p_strip for k in edu_keywords):
-                        # Prefer parts with question punctuation or 水果
-                        if "水果" in p_strip or "？" in p_strip or "嗎" in p_strip:
+                        # Prefer parts with question punctuation or 水果 (handle both ？ and ? after NFKC)
+                        if "水果" in p_strip or "？" in p_strip or "?" in p_strip or "嗎" in p_strip:
                             best = p_strip
                             break
                         if best is None:
@@ -352,7 +360,7 @@ class DeterministicConversationInterpreter:
                 # If resolved_q still looks like intake-only, fallback to question part
                 if _METFORMIN_SELF_RE.search(resolved_q or "") and "水果" not in (resolved_q or ""):
                     for p in parts:
-                        if "水果" in p or "可以吃" in p:
+                        if "水果" in p or "可以吃" in p or "蛋糕" in p:
                             resolved_q = p.strip()
                             break
             else:
@@ -364,12 +372,55 @@ class DeterministicConversationInterpreter:
             # But if is_edu and candidates are from same sentence, still intake answer
             intents.append("INTAKE_ANSWER")
 
-        # 7. Doctor question
-        if _WANT_QUESTION_RE.search(n):
-            # Extract candidate after 想問
-            m = re.search(r"想問醫師(.+)", n)
-            doctor_candidate = m.group(1).strip()[:500] if m else cm_strip[:500]
+        # 7. Doctor question — broad: any 想問 + question-like should become pending question
+        has_want = bool(_WANT_QUESTION_RE.search(n) or _WANT_QUESTION_BROAD_RE.search(n))
+        has_question_like = bool(re.search(r"[？?]|嗎|可以吃|能不能|是否|怎麼|如何", n))
+        if _WANT_QUESTION_RE.search(n) or (has_want and has_question_like):
+            doctor_candidate = cm_strip[:500]
+            _stripped_for_edu = doctor_candidate
+            m_tmp = re.search(r"想問(?:醫師|醫生|他|一下)?\s*[:：]?\s*(.+)", n)
+            if m_tmp and m_tmp.group(1).strip():
+                _stripped_for_edu = m_tmp.group(1).strip()[:500]
             intents.append("ADD_DOCTOR_QUESTION")
+            if "INTAKE_ANSWER" not in intents:
+                intents.append("INTAKE_ANSWER")
+                if not any(c.field_name == "questions_for_doctor" for c in candidates):
+                    try:
+                        candidates.append(
+                            IntakeCandidate(
+                                field_name="questions_for_doctor",
+                                candidate_value=doctor_candidate[:500],
+                                source_quote=cm_strip[:100],
+                                confidence=0.85,
+                                explicitly_stated=True,
+                                requires_confirmation=False,
+                            )
+                        )
+                    except Exception:
+                        pass
+            is_cake = any(k in n for k in ("蛋糕", "甜點", "甜食"))
+            is_edu_food = any(k in n for k in ("蛋糕", "甜點", "水果", "飲食", "可以吃", "能吃", "芭樂"))
+            if (not is_edu or is_cake) and has_question_like and is_edu_food:
+                if not is_edu:
+                    is_edu = True
+                    if "EDUCATION_QUESTION" not in intents:
+                        intents.append("EDUCATION_QUESTION")
+                if is_cake and resolved_q is not None and "糖尿病" not in resolved_q:
+                    qc = resolved_q
+                    qc = re.sub(r"^(我想問他|我想問|想問他|想問|糖尿病我想問他|糖尿病我想問)\s*", "", qc).strip()
+                    if qc.startswith("我"):
+                        qc = qc[1:].lstrip()
+                    if "糖尿病" not in qc:
+                        qc = f"糖尿病{qc}" if not qc.startswith("糖尿病") else qc
+                    resolved_q = qc
+                elif is_cake and resolved_q is None:
+                    qc = _stripped_for_edu
+                    qc = re.sub(r"^(我想問他|我想問|想問他|想問)\s*", "", qc).strip()
+                    if qc.startswith("我"):
+                        qc = qc[1:].lstrip()
+                    if "糖尿病" not in qc:
+                        qc = f"糖尿病{qc}"
+                    resolved_q = qc
 
         # 8. Chitchat / fallback
         if not intents:

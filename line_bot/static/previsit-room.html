@@ -2,6 +2,9 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>看診前 AI 對談室｜糖尿病照護 Demo</title>
 <style>
@@ -79,6 +82,7 @@ body{background:#f4f8f6}
 <span id="progressText" class="muted">我們一步一步來</span>
 <span id="shareText" class="badge warn hidden">尚未分享</span>
 </div>
+<div id="medBanner" class="hidden" style="margin-top:6px;background:#e8f5f1;border:1px solid #b7dfd4;border-radius:8px;padding:6px 10px;font-size:0.84rem;color:#08634f;font-weight:600;display:flex;align-items:center;justify-content:space-between"><span>已帶入藥袋：<span id="medBannerText"></span></span><button id="clearMedBtn" type="button" style="background:transparent;border:0;color:#9b1c1c;font-size:0.8rem;cursor:pointer;text-decoration:underline">清除</button></div>
 </header>
 
 <main id="chat" class="chat" role="log" aria-live="polite" aria-relevant="additions" aria-label="對談訊息"></main>
@@ -128,10 +132,19 @@ body{background:#f4f8f6}
   const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const announce = (msg) => { liveStatus.textContent = msg; };
   const buildUrl = (path) => {
-    if (!opaqueToken) return path;
-    const sep = path.includes("?") ? "&" : "?";
-    return path + sep + "token=" + encodeURIComponent(opaqueToken);
+    let u = path;
+    if (opaqueToken) {
+      const sep = u.includes("?") ? "&" : "?";
+      u += sep + "token=" + encodeURIComponent(opaqueToken);
+    }
+    const sep2 = u.includes("?") ? "&" : "?";
+    return u + sep2 + "_ts=" + Date.now();
   };
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) {
+      window.location.reload();
+    }
+  });
   const authHeaders = () => {
     const h = { "content-type": "application/json" };
     if (opaqueToken) h["Authorization"] = "Bearer " + opaqueToken;
@@ -213,12 +226,32 @@ body{background:#f4f8f6}
     progressText.textContent = stageLabels[stage] || (percent >= 100 ? "內容都整理好了" : "我們一步一步來");
     stageText.textContent = stageBadgeLabels[stage] || "一起整理";
     fill.style.width = percent + "%";
+
+    const medBanner = document.getElementById("medBanner");
+    const medBannerText = document.getElementById("medBannerText");
+    const clearMedBtn = document.getElementById("clearMedBtn");
+    if (medBanner && medBannerText) {
+      const snap = data.intake_snapshot || (data.review && data.review.intake) || {};
+      const meds = snap.known_medications || [];
+      if (Array.isArray(meds) && meds.length) {
+        medBannerText.textContent = Array.from(new Set(meds)).join("、");
+        medBanner.classList.remove("hidden");
+        if (clearMedBtn && !clearMedBtn.onclick) {
+          clearMedBtn.onclick = async () => {
+            const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+            await doChat("我想修改用藥，不帶入此藥袋紀錄", cid, false);
+          };
+        }
+      } else {
+        medBanner.classList.add("hidden");
+      }
+    }
   };
   const shouldShowSummary = (data) => {
     if (data.red_flag) return false;
     if (data.system_risk_classification && data.system_risk_classification.level === "RED_FLAG") return false;
-    if (data.status === "COMPLETED") return true;
-    if (data.intake_stage === "submitted") return true;
+    if (data.intake_stage === "stage1" || data.intake_stage === "stage2" || data.intake_stage === "stage3") return false;
+    if (data.intake_stage === "submitted" || data.status === "SUBMITTED") return true;
     if (data.status === "AWAITING_CONFIRMATION" || data.status === "NEEDS_CONFIRMATION") return true;
     if (data.intake_stage === "review" && data.intake_snapshot) {
       const snap = data.intake_snapshot;
@@ -748,24 +781,13 @@ body{background:#f4f8f6}
     if (!probe) {
       addBubble("ai", "整理室暫時載入失敗，請重新整理這個頁面後再試。資料尚未送出。");
       progressText.textContent = "目前還不能開始，請重新整理頁面。";
-    } else if (state.hasDraft) {
-      // A room link means the user has already chosen this task.  Resume the
-      // focused question directly instead of making them decide through a
-      // blocking system dialog.
-      renderQuick(state.lastDraft.quick_replies || state.lastDraft.quickReplies || []);
-      renderSummary(state.lastDraft);
-      updateProgress(state.lastDraft);
-      const nextQuestion = state.lastDraft.pending_question || state.lastDraft.reply || "請回答目前這一題就好。";
-      if (!shouldShowSummary(state.lastDraft)) addBubble("ai", "我們接著整理，請回答這一題：" + nextQuestion);
-      announce("已載入目前整理進度");
     } else {
-      // Opening the dedicated room is an explicit request to begin intake.
-      // Do not show the LINE welcome flow or treat a session version as a
-      // draft; start the first focused question instead.
-      addBubble("ai", "好，我們一起整理看診前資料。一次回答一題就好。");
-      const cid = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + "-initial";
-      await doChat("開始新的整理", cid, false, false);
-      announce("已開始新的整理");
+      let nextQuestion = probe.pending_question || probe.reply || "";
+      if (!nextQuestion) {
+        nextQuestion = "你好！我是看診前資料整理小幫手。\n\n想先跟您確認：平常有沒有藥物或食物過敏、或是過去有高血壓等其他慢性病、家人有糖尿病史呢？（如果知道請直接告訴我，沒有請回「無」）";
+      }
+      if (!shouldShowSummary(probe)) addBubble("ai", nextQuestion);
+      announce("已載入看診前對談室");
     }
   })();
 })();
