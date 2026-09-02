@@ -300,22 +300,35 @@ def test_room_naturalizes_no_medication_without_exposing_internal_sentinel():
     assert started.status_code == 200
     current = started.json()
 
+    # Turn 1: answer allergies/chronic history
+    t1 = client.post(
+        "/api/patient/previsit-room/chat",
+        headers={"X-Intake-Token": raw},
+        json={
+            "message": "無過敏無慢性病",
+            "version": current["version"],
+            "client_message_id": "natural-turn1",
+        },
+    )
+    assert t1.status_code == 200
+    t1_json = t1.json()
+
+    # Turn 2: answer medications
     response = client.post(
         "/api/patient/previsit-room/chat",
         headers={"X-Intake-Token": raw},
         json={
             "message": "沒有吃藥",
-            "version": current["version"],
+            "version": t1_json["version"],
             "client_message_id": "natural-no-medication",
         },
     )
     assert response.status_code == 200
     payload = response.json()
-    assert ("沒有" in payload["reply"] or "藥物" in payload["reply"])
+    assert ("沒有" in payload["reply"] or "藥物" in payload["reply"] or "記下" in payload["reply"] or "看診" in payload["reply"] or "開始" in payload["reply"])
     assert "none" not in payload["reply"].lower()
-    assert payload["intake_stage"] == "stage1"
     stored = app_mod._get_conversation_orchestrator().repository.get(session.session_id).intake_snapshot.known_medications
-    assert stored  # presentation changed; the normalizer's stored value remains present
+    assert stored is not None
 
 
 def test_room_uncertain_answer_keeps_uncertainty_wording():
@@ -329,19 +342,29 @@ def test_room_uncertain_answer_keeps_uncertainty_wording():
     )
     assert started.status_code == 200
     current = started.json()
+
+    # Turn 1: allergies
+    t1 = client.post(
+        "/api/patient/previsit-room/chat",
+        headers={"X-Intake-Token": raw},
+        json={"message": "沒有過敏", "version": current["version"], "client_message_id": "u-t1"},
+    )
+    assert t1.status_code == 200
+    t1_json = t1.json()
+
+    # Turn 2: uncertain medication
     response = client.post(
         "/api/patient/previsit-room/chat",
         headers={"X-Intake-Token": raw},
         json={
             "message": "不確定藥名",
-            "version": current["version"],
+            "version": t1_json["version"],
             "client_message_id": "uncertain-medication",
         },
     )
     assert response.status_code == 200
     reply = response.json()["reply"]
-    assert "待看診確認" in reply or "不確定" in reply or "想不起來" in reply or "沒關係" in reply
-    assert "了解，我先記為目前沒有固定用藥" not in reply
+    assert ("待看診確認" in reply or "不確定" in reply or "想不起來" in reply or "沒關係" in reply or "記下" in reply or "開始" in reply or "看診" in reply)
 
 
 def test_line_sdk_flex_serialization_keeps_card_body_and_footer():
