@@ -1454,7 +1454,7 @@ class ConversationOrchestrator:
         except Exception:
             pass
         if _is_rephrase_request(stripped):
-            return True
+            return False
         if _orch_should_use_formal(stripped, None):
             return True
         return True

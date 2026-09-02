@@ -989,6 +989,13 @@ def _should_schedule_formal_push(orchestrator: Any, line_user_id: str, text: str
     except Exception:
         pass
 
+    try:
+        from tfda_context_gate.line_orchestration.orchestrator import _is_rephrase_request
+        if _is_rephrase_request(stripped):
+            return False
+    except Exception:
+        pass
+
     return True
 
 
