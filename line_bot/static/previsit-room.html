@@ -132,10 +132,19 @@ body{background:#f4f8f6}
   const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const announce = (msg) => { liveStatus.textContent = msg; };
   const buildUrl = (path) => {
-    if (!opaqueToken) return path;
-    const sep = path.includes("?") ? "&" : "?";
-    return path + sep + "token=" + encodeURIComponent(opaqueToken);
+    let u = path;
+    if (opaqueToken) {
+      const sep = u.includes("?") ? "&" : "?";
+      u += sep + "token=" + encodeURIComponent(opaqueToken);
+    }
+    const sep2 = u.includes("?") ? "&" : "?";
+    return u + sep2 + "_ts=" + Date.now();
   };
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) {
+      window.location.reload();
+    }
+  });
   const authHeaders = () => {
     const h = { "content-type": "application/json" };
     if (opaqueToken) h["Authorization"] = "Bearer " + opaqueToken;

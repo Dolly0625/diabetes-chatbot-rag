@@ -1578,7 +1578,7 @@ def _previsit_launch_url(request: Any | None = None, line_user_id: str | None = 
     if line_user_id and line_user_id != "unknown":
         try:
             raw_token, sess_id = _create_previsit_token_for_user(line_user_id)
-            return f"{base}/patient/previsit-room?token={raw_token}", sess_id
+            return f"{base}/patient/previsit-room?token={raw_token}&v={int(time.time())}", sess_id
         except Exception as exc:
             logger.warning("Failed to create previsit token for user %s: %s", line_user_id, exc)
     if _is_public_demo_web_enabled():
