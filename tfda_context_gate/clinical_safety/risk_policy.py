@@ -25,7 +25,7 @@ class RiskSignalPolicy:
         ("FOOT_ULCER_OR_WOUND", re.compile(r"(?:足部|腳|腳趾).{0,8}(?:潰瘍|流膿|傷口.{0,6}(?:感染|流膿|惡臭|不癒合))", re.IGNORECASE)),
         ("WOUND_INFECTION", re.compile(r"傷口.{0,8}(?:感染|紅腫|流膿|惡臭)", re.IGNORECASE)),
         ("TISSUE_NECROSIS", re.compile(r"皮膚變黑|組織壞死|壞疽|gangrene|necrosis", re.IGNORECASE)),
-        ("SEVERE_HYPOGLYCEMIA", re.compile(r"低血糖.{0,12}(?:抽搐|昏迷|叫不醒|無法進食|冒冷汗|發抖|心悸|頭暈)|抽搐.{0,8}低血糖|冒冷汗|發抖冒冷汗|手抖冒冷汗|血糖.*(?:不到|只有|低於|量.*)?\s*([2-6][0-9]|70)", re.IGNORECASE)),
+        ("SEVERE_HYPOGLYCEMIA", re.compile(r"低血糖.{0,12}(?:抽搐|昏迷|叫不醒|無法進食|冷汗|冒冷汗|出冷汗|流冷汗|發抖|心悸|頭暈)|抽搐.{0,8}低血糖|冷汗|冒冷汗|出冷汗|流冷汗|發抖.*冷汗|手抖.*冷汗|血糖.*(?:不到|只有|低於|量.*)?\s*([2-6][0-9]|70)", re.IGNORECASE)),
         ("POSSIBLE_DKA", re.compile(r"(?:呼吸.*水果味|水果味.*呼吸|酮酸中毒|深快呼吸).{0,12}|(?:高血糖).{0,12}(?:持續嘔吐|腹痛)", re.IGNORECASE)),
         ("POSSIBLE_SEPSIS", re.compile(r"(?:傷口|感染).{0,12}(?:意識不清|呼吸急促|高燒不退|發冷發抖)", re.IGNORECASE)),
     )

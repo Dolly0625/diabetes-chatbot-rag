@@ -951,16 +951,44 @@ def _should_use_async_formal(text: str, task_type: str | None = None) -> bool:
 
 
 def _should_schedule_formal_push(orchestrator: Any, line_user_id: str, text: str) -> bool:
-    """Route all conversational chat messages to async formal RAG workflow.
+    """Determine if a text message should be processed asynchronously via formal RAG.
 
-    The old in-chat 8-question questionnaire has been completely retired in
-    favor of the dedicated Web Intake Room (/demo/previsit).
+    Returns False for:
+    - Pre-visit intake triggers (handled by dedicated web room card)
+    - Red flag emergencies (must reply immediately with synchronous 119 emergency warning)
+    - Chit-chat / greetings ('你好', '早安', etc. - must reply immediately)
+    - Identity / bot persona questions ('你是誰', etc. - must reply immediately)
+
+    Returns True for:
+    - All clinical / educational questions & multi-turn followups (RAG pipeline)
     """
     if orchestrator is None or not getattr(orchestrator, "use_formal", False):
         return False
     stripped = text.strip()
+    if not stripped:
+        return False
     if _is_previsit_trigger_text(stripped):
         return False
+
+    try:
+        from tfda_context_gate.clinical_safety import RiskSignalPolicy
+        if RiskSignalPolicy().classify(stripped).level == "RED_FLAG":
+            return False
+    except Exception:
+        pass
+
+    try:
+        from tfda_context_gate.workflow.intake_router import is_welcome_trigger
+        from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor
+        if is_welcome_trigger(stripped):
+            return False
+        if RuleBasedSignalExtractor.is_chit_chat_text(stripped):
+            return False
+        if RuleBasedSignalExtractor.is_identity_text(stripped):
+            return False
+    except Exception:
+        pass
+
     return True
 
 

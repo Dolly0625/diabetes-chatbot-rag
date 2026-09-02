@@ -1446,6 +1446,13 @@ class ConversationOrchestrator:
         except Exception:
             pass
         stripped = text.strip()
+        try:
+            from tfda_context_gate.workflow.intake_router import is_welcome_trigger
+            from tfda_context_gate.a_router.rules import RuleBasedSignalExtractor
+            if is_welcome_trigger(stripped) or RuleBasedSignalExtractor.is_chit_chat_text(stripped) or RuleBasedSignalExtractor.is_identity_text(stripped):
+                return False
+        except Exception:
+            pass
         if _is_rephrase_request(stripped):
             return True
         if _orch_should_use_formal(stripped, None):

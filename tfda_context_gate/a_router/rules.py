@@ -64,7 +64,7 @@ class RuleBasedSignalExtractor:
     )  # 診斷請求正則：自稱病患並詢問是否罹病／要求診斷
     _general_medication = re.compile(r"藥物|藥品|副作用|用途|作用|怎麼吃藥|insulin|metformin", re.IGNORECASE)  # 一般藥物資訊正則：副作用/用途等通識
     _symptoms = re.compile(
-        r"症狀|口渴|頻尿|冒冷汗|發抖|頭暈|胸痛|喘不過氣|呼吸困難|意識不清|昏迷|"
+        r"症狀|口渴|頻尿|冷汗|冒冷汗|出冷汗|流冷汗|發抖|頭暈|胸痛|喘不過氣|呼吸困難|意識不清|昏迷|"
         r"symptom|dizzy|sweat|chest pain|shortness of breath",
         re.IGNORECASE,
     )  # 症狀正則：常見糖尿病相關與急症症狀關鍵字
@@ -95,7 +95,7 @@ class RuleBasedSignalExtractor:
     )
     _emergency = re.compile(
         r"胸痛|胸悶|喘不過氣|呼吸困難|呼吸急促|意識不清|昏迷|昏厥|"
-        r"冒冷汗.*胸|大量出血|持續嘔吐|高燒不退|"
+        r"冷汗|冒冷汗|出冷汗|流冷汗|大量出血|持續嘔吐|高燒不退|"
         r"chest pain|shortness of breath|unconscious|emergency|severe chest",
         re.IGNORECASE,
     )
