@@ -2925,8 +2925,15 @@ async def callback(
                         reply = _maybe_enrich_entry_reply(reply, text)
                         quick_actions = _quick_actions_for_status(product_result.status, reply)
                     extra_msgs = None
-                    if getattr(product_result, "status", None) == "EMERGENCY":
+                    if (
+                        getattr(product_result, "fallback_reason", None) == "A_EMERGENCY"
+                        or getattr(product_result, "status", None) == "EMERGENCY"
+                    ):
                         extra_msgs = [_build_audit_trace_card(event_id=str(webhook_event_id), query=text, emergency=True)]
+                    elif getattr(product_result, "status", None) in {"INTAKE", "CLARIFICATION", "STAGE_COMPLETED"}:
+                        extra_msgs = [_build_audit_trace_card(event_id=str(webhook_event_id), query=text, extra_info="看診前整理室引導對話")]
+                    elif reply and reply != ASYNC_PLACEHOLDER_REPLY:
+                        extra_msgs = [_build_audit_trace_card(event_id=str(webhook_event_id), query=text, extra_info="臨床諮詢與系統指引")]
                     _send(reply_token, reply, quick_actions=quick_actions, extra_messages=extra_msgs)
                     _mark_text_dedup(str(user_id), text)
                 else:
