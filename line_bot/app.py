@@ -1825,7 +1825,13 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
             if demo_mode:
                 from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
-                sess = orch._load_or_create(f"demo-user-{candidate_token[:8]}")
+                demo_uid = f"demo-user-{candidate_token[:8]}"
+                try:
+                    sess = orch._load_or_create(demo_uid)
+                except Exception:
+                    sess = orch.session_for_user(demo_uid)
+                    if sess is None:
+                        sess = orch.repository.get(orch._session_id(demo_uid))
                 exp = _dt.now(_tz.utc) + _td(minutes=60)
                 try:
                     orch.repository.create_intake_token(h, sess.session_id, exp)
