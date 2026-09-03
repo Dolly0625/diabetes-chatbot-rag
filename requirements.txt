@@ -5,6 +5,8 @@ line-bot-sdk>=3.14,<4
 python-dotenv>=1.0,<2
 pydantic>=2.8,<3
 qrcode[pil]>=8,<9
+pyzbar>=0.1.9
+httpx>=0.24
 numpy>=1.24
 
 # === RAG & Knowledge Graph Engine ===
