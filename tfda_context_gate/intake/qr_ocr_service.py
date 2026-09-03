@@ -148,6 +148,9 @@ def get_tfda_drug_list() -> list[str]:
 
 def _ensure_zbar() -> None:
     """Patch ctypes.util.find_library for zbar on macOS Homebrew."""
+    import sys
+    if sys.platform != "darwin":
+        return
     try:
         import ctypes.util
         orig = ctypes.util.find_library
