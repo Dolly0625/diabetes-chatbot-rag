@@ -1820,9 +1820,20 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
             raise HTTPException(status_code=401, detail="Invalid intake token")
         h = _hash_intake_token(candidate_token)
         rec = orch.repository.get_intake_token(h)
+        demo_mode = os.getenv("LINE_DEMO_MODE", "").lower() in ("true", "1") or os.getenv("DEMO_INTAKE_TOKEN_ENABLED", "").lower() in ("true", "1")
         if rec is None:
+            if demo_mode:
+                from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+                sess = orch._load_or_create(f"demo-user-{candidate_token[:8]}")
+                exp = _dt.now(_tz.utc) + _td(minutes=60)
+                try:
+                    orch.repository.create_intake_token(h, sess.session_id, exp)
+                except Exception:
+                    pass
+                return sess
             raise HTTPException(status_code=403, detail="Invalid intake token")
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
         try:
             exp_raw = rec.get("expires_at") or rec.get("expiresAt") or ""
@@ -1830,7 +1841,14 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
             if exp_dt.tzinfo is None:
                 exp_dt = exp_dt.replace(tzinfo=_tz.utc)
             if _dt.now(_tz.utc) >= exp_dt:
-                raise HTTPException(status_code=401, detail="Intake token expired")
+                if demo_mode:
+                    exp = _dt.now(_tz.utc) + _td(minutes=60)
+                    try:
+                        orch.repository.create_intake_token(h, str(rec.get("product_session_id") or ""), exp)
+                    except Exception:
+                        pass
+                else:
+                    raise HTTPException(status_code=401, detail="Intake token expired")
         except HTTPException:
             raise
         except Exception:
@@ -1838,6 +1856,9 @@ def _get_previsit_session(authorization: str, demo_user_id: str, intake_token: s
         sess_id = str(rec.get("product_session_id") or "")
         sess = orch.repository.get(sess_id)
         if sess is None:
+            if demo_mode:
+                sess = orch._load_or_create(f"demo-user-{candidate_token[:8]}")
+                return sess
             raise HTTPException(status_code=403, detail="Token session not found")
         return sess
 
